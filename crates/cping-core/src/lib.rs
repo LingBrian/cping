@@ -14,7 +14,9 @@ pub mod config;
 pub mod error;
 pub mod export;
 pub mod local_ip;
+pub mod probe;
 pub mod result;
+pub mod scheduler;
 pub mod target;
 
 pub use classify::{classify_rtt, classify_status, LatencyClass, ResultClass, Thresholds};
@@ -27,7 +29,11 @@ pub use export::{
     csv_escape, export, export_csv, export_to_path, export_txt, ExportFormat, ExportMeta,
 };
 pub use local_ip::{LocalAddress, LocalAddressProvider};
+pub use probe::{
+    MockBackend, MockPolicy, MockResponse, ProbeBackend, ProbeOutcome, RecordingBackend,
+};
 pub use result::{ProbeEvent, ProbeResult, ProbeStatus, ScanStats, TaskId};
+pub use scheduler::{next_task_id, status_from_error, ProbeScheduler, RunOutcome, SchedulerHandle};
 pub use target::{
     build_targets, cell_index, cell_of_host, cell_of_ip, cell_position, matrix_slots, parse_prefix,
     Ipv4Prefix, TargetRange, MATRIX_CELLS, MATRIX_COLS, MATRIX_ROWS, MAX_TARGETS,

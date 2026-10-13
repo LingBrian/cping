@@ -162,6 +162,15 @@ impl ScanStats {
         Self::from_statuses(results.iter().map(|r| &r.status))
     }
 
+    /// 已知目标总数时使用：未出现在 `results` 中的目标计为 `pending`。
+    /// 取消任务后「已完成结果保留、未开始的目标仍计入总数」正是靠这里保持一致。
+    pub fn from_results_with_total(results: &[ProbeResult], total: usize) -> Self {
+        let mut stats = Self::from_results(results);
+        stats.total = total;
+        stats.pending = total.saturating_sub(stats.completed);
+        stats
+    }
+
     /// 完成比例，`0.0..=1.0`。
     pub fn progress(&self) -> f64 {
         if self.total == 0 {
