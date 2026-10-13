@@ -52,7 +52,8 @@ type QueueItem = (u16, Ipv4Addr);
 struct Shared {
     queue: Mutex<VecDeque<QueueItem>>,
     results: Mutex<Vec<Option<ProbeResult>>>,
-    cancel: AtomicBool,
+    /// 用 `Arc` 包一层，好让 UI 侧能单独持有取消令牌（见 `SchedulerHandle::cancel_token`）
+    cancel: Arc<AtomicBool>,
     completed: AtomicUsize,
     active: Arc<AtomicBool>,
     tx: Sender<ProbeEvent>,
@@ -126,7 +127,7 @@ impl ProbeScheduler {
                     .collect(),
             ),
             results: Mutex::new(vec![None; total]),
-            cancel: AtomicBool::new(false),
+            cancel: Arc::new(AtomicBool::new(false)),
             completed: AtomicUsize::new(0),
             active: Arc::clone(&self.active),
             tx: tx.clone(),
@@ -255,6 +256,23 @@ pub fn status_from_error(error: ProbeError) -> ProbeStatus {
     }
 }
 
+/// 可克隆、可跨线程的取消令牌。
+///
+/// GUI 场景下任务句柄通常被移进后台线程消费事件，UI 侧只保留这个令牌用于「停止」。
+#[derive(Debug, Clone)]
+pub struct CancelToken(Arc<AtomicBool>);
+
+impl CancelToken {
+    /// 请求取消；返回是否本次调用真正触发了取消。
+    pub fn cancel(&self) -> bool {
+        !self.0.swap(true, Ordering::SeqCst)
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
 /// 任务句柄：取消、消费事件、等待收敛。
 pub struct SchedulerHandle {
     pub task_id: TaskId,
@@ -276,6 +294,11 @@ impl std::fmt::Debug for SchedulerHandle {
 }
 
 impl SchedulerHandle {
+    /// 取出可跨线程的取消令牌（可在把句柄移进后台线程后继续使用）。
+    pub fn cancel_token(&self) -> CancelToken {
+        CancelToken(Arc::clone(&self.shared.cancel))
+    }
+
     /// 请求取消。返回是否本次调用真正触发了取消。
     pub fn cancel(&self) -> bool {
         !self.shared.cancel.swap(true, Ordering::SeqCst)

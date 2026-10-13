@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "CPing 默认能力：核心命令 + 文件保存对话框",
+  "windows": ["main"],
+  "permissions": ["core:default", "dialog:default", "fs:default"]
+}
