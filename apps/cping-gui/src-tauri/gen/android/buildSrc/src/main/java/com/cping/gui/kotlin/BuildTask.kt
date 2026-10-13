@@ -23,34 +23,40 @@ abstract class BuildTask : DefaultTask() {
 
     @TaskAction
     fun assemble() {
-        // 注意：Windows 上 Gradle 的 exec 不会按 PATHEXT 自动补扩展名，
-        // 直接写 "npm" 会 CreateProcess 失败；回退链在本机也没能成功启动。
-        // 因此这里在 Windows 上直接使用 npm.cmd（node 官方安装里必定存在）。
-        val executable = if (Os.isFamily(Os.FAMILY_WINDOWS)) "npm.cmd" else "npm";
-        try {
-            runTauriCli(executable)
-        } catch (e: Exception) {
-            if (Os.isFamily(Os.FAMILY_WINDOWS)) {
-                // 仍然保留一份回退，覆盖 npm 被包装成 .bat 的环境
-                val fallbacks = listOf(
-                    "npm.bat",
-                    "npm.exe",
-                )
-
-                var lastException: Exception = e
-                for (fallback in fallbacks) {
-                    try {
-                        runTauriCli(fallback)
-                        return
-                    } catch (fallbackException: Exception) {
-                        lastException = fallbackException
-                    }
-                }
-                throw lastException
-            } else {
-                throw e;
-            }
+        // Windows 上 npm 是 npm.cmd / npm.bat 这类脚本，Gradle 的 exec 直接
+        // CreateProcess 无法可靠启动它们（本机上 "npm"、"npm.cmd"、"npm.bat" 全部失败）。
+        // 统一交给 cmd.exe 解析，既符合 PATHEXT 规则，也不依赖具体脚本形态。
+        if (Os.isFamily(Os.FAMILY_WINDOWS)) {
+            runTauriCliViaCmd()
+        } else {
+            runTauriCli("npm")
         }
+    }
+
+    fun runTauriCliViaCmd() {
+        val rootDirRel = rootDirRel ?: throw GradleException("rootDirRel cannot be null")
+        val target = target ?: throw GradleException("target cannot be null")
+        val release = release ?: throw GradleException("release cannot be null")
+
+        val cliArgs = mutableListOf(
+            "npm", "run", "--", "tauri", "android", "android-studio-script",
+        )
+        if (logger.isEnabled(LogLevel.DEBUG)) {
+            cliArgs.add("-vv")
+        } else if (logger.isEnabled(LogLevel.INFO)) {
+            cliArgs.add("-v")
+        }
+        if (release) {
+            cliArgs.add("--release")
+        }
+        cliArgs.add("--target")
+        cliArgs.add(target)
+
+        execOperations.exec {
+            workingDir(File(projectDir, rootDirRel))
+            executable("cmd.exe")
+            args("/c", cliArgs.joinToString(" "))
+        }.assertNormalExitValue()
     }
 
     fun runTauriCli(executable: String) {
