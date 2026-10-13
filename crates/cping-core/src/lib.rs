@@ -14,6 +14,7 @@ pub mod config;
 pub mod error;
 pub mod export;
 pub mod local_ip;
+pub mod native;
 pub mod probe;
 pub mod result;
 pub mod scheduler;
@@ -29,6 +30,15 @@ pub use export::{
     csv_escape, export, export_csv, export_to_path, export_txt, ExportFormat, ExportMeta,
 };
 pub use local_ip::{LocalAddress, LocalAddressProvider};
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub use native::PosixIcmpBackend;
+#[cfg(windows)]
+pub use native::WindowsIcmpBackend;
+pub use native::{
+    build_echo_request, icmp_checksum, native_icmp_hint, parse_echo_reply, parse_unreachable,
+    platform_icmp_backend, verify_checksum, TcpConnectBackend, DEFAULT_PAYLOAD_LEN,
+    ICMP_HEADER_LEN,
+};
 pub use probe::{
     MockBackend, MockPolicy, MockResponse, ProbeBackend, ProbeOutcome, RecordingBackend,
 };

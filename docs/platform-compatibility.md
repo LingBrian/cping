@@ -28,9 +28,23 @@
 
 | 平台 | 后端方案 | 关键风险 | 状态 |
 | --- | --- | --- | --- |
-| Windows | 优先 `windows` crate 的 `IcmpSendEcho`（ICMP.dll / IPHLPAPI）；必要时 raw socket | `IcmpSendEcho` 需管理员？实测原版 raw socket 不需要 | 待 M5 实测 |
-| Linux | raw `SOCK_RAW` + `IPPROTO_ICMP` | 需要 `CAP_NET_RAW`（root 或 `setcap cap_net_raw+ep`） | 待 M5 实测 |
-| Android | ① raw ICMP（大概率**不可用**）② 系统 `ping`（不假设存在）③ **独立的 TCP 连通性模式** | 普通应用无 `CAP_NET_RAW` | 待 M4 真机验证 |
+| Windows | 手写 FFI：优先 `SOCK_DGRAM + IPPROTO_ICMP`，失败回退 `SOCK_RAW` | `SOCK_RAW` 需管理员；`SOCK_DGRAM` 普通用户可用 | ✅ **已实测通过**（见下） |
+| Linux | 手写 FFI：`SOCK_DGRAM` → `SOCK_RAW` | 需要 `CAP_NET_RAW`（root 或 `setcap cap_net_raw+ep`） | 已实现，**未实测**（本机无 Linux） |
+| Android | 同上（`PosixIcmpBackend`）；不可用时改用**独立 TCP 模式** | 普通应用无 `CAP_NET_RAW` | 已实现，**待真机验证**（本机无设备） |
+
+### 3.2 Windows 实测结果（M5，本机执行）
+
+后端 `windows-icmp`，`cargo test -p cping-core --test native_icmp_real -- --ignored --nocapture`：
+
+| 场景 | 结果 | 判读 |
+| --- | --- | --- |
+| `127.0.0.1` | **在线，rtt = 0 ms** | 真的收到了 Echo Reply，`SOCK_DGRAM + IPPROTO_ICMP` 在**普通权限**下可用 |
+| `192.0.2.123`（保留地址，无主机） | **`Timeout`，耗时 816 ms**（预算 800 ms） | 不存在的目标**没有被误判为在线**，超时预算生效 |
+| `tcp-connect 127.0.0.1:9` | `Timeout`（`name()` = `tcp-connect`） | TCP 模式与 ICMP 名字/语义完全分离，不会互相冒充 |
+
+> 结论：Windows 侧不需要管理员权限，也不需要 `icmp.dll` 的 `IcmpSendEcho`（那个通常要求提权）。
+> 权限不足时的错误码映射（`WSAEACCES → PermissionDenied`）已实现但**在本机未触发**，
+> 需在受限账户下复测。
 
 ### 3.1 Android 策略（Q5 已定）
 
