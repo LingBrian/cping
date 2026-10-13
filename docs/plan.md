@@ -1,0 +1,132 @@
+# CPing 跨平台重构 · 分阶段计划
+
+> 版本：v1 · 2026-10-13 · 严格遵循「先提交计划 → 再改代码 → 跑测试 → 报告实际结果」
+
+---
+
+## 零、环境与工具链体检（M0 实测结果）
+
+| 项 | 实测 | 影响 |
+| --- | --- | --- |
+| Rust | `rustc 1.97.1` / `cargo 1.97.1`（stable-x86_64-pc-windows-msvc） | 可用 |
+| 已装 target | **仅** `x86_64-pc-windows-msvc` | 无 Linux / Android target |
+| Node / npm | `22.22.2` / `10.9.7` | 可用 |
+| Tauri CLI | **未安装**（`cargo tauri` 报 no such command） | M3 前需装 |
+| Android SDK / NDK | **缺失**（`ANDROID_HOME` 空，无 `$LOCALAPPDATA/Android/Sdk`，无 `C:/Android`） | **M4 硬阻塞** |
+| JDK | `26.0.1` | Android Gradle 需 JDK 17–21，**可能不兼容 AGP**，需单独处理 |
+| Git | 原工作区不是仓库；已在 `cping/` 内 `git init` | 已解决 |
+| **cargo 网络** | 沙箱内 `cargo build` 会因 registry 探测卡死被 SIGTERM | **必须在 `cping/.cargo/config.toml` 设 `[net] offline = true`**（已加） |
+| Linux 环境 | 无 WSL2 / 无容器探测到 | Linux GUI/TUI 构建**无法在本机验证** |
+
+**迁移方案结论**：无迁移。当前目录不存在任何既有代码工程（仅 `CPing.exe` + `analysis/` + `tech.md`），
+因此**不需要破坏性重构**。新增内容一律放进新目录，逆向产物原样保留。
+
+---
+
+## 阶段总览
+
+| 阶段 | 内容 | 产出 | 当前状态 |
+| --- | --- | --- | --- |
+| **M0** | 现状检查、三份清单、环境体检 | `docs/reverse-findings.md`、`docs/plan.md` | ✅ 完成 |
+| **M0.5** | 动态复核 V1–V6 | `docs/reverse-findings.md` §5 + `analysis/m05*` | ✅ 完成（V1/V2/V3/V6 确证；V4/V5 未能确证） |
+| **M1a** | `cping-core` 纯离线部分 | `crates/cping-core` + 47 个测试 | ✅ 完成（fmt/clippy 零警告，47/47 通过） |
+| **M1b** | `cping-core` 调度：`ProbeBackend` + `MockBackend` + 并发/超时/取消/事件 | `probe.rs`、`scheduler.rs` | ⏳ 进行中 |
+| **M2** | TUI（ratatui + crossterm），先接 MockBackend | `apps/cping-tui` | 计划中 |
+| **M3** | 桌面 GUI（Tauri 2 + Vue 3），先接 MockBackend | `apps/cping-gui` | 计划中 |
+| **M4** | Android GUI（`MobileLayout.vue` + 平台保存 + 真机验证） | 同上 | **受 SDK/NDK 阻塞** |
+| **M5** | 真实 ICMP 后端分平台接入 | `probe` 后端实现 | 计划中 |
+| **M6** | 打包与发布文档 | `docs/platform-compatibility.md`、`docs/testing.md` | 计划中 |
+
+> M0.5 与 M1a 可并行；M1a 不依赖任何网络或平台能力，风险最低，故作为**第一阶段编码任务**。
+
+---
+
+## 第一阶段（M1a）详细计划
+
+### A. 目标
+
+建立 Cargo Workspace 与 `cping-core` 的**纯离线可测**部分：地址解析、目标生成、结果模型、分类、统计、导出。
+**不包含**任何网络 I/O、不包含 GUI/TUI、不引入 Tauri 依赖。全部逻辑用单元 + 整合测试覆盖。
+
+### B. 准备新增的文件
+
+| # | 文件 | 理由 |
+| --- | --- | --- |
+| 1 | `Cargo.toml`（workspace 根） | 统一管理 `crates/*`、`apps/*`；`resolver = "2"`；workspace 级依赖与 lint |
+| 2 | `rust-toolchain.toml` | 锁定 stable 通道与 `rustfmt`/`clippy` 组件，保证多机一致 |
+| 3 | `.gitignore` | 忽略 `target/`、`node_modules/`、`dist/`；**不忽略** `analysis/` 与 `docs/` |
+| 4 | `crates/cping-core/Cargo.toml` | 核心 crate 清单；本阶段仅需 `serde`、`thiserror`、`uuid` |
+| 5 | `crates/cping-core/src/lib.rs` | 模块装配与对外 re-export，定义公共 API 面 |
+| 6 | `crates/cping-core/src/error.rs` | 统一 `ProbeError` / `CoreError`，**必须区分**超时、不可达、权限不足、内部错误 |
+| 7 | `crates/cping-core/src/target.rs` | 前缀解析（`Ipv4Prefix`）+ 目标生成策略 + **矩阵索引映射**（16×16） |
+| 8 | `crates/cping-core/src/result.rs` | `ProbeStatus` / `ProbeResult` / `ProbeEvent` / `TaskStats` / `task_id` |
+| 9 | `crates/cping-core/src/classify.rs` | `classify_rtt()` + 可配置阈值，边界语义对齐原版 `<50 / 50–100 / >100` |
+| 10 | `crates/cping-core/src/config.rs` | `ProbeConfig` / `ColorConfig` + TOML 序列化 |
+| 11 | `crates/cping-core/src/export.rs` | CSV（UTF-8 BOM / CRLF / RFC 4180 转义）与 TXT 定宽导出 |
+| 12 | `crates/cping-core/src/local_ip.rs` | 本机地址**列表**抽象（本阶段仅定义接口 + 占位实现，M5 补平台实现） |
+| 13 | `tests/target_prefix.rs` | 前缀解析与目标范围测试 |
+| 14 | `tests/classify_boundaries.rs` | 分类边界测试（49/50/99/100/101 + 超时/不可达/权限） |
+| 15 | `tests/matrix_index.rs` | 目标 ↔ 16×16 矩阵索引双向映射测试 |
+| 16 | `tests/export_format.rs` | CSV/TXT 字段、转义、换行、空字段、排序测试 |
+
+**本阶段明确不创建**：`scheduler.rs`、`probe.rs`（留到 M1b）；`apps/**`（留到 M2/M3）；任何 Vue/TS 文件。
+
+### C. 关键设计约束（写入代码前先定死）
+
+1. `parse_prefix("192.168.1") -> Ok(Ipv4Prefix)`；拒绝空串、段数 ≠ 3、非数字、> 255、含前导 `+`/空格等。
+2. `build_targets(prefix, TargetRange::Standard)` 默认产出 **255** 个：`.1`–`.255`。
+   另备 `Full`（`.0`–`.255`）与 `HostsOnly`（`.1`–`.254`）仅供测试对照；
+   **`.0/.255` 的默认处理在 M0.5 动态验证前不写死为「原版行为」**，只作为新项目默认值记录。
+3. 矩阵索引：`index = row * 16 + col`，`targets[index]` ↔ `(col,row)`；对 255 个目标的越界格（第 256 格）显式定义为空。
+   该映射独立成函数并双向测试，**不散落在 UI 里**。
+4. `classify_rtt(rtt)` 返回枚举；`None`/错误另路返回 `Offline`/`Error`，**不用 0ms 代表失败**。
+5. 统计（完成数、在线数、耗时）只在核心计算，UI 不得自行累加。
+6. 导出函数签名为 `export(results: &[ProbeResult], format: ExportFormat) -> Result<Vec<u8>, CoreError>`，
+   返回字节缓冲，由调用方决定落盘方式（GUI 用 Tauri 文件 API，TUI 用 `std::fs`）。
+
+### D. 测试命令
+
+```bash
+# 静态检查
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+
+# 构建
+cargo build --workspace
+
+# 测试（本阶段的核心验收）
+cargo test -p cping-core
+cargo test --workspace -- --nocapture
+```
+
+### E. 验收条件（M1a）
+
+| # | 验收项 | 通过标准 |
+| --- | --- | --- |
+| 1 | 构建 | `cargo build --workspace` 零错误、零警告（clippy `-D warnings` 通过） |
+| 2 | 前缀解析 | 覆盖空/段数错/非数字/超 255/前后空格/多小数点等用例，全部按预期报错或通过 |
+| 3 | 目标范围 | `Standard` 恰为 255 个、首 `.1` 尾 `.255`；三种策略数量与首尾均被断言 |
+| 4 | 矩阵索引 | 全部 255 个目标 ↔ (row,col) 双向一致；第 256 格行为被显式断言 |
+| 5 | 分类边界 | `49/50/99/100/101` 五值落类明确；超时/不可达/权限错误**分类互不相同** |
+| 6 | 导出 | CSV 含 BOM+CRLF；含逗号/引号/换行的字段转义正确；空 MAC 写空；按 IPv4 数值升序 |
+| 7 | 统计一致性 | 同一组 `ProbeResult` 的统计结果在多次调用与不同入口下完全一致 |
+| 8 | 无回归 | `analysis/**`、`CPing.exe`、`tech.md` 的哈希/内容未被改动 |
+
+### F. 本阶段不做的验收（避免误判完成）
+
+- 不接任何真实网络探测 → **不验证 ICMP**（属 M5）。
+- 不产出 GUI/TUI 界面 → **不验证交互**（属 M2/M3）。
+- 不验证 Android → 属 M4，当前受 SDK/NDK 缺失阻塞。
+
+---
+
+## 需要用户拍板的开放项
+
+| # | 问题 | 备选 |
+| --- | --- | --- |
+| Q1 | 新工程放哪 | ① 当前工作区根（推荐）② 新子目录 `cping/` ③ 另建独立仓库 |
+| Q2 | 是否 `git init` | ① 初始化并分阶段提交（推荐，便于回滚）② 不初始化 |
+| Q3 | 先做 M0.5（REA 动态复核）还是直接进 M1a 编码 | ① 先 M0.5 补齐 `.0/.255` 与矩阵映射（推荐，消除最大歧义）② 直接 M1a |
+| Q4 | 「无回应」颜色是否允许用户修改 | ① 允许（推荐，UX 更好）② 照抄原版禁用 |
+| Q5 | Android 若普通权限拿不到 ICMP | ① 显式声明限制 + 独立的 TCP 模式（推荐）② 只声明限制、不提供 TCP 模式 |
+| Q6 | 默认超时与并发 | 建议 `timeout=1000ms`、`concurrency=32`，可否？ |

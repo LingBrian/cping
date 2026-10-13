@@ -1,0 +1,5 @@
+# 本项目核心 crate 零第三方依赖，构建全程不需要访问网络。
+# 在受限/离线环境中，cargo 解析 registry 可能长时间挂起，因此默认离线。
+# 将来引入依赖（Tauri 等）时，请临时用 `--offline=false` 或先 `cargo fetch`。
+[net]
+offline = true

@@ -1,0 +1,14 @@
+[package]
+name = "cping-core"
+description = "CPing 共享核心：地址解析、目标生成、结果模型、分类、统计与导出"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# 核心不引入任何第三方依赖：
+#   1. 保证 GUI/TUI 与核心的依赖面最小，编译快、无供应链风险；
+#   2. 串行化（serde）等需求在 GUI 层按需再补，不污染核心。
+[dependencies]
+
+[dev-dependencies]
