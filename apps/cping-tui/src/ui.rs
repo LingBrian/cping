@@ -20,17 +20,19 @@ const SYM_ERROR: &str = "!";
 const SYM_PENDING: &str = ".";
 
 pub fn draw(f: &mut Frame, app: &App) {
+    // 状态区放在主体**上方**：当终端高度不足（Windows console 的 buffer 常大于可视窗口）
+    // 时，进度与统计仍然一定可见，而不是被挤到可视区域外。
     let chunks = Layout::vertical([
         Constraint::Length(3),
+        Constraint::Length(2),
         Constraint::Min(5),
-        Constraint::Length(3),
         Constraint::Length(1),
     ])
     .split(f.area());
 
     draw_input(f, app, chunks[0]);
-    draw_body(f, app, chunks[1]);
-    draw_status(f, app, chunks[2]);
+    draw_status(f, app, chunks[1]);
+    draw_body(f, app, chunks[2]);
     draw_keys(f, app, chunks[3]);
 
     if app.show_help {
@@ -181,15 +183,23 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
-    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Length(2)]).split(area);
+    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
 
     let ratio = app.progress_ratio();
-    let gauge = Gauge::default().ratio(ratio.clamp(0.0, 1.0)).label(format!(
-        "{}/{} ({:.0}%)",
-        app.stats.completed,
-        app.stats.total,
-        ratio * 100.0
-    ));
+    // 显式指定 gauge 配色：默认样式在深色主题下几乎不可见
+    let gauge = Gauge::default()
+        .ratio(ratio.clamp(0.0, 1.0))
+        .gauge_style(Style::default().fg(if app.no_color {
+            Color::Reset
+        } else {
+            Color::Rgb(0x2e, 0xc4, 0x6b)
+        }))
+        .label(format!(
+            "{}/{} ({:.0}%)",
+            app.stats.completed,
+            app.stats.total,
+            ratio * 100.0
+        ));
     f.render_widget(gauge, chunks[0]);
 
     let state = if app.running { "探测中" } else { "空闲" };
@@ -204,10 +214,8 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         app.backend_name(),
         app.local_ip,
     );
-    f.render_widget(
-        Paragraph::new(detail).style(Style::default().fg(Color::Gray)),
-        chunks[1],
-    );
+    // 用默认前景色，避免在浅色/深色主题下出现"看不见的文字"
+    f.render_widget(Paragraph::new(detail), chunks[1]);
 }
 
 fn draw_keys(f: &mut Frame, app: &App, area: Rect) {
@@ -217,10 +225,12 @@ fn draw_keys(f: &mut Frame, app: &App, area: Rect) {
     } else {
         format!("{base}  |  {}", app.status)
     };
-    f.render_widget(
-        Paragraph::new(text).style(Style::default().fg(Color::DarkGray)),
-        area,
-    );
+    let style = if app.no_color {
+        Style::default()
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    f.render_widget(Paragraph::new(text).style(style), area);
 }
 
 fn draw_help(f: &mut Frame, area: Rect) {
