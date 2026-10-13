@@ -72,10 +72,20 @@ cd apps/cping-gui && npm run tauri:android:build
 | M1a 核心离线部分 | ✅ 47 测试 |
 | M1b 调度 + 模拟后端 | ✅ 62 测试 |
 | M2 TUI | ✅ 72 测试 + 真实控制台截图验证 |
-| M3 桌面 GUI | 进行中 |
+| M3 桌面 GUI | ✅ 类型检查 + 构建 + **端到端点击验证**（255/255，在线 158） |
 | M4 Android GUI | 未开始（本机缺 Android SDK/NDK） |
 | M5 真实 ICMP | 未开始 |
 | M6 打包发布 | 未开始 |
+
+## 构建环境注意事项（否则会踩坑）
+
+| 现象 | 原因 | 处理 |
+| --- | --- | --- |
+| `cargo build` 无输出后被 SIGTERM | 沙箱内 registry 探测挂起 | 已设 `.cargo/config.toml` 的 `[net] offline = true`；需下依赖时 `CARGO_NET_OFFLINE=false cargo fetch` |
+| `npm install` 报 `spawnSync EBUSY` | esbuild / tauri-cli 的 postinstall 在本机无法 spawn | 加 `--ignore-scripts`（平台二进制仍在，`vite build` 正常） |
+| npm 装得极慢/卡住 | 默认源响应慢 | 换 `--registry=https://registry.npmmirror.com` |
+| GUI 启动后显示「localhost 拒绝连接」 | debug 构建会去找 `devUrl` | 用 `cargo build --release`（已移除 `devUrl`，资源内嵌） |
+| `schemars` 编译失败（`E0107`） | `indexmap 1.x` 的 `std` feature 默认关闭 | 已在 `[dependencies]` 与 `[build-dependencies]` **两处**声明 `indexmap/std` |
 
 ## 已知限制
 
