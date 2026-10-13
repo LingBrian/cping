@@ -2,5 +2,14 @@ node_modules/
 dist/
 npm-install.log
 src-tauri/target/
-# Tauri 自动生成的 schema，不入库
-src-tauri/gen/
+
+# Tauri 自动生成的 schema，不需要入库
+src-tauri/gen/schemas/
+
+# Android 工程：配置需要版本化（含我们对 BuildTask.kt 与 build.gradle.kts 的必要修改），
+# 只忽略构建产物与机器相关文件
+src-tauri/gen/android/**/build/
+src-tauri/gen/android/.gradle/
+src-tauri/gen/android/local.properties
+src-tauri/gen/android/app/tauri.properties
+src-tauri/gen/android/buildSrc/build/

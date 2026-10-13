@@ -102,6 +102,9 @@ export const usePingStore = defineStore('ping', () => {
           elapsedMs.value = event.elapsedMs
           running.value = false
           status.value = `扫描完成：${event.stats.total} 个目标，${event.stats.online} 在线`
+          // 终态时从后端做一次权威校准：扫描很快时（如回环仅几十毫秒）
+          // 事件会瞬时涌入，逐条事件可能来不及全部落到数组上。
+          void resyncFromBackend()
           break
         case 'cancelled':
           stats.value = event.stats
@@ -109,11 +112,16 @@ export const usePingStore = defineStore('ping', () => {
           running.value = false
           cancelled.value = true
           status.value = `已取消：完成 ${event.stats.completed}/${event.stats.total}，已完成结果保留`
+          void resyncFromBackend()
           break
       }
     })
   }
 
+  /**
+   * 全量刷新。**只在扫描开始前/结束后调用**。
+   * 扫描进行中不要调用：它会整体覆盖 `results`，与事件流写入竞争。
+   */
   async function refreshSnapshot() {
     const snap: SnapshotDto = await svc.snapshot()
     taskId.value = snap.taskId
@@ -126,6 +134,19 @@ export const usePingStore = defineStore('ping', () => {
     const list: (ProbeResultDto | null)[] = new Array(snap.targets.length).fill(null)
     for (const r of snap.results) list[r.index] = r
     results.value = list
+  }
+
+  /**
+   * 终态校准：后端持有权威结果，这里整体对齐一次。
+   * 之所以需要它：真实探测很快时（回环几十毫秒），255 个 Result 事件几乎同时到达，
+   * 逐条写入可能来不及全部反映，只有从后端拉一次才能保证与核心统计一致。
+   */
+  async function resyncFromBackend() {
+    try {
+      await refreshSnapshot()
+    } catch (e) {
+      status.value = `结果校准失败：${String(e)}`
+    }
   }
 
   async function start() {

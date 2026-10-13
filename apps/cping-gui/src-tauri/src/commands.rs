@@ -294,15 +294,30 @@ pub struct AppState {
     shared: Arc<Mutex<Shared>>,
 }
 
+/// 选择探测后端：默认平台原生 ICMP；设 `CPING_MOCK=1` 时改用模拟数据（演示用）。
+///
+/// 之所以保留模拟后端：在没有权限或没有网络的机器上仍能演示界面，
+/// 但它**必须**通过环境变量显式开启，避免把模拟结果误当成真实探测。
+fn select_backend() -> Box<dyn cping_core::probe::ProbeBackend> {
+    let mock = std::env::var("CPING_MOCK")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if mock {
+        Box::new(MockBackend::new(MockPolicy::Realistic {
+            online_percent: 62,
+            base_rtt_ms: 6,
+            span_ms: 140,
+        }))
+    } else {
+        cping_core::native::platform_icmp_backend()
+    }
+}
+
 impl AppState {
     pub fn new() -> Self {
         Self {
-            // M3 先接 MockBackend；M5 替换为平台 ICMP 后端（Windows / Linux / Android）。
-            scheduler: ProbeScheduler::new(MockBackend::new(MockPolicy::Realistic {
-                online_percent: 62,
-                base_rtt_ms: 6,
-                span_ms: 140,
-            })),
+            // M5 起默认使用平台原生 ICMP 后端（Windows 已实测；Linux/Android 见文档）。
+            scheduler: ProbeScheduler::new(select_backend()),
             shared: Arc::new(Mutex::new(Shared {
                 running: false,
                 cancelled: false,
@@ -540,11 +555,21 @@ fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
 #[tauri::command]
 pub fn load_config(app: AppHandle) -> Result<AppConfigDto, String> {
     let path = config_path(&app)?;
-    if !path.exists() {
-        return Ok(config_to_dto(&AppConfig::default()));
+    let mut cfg = if path.exists() {
+        let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        AppConfig::from_toml(&text).map_err(|e| e.to_string())?
+    } else {
+        AppConfig::default()
+    };
+
+    // 允许用环境变量覆盖初始网段：自动化验证时可以强制指向回环，
+    // 避免脚本误扫局域网（例如 CPING_PREFIX=127.0.0）。
+    if let Ok(p) = std::env::var("CPING_PREFIX") {
+        if let Ok(parsed) = parse_prefix(&p) {
+            cfg.probe.prefix = Some(parsed);
+        }
     }
-    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let cfg = AppConfig::from_toml(&text).map_err(|e| e.to_string())?;
+
     Ok(config_to_dto(&cfg))
 }
 

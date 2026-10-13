@@ -28,6 +28,8 @@ pub struct Options {
     pub hide_offline: bool,
     pub view: ViewMode,
     pub help: bool,
+    /// 用模拟后端（不做真实探测）；仅用于演示与 UI 调试。
+    pub mock: bool,
 }
 
 impl Default for Options {
@@ -38,6 +40,7 @@ impl Default for Options {
             hide_offline: false,
             view: ViewMode::Matrix,
             help: false,
+            mock: false,
         }
     }
 }
@@ -54,6 +57,7 @@ impl Options {
                 "--help" | "-h" => opts.help = true,
                 "--no-color" => opts.no_color = true,
                 "--hide-offline" => opts.hide_offline = true,
+                "--mock" => opts.mock = true,
                 "--prefix" => {
                     if let Some(v) = it.next() {
                         opts.prefix = v;
@@ -135,12 +139,8 @@ impl App {
             quit_confirm: false,
             quit_requested: false,
             handle: None,
-            // M2 阶段使用模拟探测；M5 换成平台 ICMP 后端
-            scheduler: ProbeScheduler::new(MockBackend::new(MockPolicy::Realistic {
-                online_percent: 62,
-                base_rtt_ms: 6,
-                span_ms: 140,
-            })),
+            // M5 起默认使用**平台原生 ICMP**；`--mock` 可切回模拟后端做演示。
+            scheduler: ProbeScheduler::new(select_backend(options.mock)),
         }
     }
 
@@ -451,6 +451,19 @@ impl App {
     }
 }
 
+/// 选择探测后端：默认平台原生 ICMP，`--mock` 时用确定性模拟数据。
+fn select_backend(mock: bool) -> Box<dyn cping_core::probe::ProbeBackend> {
+    if mock {
+        Box::new(MockBackend::new(MockPolicy::Realistic {
+            online_percent: 62,
+            base_rtt_ms: 6,
+            span_ms: 140,
+        }))
+    } else {
+        cping_core::native::platform_icmp_backend()
+    }
+}
+
 fn local_ip_label() -> String {
     use cping_core::local_ip::{pick_primary, LocalAddressProvider, UnsupportedProvider};
 
@@ -522,9 +535,11 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
+    /// 测试**必须**使用模拟后端：绝不能让单元测试去真实扫描局域网。
     fn opts() -> Options {
         Options {
             no_color: true,
+            mock: true,
             ..Options::default()
         }
     }

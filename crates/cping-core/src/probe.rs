@@ -25,6 +25,18 @@ impl ProbeOutcome {
     }
 }
 
+/// 让 `Box<dyn ProbeBackend>` 也能直接当作后端使用，
+/// 这样 `platform_icmp_backend()` 的返回值可以原样交给调度器。
+impl<T: ProbeBackend + ?Sized> ProbeBackend for Box<T> {
+    fn name(&self) -> &'static str {
+        (**self).name()
+    }
+
+    fn probe(&self, target: Ipv4Addr, timeout: Duration) -> Result<ProbeOutcome, ProbeError> {
+        (**self).probe(target, timeout)
+    }
+}
+
 /// 平台探测能力。
 pub trait ProbeBackend: Send + Sync {
     /// 后端标识，用于诊断与自我声明（如 `mock`、`windows-icmp`、`linux-raw`）。
