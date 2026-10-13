@@ -31,8 +31,8 @@
 | **M0.5** | 动态复核 V1–V6 | `docs/reverse-findings.md` §5 + `analysis/m05*` | ✅ 完成（V1/V2/V3/V6 确证；V4/V5 未能确证） |
 | **M1a** | `cping-core` 纯离线部分 | `crates/cping-core` + 47 个测试 | ✅ 完成（fmt/clippy 零警告，47/47 通过） |
 | **M1b** | `cping-core` 调度：`ProbeBackend` + `MockBackend` + 并发/超时/取消/事件 | `probe.rs`、`scheduler.rs` | ⏳ 进行中 |
-| **M2** | TUI（ratatui + crossterm），先接 MockBackend | `apps/cping-tui` | 计划中 |
-| **M3** | 桌面 GUI（Tauri 2 + Vue 3），先接 MockBackend | `apps/cping-gui` | 计划中 |
+| **M2** | TUI（ratatui + crossterm），先接 MockBackend | `apps/cping-tui` | ✅ 完成（72 测试 + 真实控制台截图） |
+| **M3** | 桌面 GUI（Tauri 2 + Vue 3），先接 MockBackend | `apps/cping-gui` | ✅ 完成（构建 + 运行截图） |
 | **M4** | Android GUI（`MobileLayout.vue` + 平台保存 + 真机验证） | 同上 | **受 SDK/NDK 阻塞** |
 | **M5** | 真实 ICMP 后端分平台接入 | `probe` 后端实现 | 计划中 |
 | **M6** | 打包与发布文档 | `docs/platform-compatibility.md`、`docs/testing.md` | 计划中 |
@@ -130,3 +130,43 @@ cargo test --workspace -- --nocapture
 | Q4 | 「无回应」颜色是否允许用户修改 | ① 允许（推荐，UX 更好）② 照抄原版禁用 |
 | Q5 | Android 若普通权限拿不到 ICMP | ① 显式声明限制 + 独立的 TCP 模式（推荐）② 只声明限制、不提供 TCP 模式 |
 | Q6 | 默认超时与并发 | 建议 `timeout=1000ms`、`concurrency=32`，可否？ |
+
+
+---
+
+## 阶段报告：M3（桌面 GUI）
+
+### 构建结果
+
+| 项 | 命令 | 结果 |
+| --- | --- | --- |
+| 前端类型检查 | `npm run typecheck` | ✅ 0 错误 |
+| 前端生产构建 | `npm run build` | ✅ 2701 modules → `dist/` |
+| Tauri 外壳 | `cd src-tauri && cargo build` | ✅ `cping-gui.exe`（15.5 MB） |
+| 窗口创建 | 启动 exe | ✅ 标题「C网群PING工具」1016×719 |
+| 界面渲染 | release 构建 + 截图 | ✅ `analysis/gui_desktop.png` |
+
+### 过程中修掉的两个真实构建故障
+
+1. **`schemars` 0.8 编译失败**（`E0107`：`IndexMap` 需要 3 个泛型参数）
+   - 根因：`indexmap 1.x` 的 `std` feature 默认关闭 → build.rs 走 autocfg 的 sysroot 探测
+     → 本机探测失败 → `has_std` 未生效 → `IndexMap<K, V, S>` 失去默认参数。
+   - 修复：显式 `indexmap = { version = "1.9", features = ["std"] }`，
+     **且必须同时写在 `[dependencies]` 与 `[build-dependencies]`**（resolver v2 分开解析 feature）。
+2. **`tauri-build` 缺 `icons/icon.ico`** → 已补齐多尺寸图标。
+
+### 已知限制
+
+- **探测后端仍是 `MockBackend`**：界面跑通的是模拟数据，真实 ICMP 在 M5。
+- **本机 dev 模式不可用**：vite dev server 监听 1420 被拒（`EACCES`），
+  因此只能走 `cargo build --release`（内嵌 `dist`）。
+- **npm install 需要 `--ignore-scripts` + 淘宝源**：postinstall 的 `spawnSync` 在本环境 EBUSY；
+  平台二进制仍在，`vite build` 实测正常。
+- **Android 未验证**：本机缺 Android SDK / NDK。
+
+### 下一步（M4 / M5）
+
+1. M4：准备 Android 工具链（SDK/NDK + `rustup target add`），真机验证移动布局、
+   触控、前后台、文件保存、网络切换。
+2. M5：为 Windows / Linux / Android 分别实现 `ProbeBackend`，实测权限与错误码，
+   并把结果登记到 `docs/platform-compatibility.md`。
