@@ -98,6 +98,13 @@ pub enum MockPolicy {
         online_every: u8,
         rtt_ms: u32,
     },
+    /// 较接近真实网段的分布：约 `online_percent`% 在线，RTT 覆盖低/中/高三档。
+    /// 完全由主机段决定，因此结果可重复。
+    Realistic {
+        online_percent: u8,
+        base_rtt_ms: u32,
+        span_ms: u32,
+    },
     /// 显式脚本；未列出的目标按超时处理。
     Scripted(Vec<(Ipv4Addr, MockResponse)>),
 }
@@ -162,6 +169,20 @@ impl MockBackend {
             } => {
                 if *online_every != 0 && host % *online_every == 0 {
                     MockResponse::Online { rtt_ms: *rtt_ms }
+                } else {
+                    MockResponse::Timeout
+                }
+            }
+            MockPolicy::Realistic {
+                online_percent,
+                base_rtt_ms,
+                span_ms,
+            } => {
+                let h = host as u32;
+                if (h * 37) % 100 < (*online_percent as u32).min(100) {
+                    MockResponse::Online {
+                        rtt_ms: base_rtt_ms + (h * 7) % (*span_ms).max(1),
+                    }
                 } else {
                     MockResponse::Timeout
                 }

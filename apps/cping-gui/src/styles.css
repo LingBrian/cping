@@ -1,0 +1,249 @@
+:root {
+  --cping-border: #d9d9d9;
+  --cping-muted: #6b7280;
+  --cping-bg: #f5f6f8;
+  --cping-panel: #ffffff;
+  font-family: system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--cping-bg);
+  color: #111827;
+  /* 移动端安全区与字体缩放友好 */
+  -webkit-text-size-adjust: 100%;
+}
+
+button {
+  font: inherit;
+}
+
+.cping-panel {
+  background: var(--cping-panel);
+  border: 1px solid var(--cping-border);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.cping-label {
+  font-size: 12px;
+  color: var(--cping-muted);
+  margin-bottom: 4px;
+  display: block;
+}
+
+.cping-mono {
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, 'Courier New', monospace;
+}
+
+/* ---------- 桌面布局 ---------- */
+.desktop {
+  display: grid;
+  grid-template-columns: 288px 1fr;
+  grid-template-rows: 1fr auto;
+  gap: 12px;
+  padding: 12px;
+  height: 100%;
+}
+
+.desktop__side {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+}
+
+.desktop__main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.desktop__footer {
+  grid-column: 1 / -1;
+}
+
+/* ---------- 矩阵 ---------- */
+.grid-matrix {
+  display: grid;
+  grid-template-columns: repeat(16, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--cping-border);
+  border: 1px solid var(--cping-border);
+  border-radius: 6px;
+  overflow: auto;
+  max-height: 100%;
+}
+
+.grid-matrix__cell {
+  min-width: 26px;
+  min-height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-family: ui-monospace, Consolas, monospace;
+  border: none;
+  cursor: default;
+  padding: 0;
+  transition: outline 0.12s ease;
+}
+
+.grid-matrix__cell:hover {
+  outline: 2px solid #111827;
+  outline-offset: -2px;
+}
+
+.grid-matrix__cell--pending {
+  background: #ededed;
+  color: #9ca3af;
+}
+
+.grid-matrix__sym {
+  font-weight: 700;
+  margin-right: 1px;
+}
+
+/* ---------- 表格 ---------- */
+.result-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.result-table th,
+.result-table td {
+  border-bottom: 1px solid #eef0f3;
+  padding: 4px 8px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.result-table thead th {
+  position: sticky;
+  top: 0;
+  background: #f8fafc;
+  z-index: 1;
+  font-weight: 600;
+}
+
+.result-table__scroll {
+  overflow: auto;
+  max-height: 100%;
+}
+
+.badge {
+  display: inline-block;
+  min-width: 16px;
+  margin-right: 6px;
+  text-align: center;
+  font-weight: 700;
+}
+
+/* ---------- 移动端 ---------- */
+.mobile {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  /* 顶部/底部安全区 */
+  padding: calc(8px + env(safe-area-inset-top)) 10px calc(8px + env(safe-area-inset-bottom));
+  gap: 8px;
+}
+
+.mobile__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mobile__title {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.mobile__actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.mobile__body {
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+}
+
+.mobile__tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.mobile__tab {
+  border: 1px solid var(--cping-border);
+  background: #fff;
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 13px;
+  min-height: 36px;
+}
+
+.mobile__tab--active {
+  background: #111827;
+  color: #fff;
+  border-color: #111827;
+}
+
+.mobile-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mobile-list__row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 8px;
+  background: #fff;
+  border: 1px solid var(--cping-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  min-height: 48px;
+}
+
+.mobile-list__ip {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 14px;
+}
+
+.mobile-list__rtt {
+  font-size: 13px;
+  color: var(--cping-muted);
+  min-width: 52px;
+  text-align: right;
+}
+
+.mobile__footer {
+  font-size: 12px;
+  color: var(--cping-muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+/* 触控友好：所有可点元素至少 44px 高 */
+.touchable {
+  min-height: 44px;
+  min-width: 44px;
+}

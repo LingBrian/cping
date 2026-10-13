@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/cping-core"]
+members = ["crates/cping-core", "apps/cping-tui"]
 
 [workspace.package]
 version = "0.1.0"

@@ -1,0 +1,16 @@
+[package]
+name = "cping-tui"
+description = "CPing 终端交互界面（ratatui + crossterm）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "cping-tui"
+path = "src/main.rs"
+
+[dependencies]
+cping-core = { workspace = true }
+# 只启用 crossterm 后端；crossterm 通过 ratatui 的 re-export 使用，避免版本错配
+ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
