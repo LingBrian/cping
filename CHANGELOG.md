@@ -50,6 +50,19 @@
   - 验证：改动后本地 `cargo clippy --workspace --all-targets` 无 lint 警告、
     `cargo test --workspace` 全绿；随后重跑 CI 与 Release 两条 workflow 确认绿
 
+- **OUI 厂商名在 Windows 上会带上尾随 `\r`**：同一份数据在 Linux 与 Windows 上查出
+  「看起来一样、比较却不相等」的厂商名（CI 报 `left: Some("XEROX CORPORATION\r")`）
+  - 根因：`oui_ma_*.txt` 由 `include_str!` **逐字节**嵌入，Windows 上按
+    `core.autocrlf=true` 检出成 CRLF 后，`find()` 手工按 `\n` 切片，厂商名末尾就留下 `\r`
+  - 修法两层：`find()` 出口 `trim_end_matches('\r')` 让结果与换行符无关；
+    `.gitattributes` 把 `cping-core/src/data/*.txt` 钉死为 LF，保证嵌入字节跨平台一致
+  - 附带解释「为什么单测没抓到」：夹具测试用的是 `str::lines()`，
+    它**本身就会剥掉 `\r`**，走的不是真实查表路径
+  - 新增回归测试 2 条：合成 CRLF 夹具（`find_is_crlf_safe`，各平台都守得住）+
+    真实数据抽查（`real_data_lookups_never_leak_carriage_returns`，断言输出不含 `\r`）
+  - 验证：把三份数据临时转成 CRLF 复现 CI 条件，完整 `cping-core` 套件
+    236 passed / 0 failed；随后还原为 LF 并与备份逐字节比对一致
+
 ## [2.0.0] - 2026-10-15
 
 主版本。把 v1.1.2 之后的五个阶段（M8–M12）一次交付：持续监控、探测扩展、

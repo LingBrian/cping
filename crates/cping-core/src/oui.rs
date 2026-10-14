@@ -9,6 +9,12 @@
 //! 优先级严格按 IEEE 规则：**MA-S(36bit) > MA-M(28bit) > MA-L(24bit)**，
 //! 因为 28/36 位分配比 24 位更具体，可能覆盖同一 24 位空间。
 //!
+//! ## 换行符无关性
+//!
+//! 数据文件是 `include_str!` 按字节嵌入的，在 `core.autocrlf=true` 的机器上
+//! 可能被检出为 CRLF。查表结果因此**显式剥掉行尾 `\r`**，使厂商名与换行符无关——
+//! 否则同一个 MAC 在 Linux 与 Windows 上会得到「看起来一样、比较却不相等」的结果。
+//!
 //! ## 刻意不做的猜测
 //!
 //! - 全零地址（未取到）、组播位（I/G=1）、本地管理位（U/L=1）的地址
@@ -102,7 +108,11 @@ pub(crate) fn find<'a>(table: &'a str, offsets: &[u32], key: &[u8]) -> Option<&'
             std::cmp::Ordering::Equal => {
                 let after = &rest[key_len + 1..];
                 let end = after.find('\n').unwrap_or(after.len());
-                return Some(&after[..end]);
+                // CRLF 兼容（必须）：数据文件是 `include_str!` **按字节**嵌入的，
+                // 若检出时被转成 CRLF，行尾会是 `\r\n`，按 `\n` 切出来的厂商名
+                // 就会残留一个不可见的 `\r`。剥掉它，让结果与换行符无关。
+                // （CI 上 Windows 全新克隆真实踩到过：返回 "XEROX CORPORATION\r"。）
+                return Some(after[..end].trim_end_matches('\r'));
             }
             std::cmp::Ordering::Less => lo = mid + 1,
             std::cmp::Ordering::Greater => hi = mid,
@@ -209,6 +219,24 @@ mod tests {
         build_offsets(FIXTURE)
     }
 
+    /// 由 `0000AA` / `C85CE27` / `8C1F64AFA` 这类变长前缀补零构造一个 MAC。
+    /// 末字节固定为非零，避免整串落进「全零占位地址」那条资格排除分支。
+    fn mac_from_prefix_hex(prefix: &str) -> [u8; 6] {
+        let nib = |i: usize| -> u8 {
+            prefix
+                .as_bytes()
+                .get(i)
+                .map(|b| (*b as char).to_digit(16).expect("前缀应为十六进制") as u8)
+                .unwrap_or(0)
+        };
+        let mut out = [0u8; 6];
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = (nib(i * 2) << 4) | nib(i * 2 + 1);
+        }
+        out[5] = 0x11;
+        out
+    }
+
     #[test]
     fn find_hits_first_middle_last() {
         let offs = fixture_offsets();
@@ -245,6 +273,32 @@ mod tests {
             find(no_trailing, &build_offsets(no_trailing), b"123456"),
             Some("No Newline")
         );
+    }
+
+    #[test]
+    fn find_is_crlf_safe() {
+        // 数据文件在 Windows 上可能按 CRLF 检出（core.autocrlf=true），而
+        // include_str! 是逐字节嵌入的。无论行尾是 LF 还是 CRLF，取到的
+        // 厂商名都必须完全一致，不能带上不可见的 `\r`。
+        let crlf = "0000AA\tAAA Corp\r\n0000BB\tBBB Inc\r\n0000CC\tCCC Ltd\r\n";
+        let offs = build_offsets(crlf);
+        assert_eq!(find(crlf, &offs, b"0000AA"), Some("AAA Corp"));
+        assert_eq!(find(crlf, &offs, b"0000BB"), Some("BBB Inc"));
+        assert_eq!(find(crlf, &offs, b"0000CC"), Some("CCC Ltd"));
+        // 与同一份数据的 LF 版本结果逐字节相同
+        assert_eq!(
+            find(crlf, &offs, b"0000BB"),
+            find(FIXTURE, &fixture_offsets(), b"0000BB")
+        );
+
+        // 末行是 CRLF 但不带尾随换行
+        let crlf_tail = "0000AA\tNo Tail Switch\r\n0000BB\tLast Corp\r";
+        let offs = build_offsets(crlf_tail);
+        assert_eq!(find(crlf_tail, &offs, b"0000AA"), Some("No Tail Switch"));
+        assert_eq!(find(crlf_tail, &offs, b"0000BB"), Some("Last Corp"));
+
+        // 偏移数量不受行尾影响（CRLF 只多加一个字节，不另起一行）
+        assert_eq!(build_offsets(crlf).len(), 3);
     }
 
     #[test]
@@ -406,6 +460,30 @@ mod tests {
             vendor_of([0x00, 0x00, 0x00, 0x11, 0x22, 0x33]),
             Some("XEROX CORPORATION")
         );
+    }
+
+    #[test]
+    fn real_data_lookups_never_leak_carriage_returns() {
+        // 平台无关的守卫：无论数据文件是按 LF 还是 CRLF 检出，走**完整查询路径**
+        // （资格检查 + 三表最长前缀优先）拿到的厂商名都不应残留 `\r`。
+        // 这里对真实数据抽查，因此该断言在 Windows 与 Linux 上含义完全一致。
+        let tables = builtin_tables();
+        let mut checked = 0usize;
+        for table in [MA_S, MA_M, MA_L] {
+            let lines: Vec<&str> = table.lines().collect();
+            let sample = lines.iter().take(50).chain(lines.iter().rev().take(10));
+            for line in sample {
+                let key = line.split_once('\t').expect("每条记录都应有制表符").0;
+                if let Some(vendor) = resolve(mac_from_prefix_hex(key), &tables) {
+                    assert!(
+                        !vendor.contains('\r'),
+                        "厂商名残留 CR: {vendor:?}（前缀 {key}）"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 0, "抽查应至少命中一条记录");
     }
 
     // --- 格式化 / 解析 ---

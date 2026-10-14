@@ -13,6 +13,12 @@
 *.yml   text eol=lf
 *.yaml  text eol=lf
 
+# OUI 数据表由 `include_str!` **逐字节**嵌入（`cping-core/src/data/oui_*.txt`）。
+# 钉死 LF，让 Linux 与 Windows 上嵌入的字节完全相同：否则在 core.autocrlf=true
+# 的机器上检出成 CRLF，同一个 MAC 会查出「看起来一样、比较却不相等」的厂商名。
+# （解析器本身已对 CRLF 容错，这里再钉一层，保证条目数/偏移/快照哈希跨平台一致。）
+crates/cping-core/src/data/*.txt  text eol=lf
+
 *.ps1   text eol=crlf
 *.cmd   text eol=crlf
 *.bat   text eol=crlf

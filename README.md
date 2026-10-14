@@ -7,7 +7,7 @@
 Rust 核心 · TUI（ratatui）· 桌面 GUI（Tauri 2 + Vue 3）· Android
 
 [![Release](https://img.shields.io/badge/release-v2.0.0-111827)](../../releases)
-[![Tests](https://img.shields.io/badge/tests-274%20passed-brightgreen)](docs/testing.md)
+[![Tests](https://img.shields.io/badge/tests-276%20passed-brightgreen)](docs/testing.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20Android-lightgrey)](docs/platform-compatibility.md)
 

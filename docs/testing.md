@@ -15,7 +15,7 @@
 | M4/M5 真实探测 | ✅ | ✅ +12 = 84 | ✅ **Windows 真实 ICMP**（TUI 与 GUI 双端 255/255） |
 | M6 Android 打包 | ✅ APK ×2 | ✅ 84（回归） | ⚠️ **静态校验通过，真机未验证**（无设备） |
 | M7 目标信息增强 | ✅ | ✅ +67 = 151 | ✅ 真实局域网端到端 + GUI 真实运行截图 |
-| M8–M12 通向 v2.0.0 | ✅ 四平台产物 | ✅ +123 = **274** | ✅ Windows + Linux（WSL）双平台实测，含 IPv6/TCP 与 TUI |
+| M8–M12 通向 v2.0.0 | ✅ 四平台产物 | ✅ +125 = **276** | ✅ Windows + Linux（WSL）双平台实测，含 IPv6/TCP 与 TUI |
 
 ## 统一检查命令
 
@@ -397,7 +397,7 @@ IP              状态      MAC                 厂商                主机名
 - Linux/Android 真机上的邻居表与主机名链路（`/proc/net/arp` 分支已实现并单测，未实测）
 - MAC/厂商列在 Android 移动布局下的真机视觉效果（逻辑同桌面端）
 
-## M8–M12：通向 v2.0.0（274 个测试）
+## M8–M12：通向 v2.0.0（276 个测试）
 
 ### 测试结果（2026-10-15）
 
@@ -409,6 +409,11 @@ cargo clippy --workspace --all-targets -- -D warnings   →  clean
 npm run typecheck                                       →  0 errors
 npm run build                                           →  2705 modules / 562 kB JS / 6.3 kB CSS
 ```
+
+上面这份是 M8–M12 交付当时的记录。之后 `v2.0.0` 的 CI 又抓出两个缺陷
+（见本文末「本轮抓出并修掉的真实缺陷」第 5、6 条），随之补了 2 条回归测试，
+当前计数为 **276 passed / 0 failed / 8 ignored**；在 CRLF 条件下复现验证时为
+236 passed / 0 failed（`cping-core` 单包）。
 
 新增的 123 个测试集中在：目标规格解析（含 IPv6 CIDR 边界）、持续监控的
 `diff_scans` 全状态组合、变化日志容量上限、JSON 严格转义、HTML 无外部引用、
@@ -467,6 +472,28 @@ Windows 上同一个用例（连确定关闭的端口）表现为超时，用 Py
    已收敛到核心的 `resolve_for_run` / `backend_for_run`。
 4. **打包脚本在受限环境下中断**：`Remove-Item` 与 `Compress-Archive -Force`
    都会走回收站并被策略拦下，已改用 .NET 的 `File.Delete`。
+5. **CI 与全新克隆完全构建不起来**（`v2.0.0` tag 触发的 `Release` 与 `main` 的
+   `CI` **全部任务**失败）：仓库里 `.cargo/config.toml` 硬编码了 `[net] offline = true`。
+   cargo 解析依赖图、校验 `Cargo.lock` 时**必须访问 registry 索引，即使可选 feature
+   未启用**，于是报 `no matching package named tokio/indexmap found`。该行写死于 M1a
+   （当时零第三方依赖所以无害），M11 引入 Tauri 壳、M12 引入异步调度后才致命。
+   **本地一直「看着正常」只是因为依赖缓存是热的**——这条正是 CI 的价值所在。
+6. **同一份 OUI 数据在 Windows 与 Linux 上查出「看起来一样、比较却不相等」的厂商名**：
+   `oui_ma_*.txt` 由 `include_str!` **逐字节**嵌入，Windows 上按 `core.autocrlf=true`
+   检出成 CRLF 后，查表结果会带上尾随 `\r`（CI 实际报
+   `left: Some("XEROX CORPORATION\r")` / `right: Some("XEROX CORPORATION")`，5 条测试挂掉）。
+   夹具测试之所以没发现，是因为它们用 `str::lines()`——**它本身就会剥掉 `\r`**，
+   而真实查表路径是手工按 `\n` 切片的。
+   修法两层：① `find()` 出口处 `trim_end_matches('\r')`，让结果与换行符无关；
+   ② `.gitattributes` 把 `cping-core/src/data/*.txt` 钉死为 LF，保证嵌入字节跨平台一致。
+   新增两条回归：合成 CRLF 夹具（各平台都能守住修复）+ 真实数据抽查（断言输出不含 `\r`）。
+
+### 这两个缺陷是怎么被发现的
+
+本地全绿、四平台产物也都出得来，但 `main` 与 `v2.0.0` 的 workflow 是红的。
+顺着日志读下去才挖出上面两条——**都是「只在别人机器上复现」的类型**：
+一条依赖「冷缓存」，一条依赖「换行符转换」。修复后在 CRLF 条件下重跑了完整
+`cping-core` 套件（236 passed / 0 failed）复现验证，再还原为 LF 并逐字节比对备份。
 
 ## 尚未完成的验证
 
