@@ -96,3 +96,14 @@ Rust 目标：`aarch64-linux-android`、`armv7-linux-androideabi`、
 - [ ] 生成 Android keystore 并配置 release 签名（当前 release APK 未签名）
 - [ ] 复核 `docs/platform-compatibility.md` 的平台结论
 - [ ] 确认默认并发（32）与超时（1000ms）在真实网络下的表现
+
+## 6. v1.1.0 产物（M7，2026-10-14）
+
+| 产物 | 体积 | 构建命令 | 验证程度 |
+| --- | --- | --- | --- |
+| `cping-tui-v1.1.0-windows-x64.exe` | 2.4 MB | `cargo build --release -p cping-tui` | ✅ `--help` 冒烟通过 |
+| `cping-gui-v1.1.0-windows-x64.exe` | 12.4 MB | 在 `src-tauri` 内 `cargo build --release` | ✅ 启动创建主窗口（冒烟）+ debug 版真实运行截图与快照恢复验证 |
+
+- Android APK 本版未重新构建：M7 的邻居表 / 快照链路在 Android 已实现并单测，
+  尚未真机复测；v1.0.0 的 APK 不含 M7 功能
+- 发布说明：`docs/release-notes-v1.1.0.md`；SHA256 见 Release 附件
