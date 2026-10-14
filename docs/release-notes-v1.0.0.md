@@ -8,9 +8,10 @@
 | --- | --- | --- |
 | `cping-tui-v1.0.0-windows-x64.exe` | Windows x64 | 终端界面，单文件，无需安装 |
 | `cping-gui-v1.0.0-windows-x64.exe` | Windows x64 | 图形界面，单文件（Tauri，资源已内嵌） |
+| `cping-universal-debug.apk` | Android 7.0+（arm64 + x86_64） | **双 ABI 通用包，debug 签名，可直接安装**（模拟器与真机） |
 | `cping-arm64-v8a-debug.apk` | Android 7.0+（arm64） | **debug 签名，可直接安装** |
 | `cping-arm64-v8a-release-unsigned.apk` | Android 7.0+（arm64） | release 未签名，需自行签名后安装 |
-| `SHA256SUMS.txt` | — | 全部产物校验和 |
+| `SHA256SUMS.txt` | — | 部分产物校验和 |
 
 Linux 产物计划在 v1.5.0（M11）随 CI/CD 一起提供。
 
