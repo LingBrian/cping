@@ -1,7 +1,7 @@
 //! 绘制。颜色只是辅助：**每个状态都有独立的形状符号**，无颜色终端下同样可读。
 
 use cping_core::classify::ResultClass;
-use cping_core::export::pad;
+use cping_core::export::{pad, truncate_display};
 use cping_core::target::{MATRIX_COLS, MATRIX_ROWS};
 
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Gauge, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::App;
+use crate::app::{App, PendingRestore};
 
 const SYM_LOW: &str = "#";
 const SYM_MID: &str = "+";
@@ -18,6 +18,12 @@ const SYM_HIGH: &str = "*";
 const SYM_OFFLINE: &str = "-";
 const SYM_ERROR: &str = "!";
 const SYM_PENDING: &str = ".";
+
+/// 表格里 MAC 单列所需宽度（含前导空格）。
+const MAC_COL_W: usize = 19;
+/// 终端宽度达到这个值才把 MAC 放进主行；否则把它挪到第二行的详情里，
+/// 免得主行被挤断、IP 与状态看起来"错位"。
+const WIDE_TABLE: usize = 74;
 
 pub fn draw(f: &mut Frame, app: &App) {
     // 状态区放在主体**上方**：当终端高度不足（Windows console 的 buffer 常大于可视窗口）
@@ -35,7 +41,10 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_body(f, app, chunks[2]);
     draw_keys(f, app, chunks[3]);
 
-    if app.show_help {
+    // 快照确认框优先级高于帮助：它需要用户明确回答
+    if let Some(pending) = &app.pending_restore {
+        draw_restore_prompt(f, pending, f.area());
+    } else if app.show_help {
         draw_help(f, f.area());
     }
 }
@@ -136,11 +145,14 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    // 每个结果占 2 行（主行 + 细分隔），便于在小终端里阅读
+    // 每个结果占 2 行：主行（IP/状态/RTT/分类）+ 详情行（MAC/厂商/主机名），
+    // 便于在小终端里阅读，也让 M7 新增信息有地方放。
     let per_row = 2usize;
     let capacity = (inner.height as usize / per_row).max(1);
     let start = app.scroll.min(rows.len().saturating_sub(1));
     let end = (start + capacity).min(rows.len());
+    let wide = inner.width as usize >= WIDE_TABLE;
+    let inner_w = inner.width as usize;
 
     let mut lines: Vec<Line> = Vec::new();
     for (idx, &target_idx) in rows.iter().enumerate().take(end).skip(start) {
@@ -159,6 +171,9 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
             ),
             None => ("等待".to_string(), String::new(), String::new()),
         };
+        let vendor = result.and_then(|r| r.vendor.clone()).unwrap_or_default();
+        let hostname = result.and_then(|r| r.hostname.clone()).unwrap_or_default();
+
         let class_label = class.map(|c| c.label_zh()).unwrap_or("-");
         let selected = idx == start;
         let style = if selected {
@@ -166,16 +181,36 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
         } else {
             app.style_for(class)
         };
-        lines.push(Line::from(vec![
+        let mut spans = vec![
             Span::styled(if selected { ">" } else { " " }, Style::default()),
             Span::styled(pad(&ip, 17), style),
             Span::styled(pad(&status, 12), style),
             Span::styled(pad(&rtt, 9), style),
-            Span::styled(pad(&mac, 19), style),
-            Span::styled(class_label.to_string(), style),
-        ]));
+        ];
+        if wide {
+            spans.push(Span::styled(pad(&mac, MAC_COL_W), style));
+        }
+        spans.push(Span::styled(class_label.to_string(), style));
+        lines.push(Line::from(spans));
+
+        // 详情行：只列真有内容的字段；一个都没有就退回分隔线
+        let mut parts: Vec<String> = Vec::new();
+        if !wide && !mac.is_empty() {
+            parts.push(format!("MAC {mac}"));
+        }
+        if !vendor.is_empty() {
+            parts.push(format!("厂商 {vendor}"));
+        }
+        if !hostname.is_empty() {
+            parts.push(format!("主机 {hostname}"));
+        }
+        let detail = if parts.is_empty() {
+            "-".repeat(inner_w.min(72))
+        } else {
+            format!("  {}", parts.join("   "))
+        };
         lines.push(Line::from(Span::styled(
-            "-".repeat((inner.width as usize).min(72)),
+            truncate_display(&detail, inner_w),
             Style::default().fg(Color::DarkGray),
         )));
     }
@@ -203,8 +238,21 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(gauge, chunks[0]);
 
     let state = if app.running { "探测中" } else { "空闲" };
+    // M7：把「认出了多少台」如实报出来。计数直接数结果，不另存一份状态。
+    let with_vendor = app
+        .results
+        .iter()
+        .flatten()
+        .filter(|r| r.vendor.is_some())
+        .count();
+    let with_host = app
+        .results
+        .iter()
+        .flatten()
+        .filter(|r| r.hostname.is_some())
+        .count();
     let detail = format!(
-        " {:6} 在线 {}  超时 {}  不可达 {}  错误 {}  用时 {:.2}s  后端 {}  本机 {}",
+        " {:6} 在线 {}  超时 {}  不可达 {}  错误 {}  用时 {:.2}s  后端 {}  本机 {}  厂商 {}  主机名 {}",
         state,
         app.stats.online,
         app.stats.timeout,
@@ -213,13 +261,18 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         app.elapsed_ms as f64 / 1000.0,
         app.backend_name(),
         app.local_ip,
+        with_vendor,
+        with_host,
     );
     // 用默认前景色，避免在浅色/深色主题下出现"看不见的文字"
-    f.render_widget(Paragraph::new(detail), chunks[1]);
+    f.render_widget(
+        Paragraph::new(truncate_display(&detail, area.width as usize)),
+        chunks[1],
+    );
 }
 
 fn draw_keys(f: &mut Frame, app: &App, area: Rect) {
-    let base = "Enter 开始 · i 编辑 · g 矩阵 · t 表格 · f 过滤 · s CSV · S TXT · ? 帮助 · q 退出";
+    let base = "Enter 开始 · i 编辑 · g/t 视图 · f 过滤 · s/S 导出 · m 补厂商 · n 查主机名 · w 存快照 · l 读快照 · ? 帮助 · q 退出";
     let text = if app.status.is_empty() {
         base.to_string()
     } else {
@@ -230,11 +283,54 @@ fn draw_keys(f: &mut Frame, app: &App, area: Rect) {
     } else {
         Style::default().fg(Color::DarkGray)
     };
-    f.render_widget(Paragraph::new(text).style(style), area);
+    f.render_widget(
+        Paragraph::new(truncate_display(&text, area.width as usize)).style(style),
+        area,
+    );
+}
+
+/// 启动时「发现上次结果」的确认框。默认落在**不恢复**一侧：用户不表态就不改界面状态。
+fn draw_restore_prompt(f: &mut Frame, pending: &PendingRestore, area: Rect) {
+    let mut lines = vec![Line::from("检测到上次未处理完的扫描结果。")];
+    lines.push(Line::from(""));
+    match &pending.error {
+        Some(err) => {
+            lines.push(Line::from(format!("  无法读取：{err}")));
+        }
+        None => {
+            lines.push(Line::from(format!("  扫描时间 : {}", pending.scan_time)));
+            lines.push(Line::from(format!("  网段     : {}", pending.prefix)));
+            lines.push(Line::from(format!(
+                "  结果     : {} 条 / {} 个目标",
+                pending.rows, pending.total
+            )));
+            lines.push(Line::from(format!(
+                "  用时     : {:.2}s",
+                pending.elapsed_ms as f64 / 1000.0
+            )));
+        }
+    }
+    lines.push(Line::from(format!(
+        "  文件     : {}",
+        truncate_display(&pending.path, 50)
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(match pending.error {
+        Some(_) => "  y 不使用      n / Esc 删除该文件",
+        None => "  y 恢复结果    n / Esc 不使用（默认不恢复）",
+    }));
+
+    let height = (lines.len() as u16).saturating_add(2);
+    let popup = centered(area, 72, height);
+    f.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" CPing · 发现上次的结果 ");
+    f.render_widget(Paragraph::new(Text::from(lines)).block(block), popup);
 }
 
 fn draw_help(f: &mut Frame, area: Rect) {
-    let popup = centered(area, 64, 18);
+    let popup = centered(area, 66, 23);
     f.render_widget(Clear, popup);
     let text = Text::from(vec![
         Line::from("快捷键"),
@@ -245,6 +341,14 @@ fn draw_help(f: &mut Frame, area: Rect) {
         Line::from("  f            过滤不在线目标"),
         Line::from("  s / S        导出 CSV / TXT"),
         Line::from("  ↑ ↓ PgUp PgDn Home End  表格滚动"),
+        Line::from(""),
+        Line::from("目标信息（M7）"),
+        Line::from("  m            读邻居表回填 MAC / 厂商"),
+        Line::from("  n            反查当前选中行的主机名"),
+        Line::from("  w / l        保存快照 / 从快照恢复"),
+        Line::from("  说明          MAC、厂商来自本机邻居表与 IEEE 注册数据；"),
+        Line::from("                主机名走 DNS 反查，查不到就留空，不猜。"),
+        Line::from(""),
         Line::from("  ? 或 F1      本帮助"),
         Line::from("  q            退出（运行中需再按一次确认）"),
         Line::from("  Ctrl+C       退出（自动恢复终端）"),

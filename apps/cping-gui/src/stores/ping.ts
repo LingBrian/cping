@@ -7,6 +7,7 @@ import {
   MATRIX_CELLS,
   type AppConfigDto,
   type ColorConfigDto,
+  type PendingSnapshotDto,
   type ProbeResultDto,
   type ResultClassKey,
   type ScanStatsDto,
@@ -47,6 +48,16 @@ export const usePingStore = defineStore('ping', () => {
   const status = ref('就绪')
   const lastExport = ref<string | null>(null)
 
+  // ---- M7 ----
+  /** 启动时发现的「上次未处理的结果」；非 null 时界面必须显示确认框 */
+  const pendingRestore = ref<PendingSnapshotDto | null>(null)
+  /** 最近一次补全的说明（来自后端） */
+  const enrichNote = ref('')
+  /** 最近一次保存的快照路径 */
+  const lastSnapshot = ref<string | null>(null)
+  /** 正在进行主机名反查的目标下标（用于按钮 loading） */
+  const hostnameBusy = ref<number | null>(null)
+
   let unlisten: UnlistenFn | null = null
 
   const progress = computed(() =>
@@ -65,6 +76,20 @@ export const usePingStore = defineStore('ping', () => {
   })
 
   const onlineCount = computed(() => stats.value.online)
+
+  /** M7：认出厂商 / 主机名 / MAC 的条数。直接数结果，不另存一份状态。 */
+  const recognized = computed(() => {
+    let mac = 0
+    let vendor = 0
+    let hostname = 0
+    for (const r of results.value) {
+      if (!r) continue
+      if (r.mac) mac += 1
+      if (r.vendor) vendor += 1
+      if (r.hostname) hostname += 1
+    }
+    return { mac, vendor, hostname }
+  })
 
   function colorOf(key: ResultClassKey | null): string {
     if (!key) return 'transparent'
@@ -101,18 +126,17 @@ export const usePingStore = defineStore('ping', () => {
           stats.value = event.stats
           elapsedMs.value = event.elapsedMs
           running.value = false
-          status.value = `扫描完成：${event.stats.total} 个目标，${event.stats.online} 在线`
           // 终态时从后端做一次权威校准：扫描很快时（如回环仅几十毫秒）
           // 事件会瞬时涌入，逐条事件可能来不及全部落到数组上。
-          void resyncFromBackend()
+          // 后端在发出终态事件前已经补过一遍 MAC/厂商，所以校准回来就带上了。
+          void resyncFromBackend(true)
           break
         case 'cancelled':
           stats.value = event.stats
           elapsedMs.value = event.elapsedMs
           running.value = false
           cancelled.value = true
-          status.value = `已取消：完成 ${event.stats.completed}/${event.stats.total}，已完成结果保留`
-          void resyncFromBackend()
+          void resyncFromBackend(true)
           break
       }
     })
@@ -123,7 +147,11 @@ export const usePingStore = defineStore('ping', () => {
    * 扫描进行中不要调用：它会整体覆盖 `results`，与事件流写入竞争。
    */
   async function refreshSnapshot() {
-    const snap: SnapshotDto = await svc.snapshot()
+    applySnapshot(await svc.snapshot())
+  }
+
+  /** 把后端给的一份快照整体应用到界面状态（刷新与「恢复」共用同一条路径）。 */
+  function applySnapshot(snap: SnapshotDto) {
     taskId.value = snap.taskId
     running.value = snap.running
     cancelled.value = snap.cancelled
@@ -140,10 +168,20 @@ export const usePingStore = defineStore('ping', () => {
    * 终态校准：后端持有权威结果，这里整体对齐一次。
    * 之所以需要它：真实探测很快时（回环几十毫秒），255 个 Result 事件几乎同时到达，
    * 逐条写入可能来不及全部反映，只有从后端拉一次才能保证与核心统计一致。
+   *
+   * `withInfo=true` 时额外把「认出了多少台」写进状态文案——补全是在后端
+   * 发终态事件之前做的，所以这次校准拉到的数据里已经带上了 MAC/厂商。
    */
-  async function resyncFromBackend() {
+  async function resyncFromBackend(withInfo = false) {
     try {
       await refreshSnapshot()
+      if (withInfo) {
+        const n = recognized.value
+        const base = cancelled.value
+          ? `已取消：完成 ${stats.value.completed}/${stats.value.total}，已完成结果保留`
+          : `扫描完成：${stats.value.total} 个目标，${stats.value.online} 在线`
+        status.value = `${base}；识别 MAC ${n.mac}、厂商 ${n.vendor}`
+      }
     } catch (e) {
       status.value = `结果校准失败：${String(e)}`
     }
@@ -238,6 +276,108 @@ export const usePingStore = defineStore('ping', () => {
     colors.value = { ...colors.value, [key]: value }
   }
 
+  // -------------------------------------------------------------------------
+  // M7：目标信息补全
+  // -------------------------------------------------------------------------
+
+  /** 读邻居表回填 MAC / 厂商；返回给调用方一句可直接提示的话。 */
+  async function enrich(): Promise<string | null> {
+    if (stats.value.completed === 0) {
+      status.value = '还没有已完成的结果'
+      return null
+    }
+    try {
+      const report = await svc.enrichResults()
+      enrichNote.value = report.message
+      status.value = report.message
+      await refreshSnapshot()
+      return report.message
+    } catch (e) {
+      status.value = `补全失败：${String(e)}`
+      return null
+    }
+  }
+
+  /** 按需反查某一行的主机名。查不到就保持为空，不填占位文本。 */
+  async function lookupHostname(index: number, timeoutMs = 2000): Promise<string | null> {
+    hostnameBusy.value = index
+    try {
+      const r = await svc.lookupHostnameFor(index, timeoutMs)
+      const row = results.value[index]
+      if (row) results.value[index] = { ...row, hostname: r.hostname }
+      const msg = r.hostname ? `${r.ip} → ${r.hostname}` : `${r.ip} 没有反向解析记录`
+      status.value = msg
+      return msg
+    } catch (e) {
+      status.value = `主机名反查失败：${String(e)}`
+      return null
+    } finally {
+      hostnameBusy.value = null
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // M7：结果快照
+  // -------------------------------------------------------------------------
+
+  /** 启动时检查有没有上次没处理完的结果。找到了就等用户表态，绝不自动恢复。 */
+  async function checkPendingSnapshot(): Promise<void> {
+    try {
+      pendingRestore.value = await svc.pendingSnapshot()
+    } catch (e) {
+      status.value = `检查历史结果失败：${String(e)}`
+    }
+  }
+
+  /** 用户点了「恢复」之后才真正恢复。 */
+  async function restoreSnapshot(path?: string): Promise<boolean> {
+    try {
+      const snap = await svc.restoreSnapshot(path)
+      applySnapshot(snap)
+      pendingRestore.value = null
+      status.value = `已恢复 ${snap.results.length} 条结果（网段 ${snap.prefix}，共 ${snap.total} 个目标）`
+      return true
+    } catch (e) {
+      status.value = `恢复失败：${String(e)}`
+      return false
+    }
+  }
+
+  async function dismissSnapshot(deleteFile: boolean): Promise<void> {
+    try {
+      await svc.dismissSnapshot(deleteFile)
+    } catch (e) {
+      status.value = `忽略历史结果失败：${String(e)}`
+    } finally {
+      pendingRestore.value = null
+    }
+  }
+
+  async function saveSnapshot(path: string): Promise<string | null> {
+    try {
+      const saved = await svc.saveSnapshot(path)
+      lastSnapshot.value = saved.path
+      status.value = `已保存快照：${saved.rows} 条结果（共 ${saved.total} 个目标）→ ${saved.path}`
+      return saved.path
+    } catch (e) {
+      status.value = `保存快照失败：${String(e)}`
+      return null
+    }
+  }
+
+  /** 移动端：没有文件对话框，由后端写到应用可写目录。 */
+  async function saveSnapshotToAppDir(): Promise<string | null> {
+    try {
+      const saved = await svc.saveSnapshotToAppDir()
+      lastSnapshot.value = saved.path
+      status.value = `已保存快照：${saved.rows} 条结果 → ${saved.path}`
+      return saved.path
+    } catch (e) {
+      status.value = `保存快照失败：${String(e)}`
+      return null
+    }
+  }
+
   return {
     prefix,
     timeoutMs,
@@ -256,9 +396,14 @@ export const usePingStore = defineStore('ping', () => {
     localIp,
     status,
     lastExport,
+    pendingRestore,
+    enrichNote,
+    lastSnapshot,
+    hostnameBusy,
     progress,
     visibleRows,
     onlineCount,
+    recognized,
     colorOf,
     labelOf,
     attachEvents,
@@ -270,5 +415,12 @@ export const usePingStore = defineStore('ping', () => {
     exportTo,
     loadLocalAddresses,
     setColor,
+    enrich,
+    lookupHostname,
+    checkPendingSnapshot,
+    restoreSnapshot,
+    dismissSnapshot,
+    saveSnapshot,
+    saveSnapshotToAppDir,
   }
 })

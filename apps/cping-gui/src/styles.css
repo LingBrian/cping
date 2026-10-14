@@ -251,6 +251,46 @@ button {
   text-align: right;
 }
 
+/* M7：把 MAC/厂商/主机名放到主行下面一行，避免窄屏挤压主信息 */
+.mobile-list__row--stacked {
+  grid-template-columns: 1fr;
+  align-items: start;
+}
+
+.mobile-list__head {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.mobile-list__info {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--cping-border);
+  font-size: 12px;
+  color: var(--cping-muted);
+}
+
+.mobile-list__lookup {
+  margin-left: auto;
+  min-height: 40px;
+  padding: 0 12px;
+  font-size: 12px;
+  color: #111827;
+  background: #f3f4f6;
+  border: 1px solid var(--cping-border);
+  border-radius: 6px;
+}
+
+.mobile-list__lookup:disabled {
+  opacity: 0.5;
+}
+
 .mobile__footer {
   font-size: 12px;
   color: var(--cping-muted);

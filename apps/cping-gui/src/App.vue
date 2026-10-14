@@ -3,6 +3,7 @@ import { computed, onMounted } from 'vue'
 import { NConfigProvider, NMessageProvider, dateZhCN, zhCN } from 'naive-ui'
 import DesktopLayout from './layouts/DesktopLayout.vue'
 import MobileLayout from './layouts/MobileLayout.vue'
+import RestoreSnapshotDialog from './components/RestoreSnapshotDialog.vue'
 import { usePingStore } from './stores/ping'
 
 const store = usePingStore()
@@ -32,6 +33,9 @@ onMounted(async () => {
   await store.loadConfig()
   await store.attachEvents()
   await store.loadLocalAddresses()
+  // M7：进程随时可能被系统回收（Android 上销毁 Activity 即退出进程），
+  // 所以启动时先看看有没有上次没处理完的结果。只检查、不自动恢复。
+  await store.checkPendingSnapshot()
 })
 </script>
 
@@ -47,6 +51,8 @@ onMounted(async () => {
     <n-message-provider class="app-shell">
       <MobileLayout v-if="isMobile" />
       <DesktopLayout v-else />
+      <!-- 两种布局共用同一个确认框；它自己判断有没有要问的事 -->
+      <RestoreSnapshotDialog />
     </n-message-provider>
   </n-config-provider>
 </template>

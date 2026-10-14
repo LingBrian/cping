@@ -2,13 +2,17 @@
 
 use std::io;
 use std::net::Ipv4Addr;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cping_core::classify::{classify_status, ResultClass, Thresholds};
 use cping_core::config::{ColorConfig, ProbeConfig, ViewMode};
+use cping_core::enrich::{enrich_with_mac_and_vendor, EnrichReport};
 use cping_core::export::{export_to_path, ExportMeta};
 use cping_core::probe::{MockBackend, MockPolicy};
 use cping_core::scheduler::{ProbeScheduler, SchedulerHandle};
+use cping_core::snapshot::{load_from_path, save_to_path, Snapshot};
 use cping_core::target::{build_targets, matrix_slots, parse_prefix, TargetRange, MATRIX_CELLS};
 use cping_core::{ProbeEvent, ProbeResult, ScanStats};
 
@@ -20,6 +24,11 @@ use crate::events::{next_event, UiEvent};
 use crate::input::{map_key, Action};
 use crate::ui;
 
+/// 自动落盘快照的文件名（与 GUI 端同名，便于人工排查）。
+pub const AUTOSAVE_FILE: &str = "cping-autosave.snap";
+/// 「已处理过」的指纹文件名。同一份结果只问一次。
+pub const HANDLED_FILE: &str = "cping-autosave.handled";
+
 /// 命令行选项（仅作为初始值，不替代交互界面）。
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -30,6 +39,9 @@ pub struct Options {
     pub help: bool,
     /// 用模拟后端（不做真实探测）；仅用于演示与 UI 调试。
     pub mock: bool,
+    /// 快照文件所在目录；`None` 表示当前工作目录（单元测试会改到临时目录，
+    /// 避免测试往仓库里写文件）。
+    pub snapshot_dir: Option<PathBuf>,
 }
 
 impl Default for Options {
@@ -41,6 +53,7 @@ impl Default for Options {
             view: ViewMode::Matrix,
             help: false,
             mock: false,
+            snapshot_dir: None,
         }
     }
 }
@@ -63,6 +76,11 @@ impl Options {
                         opts.prefix = v;
                     }
                 }
+                "--snapshot-dir" => {
+                    if let Some(v) = it.next() {
+                        opts.snapshot_dir = Some(PathBuf::from(v));
+                    }
+                }
                 "--view" => {
                     if let Some(v) = it.next() {
                         opts.view = if v == "table" {
@@ -77,6 +95,26 @@ impl Options {
         }
         opts
     }
+}
+
+/// 启动时发现的一份「上次没处理完」的快照，等用户决定是否恢复。
+#[derive(Debug, Clone)]
+pub struct PendingRestore {
+    pub path: String,
+    pub scan_time: String,
+    pub prefix: String,
+    pub total: usize,
+    pub rows: usize,
+    pub elapsed_ms: u64,
+    /// 非空表示这份快照读不出来（此时只能选择丢弃）。
+    pub error: Option<String>,
+}
+
+/// 一次进行中的主机名反查（放到线程里做，避免阻塞界面）。
+struct HostnameJob {
+    index: usize,
+    ip: Ipv4Addr,
+    rx: Receiver<Option<String>>,
 }
 
 pub struct App {
@@ -109,13 +147,27 @@ pub struct App {
     /// 真正要求退出主循环
     pub quit_requested: bool,
 
+    // ---- M7 ----
+    /// 本轮扫描的开始时间（写进快照头部）。
+    pub scan_time: String,
+    /// 最近一次成功写出的快照路径。
+    pub last_snapshot: Option<String>,
+    /// 最近一次补全报告的原文，供状态栏与测试断言。
+    pub enrich_note: String,
+    /// 启动时发现、还未处理的快照；Some 时界面显示确认框。
+    pub pending_restore: Option<PendingRestore>,
+    /// 快照文件目录（None = 当前工作目录）。
+    snapshot_dir: Option<PathBuf>,
+    hostname_job: Option<HostnameJob>,
+
     handle: Option<SchedulerHandle>,
     scheduler: ProbeScheduler,
 }
 
 impl App {
     pub fn new(options: Options) -> Self {
-        Self {
+        let snapshot_dir = options.snapshot_dir.clone();
+        let mut app = Self {
             prefix: options.prefix,
             editing: false,
             view: options.view,
@@ -138,10 +190,18 @@ impl App {
             scroll: 0,
             quit_confirm: false,
             quit_requested: false,
+            scan_time: String::new(),
+            last_snapshot: None,
+            enrich_note: String::new(),
+            pending_restore: None,
+            snapshot_dir,
+            hostname_job: None,
             handle: None,
             // M5 起默认使用**平台原生 ICMP**；`--mock` 可切回模拟后端做演示。
             scheduler: ProbeScheduler::new(select_backend(options.mock)),
-        }
+        };
+        app.check_pending_snapshot();
+        app
     }
 
     pub fn backend_name(&self) -> &'static str {
@@ -159,6 +219,7 @@ impl App {
             }
 
             self.poll_backend();
+            self.poll_hostname_job();
             if self.running {
                 if let Some(t0) = self.started_at {
                     self.elapsed_ms = t0.elapsed().as_millis() as u64;
@@ -168,13 +229,29 @@ impl App {
                 break;
             }
         }
-        // 退出前取消在跑的任务，避免线程悬挂
+        // 退出前取消在跑的任务，避免线程悬挂；顺手再落一次盘。
         self.cancel_scan(true);
+        self.autosave();
         Ok(())
     }
 
     fn on_key(&mut self, key: KeyEvent) {
         let action = map_key(key);
+
+        // 「发现上次结果」的确认框优先级最高：此时只有恢复/丢弃两个有效选择，
+        // 免得用户在没意识到有弹窗的情况下误按其它键。
+        if self.pending_restore.is_some() {
+            match action {
+                Action::PromptYes => self.restore_snapshot(),
+                // 小写 n 平时是「查主机名」，在确认框里按它的字面意思当「不恢复」
+                Action::PromptNo | Action::LookupHostname | Action::Cancel => {
+                    self.dismiss_restore(true)
+                }
+                Action::Quit | Action::ForceQuit => self.quit_requested = true,
+                _ => {}
+            }
+            return;
+        }
 
         if self.editing {
             match action {
@@ -239,6 +316,10 @@ impl App {
             }
             Action::SaveCsv => self.save("csv"),
             Action::SaveTxt => self.save("txt"),
+            Action::Enrich => self.enrich(false),
+            Action::LookupHostname => self.lookup_selected_hostname(),
+            Action::SaveSnapshot => self.save_snapshot(),
+            Action::LoadSnapshot => self.load_snapshot_from_disk(),
             Action::ToggleHelp => self.show_help = !self.show_help,
             Action::ScrollUp => self.scroll = self.scroll.saturating_sub(1),
             Action::ScrollDown => self.scroll = self.scroll.saturating_add(1),
@@ -249,7 +330,11 @@ impl App {
                 let n = self.visible_rows().len();
                 self.scroll = n.saturating_sub(1);
             }
-            Action::Char(_) | Action::Backspace | Action::None => {}
+            Action::Char(_)
+            | Action::Backspace
+            | Action::None
+            | Action::PromptYes
+            | Action::PromptNo => {}
         }
     }
 
@@ -288,6 +373,7 @@ impl App {
                 self.stats = ScanStats::from_results_with_total(&[], self.targets.len());
                 self.elapsed_ms = 0;
                 self.started_at = Some(Instant::now());
+                self.scan_time = now_string();
                 self.running = true;
                 self.cancelled = false;
                 self.handle = Some(handle);
@@ -347,11 +433,14 @@ impl App {
                 self.elapsed_ms = elapsed_ms;
                 self.running = false;
                 self.handle = None;
+                // 扫描刚结束时 ARP 表最新鲜：顺手补一次 MAC/厂商（内部会落盘）
+                self.enrich(true);
                 self.status = format!(
-                    "扫描完成：{} 个目标，{} 在线，用时 {:.2}s",
+                    "扫描完成：{} 个目标，{} 在线，用时 {:.2}s {}",
                     self.stats.total,
                     self.stats.online,
-                    elapsed_ms as f64 / 1000.0
+                    elapsed_ms as f64 / 1000.0,
+                    self.enrich_note
                 );
             }
             ProbeEvent::Cancelled {
@@ -362,9 +451,11 @@ impl App {
                 self.running = false;
                 self.cancelled = true;
                 self.handle = None;
+                // 已完成的那些结果一样值得补全，不能因为取消就丢掉
+                self.enrich(true);
                 self.status = format!(
-                    "已取消：完成 {}/{}，其中 {} 在线，已完成结果保留",
-                    self.stats.completed, self.stats.total, self.stats.online
+                    "已取消：完成 {}/{}，其中 {} 在线，已完成结果保留 {}",
+                    self.stats.completed, self.stats.total, self.stats.online, self.enrich_note
                 );
             }
         }
@@ -373,6 +464,321 @@ impl App {
     fn recompute_stats(&mut self) {
         let done: Vec<ProbeResult> = self.results.iter().flatten().cloned().collect();
         self.stats = ScanStats::from_results_with_total(&done, self.targets.len());
+    }
+
+    // ------------------------------------------------------------------
+    // M7：目标信息补全（MAC / 厂商 / 主机名）
+    // ------------------------------------------------------------------
+
+    /// 读一次邻居表回填 MAC 与厂商。可重复调用（只补空缺）。
+    pub fn enrich(&mut self, quiet: bool) {
+        if self.results.is_empty() {
+            if !quiet {
+                self.status = "尚无扫描结果可补全".into();
+            }
+            return;
+        }
+        let mut done: Vec<ProbeResult> = self.results.iter().flatten().cloned().collect();
+        let report: EnrichReport = enrich_with_mac_and_vendor(&mut done);
+        for r in done {
+            if let Some(slot) = self.results.get_mut(r.index as usize) {
+                *slot = Some(r);
+            }
+        }
+        self.enrich_note = describe_enrich(&report);
+        if !quiet {
+            self.status = self.enrich_note.clone();
+        }
+        self.autosave();
+    }
+
+    /// 反查「当前选中行」的主机名。放到线程里做，界面不卡。
+    pub fn lookup_selected_hostname(&mut self) {
+        if self.hostname_job.is_some() {
+            self.status = "已有一次主机名反查在进行中，稍候…".into();
+            return;
+        }
+        let Some(idx) = self.selected_target_index() else {
+            self.status = "没有可反查的行（先扫描、或用 t 切到表格视图）".into();
+            return;
+        };
+        let Some(result) = self.results.get(idx).and_then(|r| r.as_ref()) else {
+            self.status = "该行尚未探测出结果".into();
+            return;
+        };
+        if result.hostname.is_some() {
+            self.status = format!(
+                "{} 已有主机名 {}",
+                result.ip,
+                result.hostname.as_deref().unwrap_or_default()
+            );
+            return;
+        }
+        let ip = result.ip;
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let name = cping_core::hostname::reverse_lookup(ip, Duration::from_millis(1500));
+            let _ = tx.send(name);
+        });
+        self.hostname_job = Some(HostnameJob { index: idx, ip, rx });
+        self.status = format!("正在反查 {ip} 的主机名（最长 1.5s）…");
+    }
+
+    fn poll_hostname_job(&mut self) {
+        let Some(job) = self.hostname_job.as_ref() else {
+            return;
+        };
+        let index = job.index;
+        let ip = job.ip;
+        let outcome = job.rx.try_recv();
+        match outcome {
+            Ok(Some(name)) => {
+                if let Some(Some(r)) = self.results.get_mut(index) {
+                    r.hostname = Some(name.clone());
+                }
+                self.status = format!("{ip} → {name}");
+                self.hostname_job = None;
+                self.autosave();
+            }
+            Ok(None) => {
+                // 查不到就如实说查不到，不填占位文本
+                self.status = format!("{ip} 没有反向解析记录");
+                self.hostname_job = None;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.status = "主机名反查线程异常结束".into();
+                self.hostname_job = None;
+            }
+        }
+    }
+
+    /// 表格「当前行」对应的 results 下标：即滚动窗口的第一行（与 `>` 标记一致）。
+    pub fn selected_target_index(&self) -> Option<usize> {
+        let rows = self.visible_rows();
+        if rows.is_empty() {
+            return None;
+        }
+        rows.get(self.scroll.min(rows.len() - 1)).copied()
+    }
+
+    // ------------------------------------------------------------------
+    // M7：结果快照
+    // ------------------------------------------------------------------
+
+    fn snapshot_path(&self, name: &str) -> PathBuf {
+        match &self.snapshot_dir {
+            Some(dir) => dir.join(name),
+            None => PathBuf::from(name),
+        }
+    }
+
+    /// 由当前内存状态组装快照。
+    fn build_snapshot(&self) -> Snapshot {
+        Snapshot {
+            scan_time: if self.scan_time.is_empty() {
+                now_string()
+            } else {
+                self.scan_time.clone()
+            },
+            prefix: self.prefix.clone(),
+            local_ip: self.local_ip.clone(),
+            elapsed_ms: self.elapsed_ms,
+            thresholds: self.thresholds,
+            total: self.targets.len(),
+            cancelled: self.cancelled,
+            results: self.results.iter().flatten().cloned().collect(),
+        }
+    }
+
+    /// 自动落盘。没有目标或没有结果时不写，免得用空快照盖掉上次的真实结果。
+    fn autosave(&mut self) {
+        let snap = self.build_snapshot();
+        if snap.total == 0 || snap.results.is_empty() {
+            return;
+        }
+        let path = self.snapshot_path(AUTOSAVE_FILE);
+        if save_to_path(&snap, &path.to_string_lossy()).is_ok() {
+            self.last_snapshot = Some(path.to_string_lossy().to_string());
+        }
+    }
+
+    /// 显式另存为一份带时间戳的快照。
+    pub fn save_snapshot(&mut self) {
+        if self.targets.is_empty() {
+            self.status = "尚无扫描结果可保存".into();
+            return;
+        }
+        let snap = self.build_snapshot();
+        let safe_prefix = self.prefix.replace('.', "_");
+        let name = format!("cping-{safe_prefix}-{}.snap", file_stamp());
+        let path = self.snapshot_path(&name);
+        match save_to_path(&snap, &path.to_string_lossy()) {
+            Ok(()) => {
+                self.status = format!(
+                    "已保存快照：{} 条结果（共 {} 个目标）→ {}",
+                    snap.results.len(),
+                    snap.total,
+                    path.display()
+                );
+                self.last_snapshot = Some(path.to_string_lossy().to_string());
+                self.mark_handled(&snap);
+            }
+            Err(e) => self.status = format!("保存快照失败：{e}"),
+        }
+    }
+
+    /// 启动时检查有没有「上次没处理完」的快照。
+    fn check_pending_snapshot(&mut self) {
+        let path = self.snapshot_path(AUTOSAVE_FILE);
+        if !path.exists() {
+            return;
+        }
+        match load_from_path(&path.to_string_lossy()) {
+            Ok(snap) => {
+                if self.read_handled().as_deref() == Some(fingerprint(&snap).as_str()) {
+                    return; // 这份结果用户已经处理过，不再打扰
+                }
+                self.pending_restore = Some(PendingRestore {
+                    path: path.to_string_lossy().to_string(),
+                    scan_time: snap.scan_time.clone(),
+                    prefix: snap.prefix.clone(),
+                    total: snap.total,
+                    rows: snap.results.len(),
+                    elapsed_ms: snap.elapsed_ms,
+                    error: None,
+                });
+                self.status = "发现上次的扫描结果，是否恢复？y 恢复 / n 丢弃".into();
+            }
+            Err(e) => {
+                self.pending_restore = Some(PendingRestore {
+                    path: path.to_string_lossy().to_string(),
+                    scan_time: String::new(),
+                    prefix: String::new(),
+                    total: 0,
+                    rows: 0,
+                    elapsed_ms: 0,
+                    error: Some(e.to_string()),
+                });
+                self.status = "发现一份无法读取的快照，按 n 丢弃".into();
+            }
+        }
+    }
+
+    /// 用户确认恢复。默认**不**自动恢复，必须显式按 y。
+    pub fn restore_snapshot(&mut self) {
+        let Some(pending) = self.pending_restore.take() else {
+            return;
+        };
+        if let Some(err) = &pending.error {
+            self.status = format!("快照无法读取，已跳过：{err}");
+            return;
+        }
+        let snap = match load_from_path(&pending.path) {
+            Ok(s) => s,
+            Err(e) => {
+                self.status = format!("恢复失败：{e}");
+                return;
+            }
+        };
+        // 目标列表必须能由「网段 + 当前规则」完整重建，否则下标与 IP 会错位
+        let parsed = match parse_prefix(&snap.prefix) {
+            Ok(p) => p,
+            Err(e) => {
+                self.status = format!("快照中的网段无法解析：{e}");
+                return;
+            }
+        };
+        let targets = match build_targets(&parsed, TargetRange::Standard) {
+            Ok(t) => t,
+            Err(e) => {
+                self.status = format!("按快照网段生成目标失败：{e}");
+                return;
+            }
+        };
+        if targets.len() != snap.total {
+            self.status = format!(
+                "快照与当前目标规则不一致（快照 {} 个目标，按网段算出 {} 个），已跳过",
+                snap.total,
+                targets.len()
+            );
+            return;
+        }
+
+        let total = targets.len();
+        let mut slots: Vec<Option<ProbeResult>> = vec![None; total];
+        for r in snap.results.iter() {
+            let idx = r.index as usize;
+            if idx >= total {
+                self.status = format!("快照中的下标 {idx} 超出范围，已跳过");
+                return;
+            }
+            slots[idx] = Some(r.clone());
+        }
+
+        self.prefix = snap.prefix.clone();
+        self.scan_time = snap.scan_time.clone();
+        self.cell_slots = matrix_slots(&targets);
+        self.targets = targets;
+        self.results = slots;
+        self.stats = snap.stats();
+        self.elapsed_ms = snap.elapsed_ms;
+        self.thresholds = snap.thresholds;
+        self.cancelled = snap.cancelled;
+        self.running = false;
+        self.handle = None;
+        self.scroll = 0;
+        self.last_export = None;
+
+        self.mark_handled(&snap);
+        // 恢复出来的结果同样经不起进程被杀，立刻再落一次盘
+        self.autosave();
+        self.status = format!(
+            "已恢复 {}（{} 条结果 / {} 个目标，用时 {:.2}s）",
+            snap.scan_time,
+            snap.results.len(),
+            snap.total,
+            snap.elapsed_ms as f64 / 1000.0
+        );
+    }
+
+    /// `l` 键：手动从自动落盘文件恢复（例如刚才按 n 忽略了、后来又想恢复）。
+    pub fn load_snapshot_from_disk(&mut self) {
+        self.check_pending_snapshot();
+        if self.pending_restore.is_none() {
+            self.status = format!(
+                "没有可恢复的快照：{} 不存在或已经处理过",
+                self.snapshot_path(AUTOSAVE_FILE).display()
+            );
+        }
+    }
+
+    /// 放弃恢复；`delete` 时顺手删掉自动落盘文件。
+    pub fn dismiss_restore(&mut self, delete: bool) {
+        let Some(pending) = self.pending_restore.take() else {
+            return;
+        };
+        if let Ok(snap) = load_from_path(&pending.path) {
+            self.mark_handled(&snap);
+        }
+        if delete {
+            let _ = std::fs::remove_file(&pending.path);
+        }
+        self.status = "已忽略上次的扫描结果".into();
+    }
+
+    fn handled_path(&self) -> PathBuf {
+        self.snapshot_path(HANDLED_FILE)
+    }
+
+    fn read_handled(&self) -> Option<String> {
+        std::fs::read_to_string(self.handled_path())
+            .ok()
+            .map(|s| s.trim().to_string())
+    }
+
+    fn mark_handled(&self, snap: &Snapshot) {
+        let _ = std::fs::write(self.handled_path(), fingerprint(snap));
     }
 
     // ------------------------------------------------------------------
@@ -449,6 +855,38 @@ impl App {
             }
         }
     }
+}
+
+/// 把核心的补全报告翻成一句人话（界面只说真实发生的事）。
+fn describe_enrich(report: &EnrichReport) -> String {
+    if !report.table_ok {
+        return format!(
+            "读取邻居表失败：{}",
+            report.error.as_deref().unwrap_or("未知原因")
+        );
+    }
+    if report.mac_filled == 0 && report.vendor_filled == 0 {
+        return format!(
+            "邻居表 {} 条，没有可回填的目标（ARP 表只记录近期通信过的地址）",
+            report.entries
+        );
+    }
+    format!(
+        "邻居表 {} 条，新填 MAC {} 条、厂商 {} 条",
+        report.entries, report.mac_filled, report.vendor_filled
+    )
+}
+
+/// 同一份结果的判定指纹：任一要素变化即视为「新结果」。
+fn fingerprint(snap: &Snapshot) -> String {
+    format!(
+        "{}|{}|{}|{}|{}",
+        snap.scan_time,
+        snap.prefix,
+        snap.total,
+        snap.results.len(),
+        snap.elapsed_ms
+    )
 }
 
 /// 选择探测后端：默认平台原生 ICMP，`--mock` 时用确定性模拟数据。
@@ -536,12 +974,24 @@ mod tests {
     use ratatui::Terminal;
 
     /// 测试**必须**使用模拟后端：绝不能让单元测试去真实扫描局域网。
+    /// 快照目录也指到临时目录，避免测试往仓库里写文件。
     fn opts() -> Options {
         Options {
             no_color: true,
             mock: true,
+            snapshot_dir: Some(unique_tmp_dir()),
             ..Options::default()
         }
+    }
+
+    /// 每个测试一个独立目录，避免并行执行时互相看到对方的快照文件。
+    fn unique_tmp_dir() -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("cping-tui-test-{}-{}", std::process::id(), n));
+        let _ = std::fs::create_dir_all(&dir);
+        dir
     }
 
     /// 用 ratatui 的内存后端真实渲染一帧，返回**剔除全部空白字符**后的可见文本。
@@ -705,5 +1155,188 @@ mod tests {
         assert_eq!(back.colors.low, cfg.colors.low);
         assert_eq!(back.probe.concurrency, cfg.probe.concurrency);
         assert_eq!(back.probe.timeout_ms, cfg.probe.timeout_ms);
+    }
+
+    // ------------------------------------------------------------------
+    // M7
+    // ------------------------------------------------------------------
+
+    use std::path::Path;
+
+    /// 指定快照目录的选项（同一个目录可以被两个 App 实例共享，用来模拟「重启」）。
+    fn opts_in(dir: &Path) -> Options {
+        Options {
+            no_color: true,
+            mock: true,
+            snapshot_dir: Some(dir.to_path_buf()),
+            ..Options::default()
+        }
+    }
+
+    #[test]
+    fn enrich_does_not_change_statuses_or_stats() {
+        let mut app = App::new(opts());
+        app.prefix = "127.0.0".into();
+        app.start_scan();
+        wait_done(&mut app, 300);
+
+        let before_stats = app.stats.clone();
+        let before: Vec<(Ipv4Addr, cping_core::ProbeStatus)> = app
+            .results
+            .iter()
+            .flatten()
+            .map(|r| (r.ip, r.status.clone()))
+            .collect();
+
+        app.enrich(false);
+
+        // 补全只允许写 mac/vendor 两个字段，其它一律不动
+        assert_eq!(app.stats, before_stats, "补全不得改变统计");
+        let after: Vec<(Ipv4Addr, cping_core::ProbeStatus)> = app
+            .results
+            .iter()
+            .flatten()
+            .map(|r| (r.ip, r.status.clone()))
+            .collect();
+        assert_eq!(before, after, "补全不得改变任何探测结果");
+        assert!(!app.enrich_note.is_empty(), "必须给出一句可显示的说明");
+    }
+
+    #[test]
+    fn scan_result_is_autosaved_and_restore_needs_confirmation() {
+        let dir = unique_tmp_dir();
+        let mut app = App::new(opts_in(&dir));
+        app.prefix = "127.0.0".into();
+        app.start_scan();
+        wait_done(&mut app, 300);
+        assert!(!app.running);
+        assert!(
+            dir.join(AUTOSAVE_FILE).exists(),
+            "扫描结束后必须自动落盘（进程随时可能被杀）"
+        );
+
+        let before_stats = app.stats.clone();
+        let before_rows = app.results.iter().flatten().count();
+        let before_elapsed = app.elapsed_ms;
+
+        // 新实例 = 进程被杀后重启：**不得**自动恢复，只能先问
+        let mut restarted = App::new(opts_in(&dir));
+        assert_eq!(
+            restarted.results.iter().flatten().count(),
+            0,
+            "默认不自动恢复"
+        );
+        assert!(restarted.pending_restore.is_some(), "启动时应发现上次结果");
+
+        restarted.restore_snapshot();
+        assert!(restarted.pending_restore.is_none());
+        assert_eq!(restarted.prefix, "127.0.0");
+        assert_eq!(restarted.elapsed_ms, before_elapsed);
+        assert_eq!(restarted.results.iter().flatten().count(), before_rows);
+        // 恢复前后统计必须与快照时刻完全一致
+        assert_eq!(restarted.stats, before_stats);
+    }
+
+    #[test]
+    fn dismissing_the_prompt_stops_further_questions() {
+        let dir = unique_tmp_dir();
+        let mut app = App::new(opts_in(&dir));
+        app.prefix = "127.0.0".into();
+        app.start_scan();
+        wait_done(&mut app, 300);
+
+        let mut restarted = App::new(opts_in(&dir));
+        assert!(restarted.pending_restore.is_some());
+        restarted.dismiss_restore(true);
+        assert!(!dir.join(AUTOSAVE_FILE).exists(), "选择丢弃应删掉文件");
+
+        let third = App::new(opts_in(&dir));
+        assert!(third.pending_restore.is_none(), "同一份结果不应反复询问");
+    }
+
+    #[test]
+    fn corrupt_snapshot_is_reported_as_unreadable() {
+        let dir = unique_tmp_dir();
+        std::fs::write(dir.join(AUTOSAVE_FILE), "这不是快照\n").unwrap();
+        let app = App::new(opts_in(&dir));
+        let pending = app.pending_restore.expect("应发现文件并如实报错");
+        assert!(pending.error.is_some());
+        assert!(app.status.contains("无法读取"), "状态: {}", app.status);
+    }
+
+    #[test]
+    fn restore_refuses_snapshot_not_matching_target_rules() {
+        let dir = unique_tmp_dir();
+        let snap = Snapshot {
+            scan_time: "2026-10-14 21:40:00".into(),
+            prefix: "127.0.0".into(),
+            local_ip: "未知".into(),
+            elapsed_ms: 1,
+            thresholds: Thresholds::default(),
+            // 与「网段 + Standard」能算出的 255 个目标不符
+            total: 100,
+            cancelled: false,
+            results: Vec::new(),
+        };
+        save_to_path(&snap, &dir.join(AUTOSAVE_FILE).to_string_lossy()).unwrap();
+
+        let mut app = App::new(opts_in(&dir));
+        app.restore_snapshot();
+        assert!(app.targets.is_empty(), "不一致的快照不得写入状态");
+        assert!(app.status.contains("不一致"), "状态: {}", app.status);
+    }
+
+    #[test]
+    fn explicit_snapshot_save_writes_a_readable_file() {
+        let dir = unique_tmp_dir();
+        let mut app = App::new(opts_in(&dir));
+        app.prefix = "127.0.0".into();
+        app.start_scan();
+        wait_done(&mut app, 300);
+
+        app.save_snapshot();
+        assert!(app.status.starts_with("已保存快照"), "状态: {}", app.status);
+        let path = app.last_snapshot.clone().expect("应记录快照路径");
+        let snap = load_from_path(&path).expect("写出的快照必须能解析回来");
+        assert_eq!(snap.total, app.targets.len());
+        assert_eq!(snap.results.len(), app.results.iter().flatten().count());
+    }
+
+    #[test]
+    fn table_detail_line_shows_mac_vendor_and_hostname() {
+        let mut app = App::new(opts());
+        app.prefix = "127.0.0".into();
+        app.start_scan();
+        wait_done(&mut app, 300);
+        // 直接造数据，只验证渲染，不依赖本机 ARP / DNS 的实际情况
+        for r in app.results.iter_mut().flatten() {
+            r.mac = Some("AA:BB:CC:DD:EE:FF".into());
+            r.vendor = Some("Acme Networks".into());
+            r.hostname = Some("router.local".into());
+        }
+        app.view = ViewMode::Table;
+
+        let wide = render(&app, 110, 32);
+        assert!(wide.contains("厂商"), "宽终端详情行应带厂商标签");
+        assert!(wide.contains("Acme"), "详情行应显示厂商名");
+        assert!(wide.contains("router.local"), "详情行应显示主机名");
+
+        // 窄终端：MAC 从主行挪到详情行，且被按宽度截断而不是溢出
+        let narrow = render(&app, 62, 32);
+        assert!(narrow.contains("MAC"), "窄终端 MAC 应出现在详情行");
+        assert!(narrow.contains("厂商"), "窄终端也应尽力展示厂商");
+    }
+
+    #[test]
+    fn hostname_lookup_refuses_when_no_selection() {
+        let mut app = App::new(opts());
+        // 还没扫描，没有任何可反查的行
+        app.lookup_selected_hostname();
+        assert!(app.hostname_job.is_none());
+        assert!(
+            app.status.contains("没有可反查的行"),
+            "状态: {}",
+            app.status
+        );
     }
 }

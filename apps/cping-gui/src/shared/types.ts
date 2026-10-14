@@ -16,6 +16,10 @@ export interface ProbeResultDto {
   index: number
   ip: string
   mac: string | null
+  /** M7：由 MAC 前缀查 IEEE 注册数据得到的厂商名；查不到就是 null，不填占位 */
+  vendor: string | null
+  /** M7：按需 DNS 反查得到的主机名；查不到就是 null */
+  hostname: string | null
   statusKey: ProbeStatusKey
   statusLabel: string
   rttMs: number | null
@@ -79,6 +83,52 @@ export type ProbeEventDto =
   | { kind: 'progress'; taskId: string; completed: number; total: number }
   | { kind: 'finished'; taskId: string; stats: ScanStatsDto; elapsedMs: number }
   | { kind: 'cancelled'; taskId: string; stats: ScanStatsDto; elapsedMs: number }
+
+// ---------------------------------------------------------------------------
+// M7：目标信息补全 与 结果快照
+// ---------------------------------------------------------------------------
+
+/** 一次「读邻居表回填 MAC / 厂商」的结果 */
+export interface EnrichReportDto {
+  tableOk: boolean
+  error: string | null
+  entries: number
+  macFilled: number
+  vendorFilled: number
+  withMac: number
+  withVendor: number
+  withHostname: number
+  /** 后端给出的一句话说明，直接展示即可 */
+  message: string
+  autosavedTo: string | null
+}
+
+/** 单条主机名反查结果 */
+export interface HostnameLookupDto {
+  index: number
+  ip: string
+  hostname: string | null
+  found: boolean
+}
+
+/** 启动时发现的「上次未处理的结果」 */
+export interface PendingSnapshotDto {
+  path: string
+  ok: boolean
+  error: string | null
+  scanTime: string
+  prefix: string
+  total: number
+  rows: number
+  elapsedMs: number
+  cancelled: boolean
+}
+
+export interface SnapshotSavedDto {
+  path: string
+  rows: number
+  total: number
+}
 
 export const MATRIX_COLS = 16
 export const MATRIX_ROWS = 16

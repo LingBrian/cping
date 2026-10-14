@@ -6,6 +6,8 @@
 mod commands;
 
 use commands::AppState;
+// `app_handle()` 来自 `Manager` trait，不导入会看不到它
+use tauri::Manager;
 
 // 桌面端由 `main.rs` 直接调用 `run()`；
 // Android/iOS 下必须由该宏生成 JNI 入口符号（`Java_..._run`），
@@ -16,6 +18,14 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .manage(AppState::new())
+        // 窗口失焦/关闭时顺手落盘一次结果快照。
+        // 这不是「优雅退出」的保证，只是多一层保险：真正的落盘时机在每次扫描结束时（见 commands）。
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::Focused(false) | tauri::WindowEvent::CloseRequested { .. } => {
+                commands::autosave_on_background(window.app_handle());
+            }
+            _ => {}
+        })
         .invoke_handler(tauri::generate_handler![
             commands::parse_prefix_cmd,
             commands::start_scan,
@@ -26,6 +36,13 @@ pub fn run() {
             commands::load_config,
             commands::save_config,
             commands::get_local_addresses,
+            commands::enrich_results,
+            commands::lookup_hostname_for,
+            commands::save_snapshot,
+            commands::save_snapshot_to_app_dir,
+            commands::pending_snapshot,
+            commands::dismiss_snapshot,
+            commands::restore_snapshot,
         ])
         .run(tauri::generate_context!())
         .expect("启动 CPing 失败");

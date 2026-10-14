@@ -18,6 +18,10 @@ const state = computed(() => {
     <span>状态：<b>{{ state }}</b></span>
     <span>已完成：{{ store.stats.completed }}/{{ store.stats.total }}</span>
     <span>在线主机数：<b>{{ store.stats.online }}</b></span>
+    <!-- M7：认出了多少台如实报出来；数字直接数结果，不另外维护一份状态 -->
+    <span>已识别 MAC：{{ store.recognized.mac }}</span>
+    <span>厂商：{{ store.recognized.vendor }}</span>
+    <span>主机名：{{ store.recognized.hostname }}</span>
     <span>用时：{{ elapsed }}</span>
     <span>后端：{{ store.taskId ? 'cping-core' : '待启动' }}</span>
     <span>本机 IP：{{ store.localIp }}</span>

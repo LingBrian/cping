@@ -51,6 +51,34 @@ async function onExport(format: 'csv' | 'txt') {
     message.error(String(e))
   }
 }
+
+/** M7：读邻居表回填 MAC / 厂商。 */
+async function onEnrich() {
+  if (store.stats.completed === 0) {
+    message.warning('还没有已完成的结果')
+    return
+  }
+  const msg = await store.enrich()
+  if (msg) message.success(msg)
+  else message.error(store.status)
+}
+
+/** M7：Android 没有文件对话框，由后端写到应用可写目录。 */
+async function onSaveSnapshot() {
+  if (store.targets.length === 0) {
+    message.warning('还没有扫描结果')
+    return
+  }
+  const saved = await store.saveSnapshotToAppDir()
+  if (saved) message.success(store.status)
+  else message.error(store.status)
+}
+
+/** M7：手动再查一次有没有可以恢复的上次结果。 */
+async function onCheckRestore() {
+  await store.checkPendingSnapshot()
+  if (!store.pendingRestore) message.info('没有可恢复的历史结果')
+}
 </script>
 
 <template>
@@ -84,6 +112,29 @@ async function onExport(format: 'csv' | 'txt') {
             :style="{ width: `${percent}%`, height: '100%', background: '#111827', transition: 'width .2s' }"
           />
         </div>
+      </div>
+      <!-- M7：目标信息补全（MAC / 厂商）。主机名按行按需反查，见下拉列表。 -->
+      <div class="mobile__actions" style="margin-top: 10px">
+        <NButton
+          class="touchable"
+          size="small"
+          :disabled="store.stats.completed === 0"
+          @click="onEnrich"
+        >
+          补全 MAC / 厂商
+        </NButton>
+        <NButton
+          class="touchable"
+          size="small"
+          :disabled="store.targets.length === 0"
+          @click="onSaveSnapshot"
+        >
+          存快照
+        </NButton>
+      </div>
+      <div style="font-size: 11px; color: #6b7280; margin-top: 6px">
+        已识别 MAC {{ store.recognized.mac }} · 厂商 {{ store.recognized.vendor }} · 主机名
+        {{ store.recognized.hostname }}
       </div>
     </div>
 
@@ -134,6 +185,9 @@ async function onExport(format: 'csv' | 'txt') {
         </div>
         <NButton style="width: 100%; margin-top: 12px" class="touchable" @click="store.persistConfig()">
           保存设置
+        </NButton>
+        <NButton style="width: 100%; margin-top: 8px" class="touchable" @click="onCheckRestore">
+          查找上次结果
         </NButton>
       </NDrawerContent>
     </NDrawer>
