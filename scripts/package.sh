@@ -8,6 +8,14 @@
 # 例：
 #   scripts/package.sh 2.0.0 linux-x64 cping-tui cping-cli
 #
+# 二进制目录的解析顺序（见 resolve_bin_dir）：
+#   1. 环境变量 BIN_DIR（显式指定，CI 里推荐直接给全路径）
+#   2. $CARGO_TARGET_DIR/release —— 原生构建（不带 --target）的落点
+#   3. $CARGO_TARGET_DIR/*/release —— 带 --target <triple> 构建时的落点
+# 之所以要第 3 条：workflow 用 `--target x86_64-unknown-linux-gnu` 构建，
+# 产物落在 target/<triple>/release/，而脚本原先只看 target/release，
+# 于是「构建明明成功、打包却报缺二进制」。
+#
 # 产出（默认写入 release/<version>/）：
 #   cping-tui-<version>-<tag>.tar.gz     随包附 README.txt
 #   cping-cli-<version>-<tag>.tar.gz
@@ -36,10 +44,37 @@ if [[ ${#BINS[@]} -eq 0 ]]; then
 fi
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TARGET_DIR="${CARGO_TARGET_DIR:-$REPO/target}/release"
+TARGET_BASE="${CARGO_TARGET_DIR:-$REPO/target}"
 OUT_DIR="${OUT_DIR:-$REPO/release/$VERSION}"
 STAGE_ROOT="$(mktemp -d)"
 trap 'rm -rf "$STAGE_ROOT"' EXIT
+
+# 某目录里是否**全部**目标二进制都在
+all_bins_present() {
+  local dir="$1" bin
+  for bin in "${BINS[@]}"; do
+    [[ -x "$dir/$bin" ]] || return 1
+  done
+  return 0
+}
+
+# 找到实际存放二进制的 release 目录
+resolve_bin_dir() {
+  if [[ -n "${BIN_DIR:-}" ]]; then
+    echo "$BIN_DIR"
+    return
+  fi
+  local native="$TARGET_BASE/release"
+  all_bins_present "$native" && { echo "$native"; return; }
+  local cand
+  for cand in "$TARGET_BASE"/*/release; do
+    [[ -d "$cand" ]] || continue
+    all_bins_present "$cand" && { echo "$cand"; return; }
+  done
+  echo "$native" # 都没找到，回落到原生路径，好让下面的报错指到最可能的位置
+}
+
+TARGET_DIR="$(resolve_bin_dir)"
 
 mkdir -p "$OUT_DIR"
 
@@ -60,6 +95,9 @@ done
 if [[ $missing -ne 0 ]]; then
   echo >&2
   echo "先构建：cargo build --release -p cping-tui -p cping-cli" >&2
+  echo "（若用了 --target <triple>，可用 BIN_DIR=<...>/<triple>/release 指定）" >&2
+  echo "已找到的候选目录：" >&2
+  ls -d "$TARGET_BASE"/release "$TARGET_BASE"/*/release 2>/dev/null >&2 || true
   exit 1
 fi
 

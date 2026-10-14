@@ -105,6 +105,10 @@ jobs:
       - name: 打包 + SHA256SUMS
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          # 构建用了 --target x86_64-unknown-linux-gnu，产物落在
+          # target/<triple>/release/（不是 target/release/）。显式给出，
+          # 不依赖脚本的自动回落。
+          BIN_DIR: ${{ github.workspace }}/target/x86_64-unknown-linux-gnu/release
         run: |
           chmod +x scripts/package.sh
           scripts/package.sh '${{ steps.ver.outputs.version }}' linux-x64 cping-tui cping-cli

@@ -162,7 +162,9 @@ WSL 里访问不到 crates.io，因此先在 Windows 侧落一份依赖快照，
 cargo vendor vendor-offline        # Windows 侧执行
 ```
 
-WSL 内的 `.cargo/config.toml` 指向它：
+WSL 内的 `.cargo/config.toml` 指向它（**只加在 WSL 本地，绝不提交进仓库**。
+把 `[net] offline = true` 或这段 `replace-with` 落盘到仓库会让 CI 与任何全新克隆
+全部构建失败——详见 §8.4 第 1 条）：
 
 ```toml
 [source.crates-io]
@@ -190,3 +192,39 @@ apksigner sign --ks ~/.android/debug.keystore \
   --ks-key-alias androiddebugkey \
   --out <输出>.apk <输入>-unsigned.apk
 ```
+
+### 8.4 发布渠道与 CI 状态
+
+- **GitHub Release 已发布**（非草稿、非预览）：
+  <https://github.com/LingBrian/cping/releases/tag/v2.0.0>
+  11 个附件 = 上表 10 个产物 + `SHA256SUMS.txt`，字节数与本地产物逐一致。
+- `.github/workflows/release.yml` 支持两种进入方式：
+  - 打 tag（`v*`）自动触发；
+  - **手动触发（`workflow_dispatch`）**，可传 `tag` 输入用于补产物或预演。
+- `publish` job 有**幂等保护**：若该 tag 下已有 Release（例如人工用本机实测过的产物
+  发布过），则跳过自动创建，避免 `draft: true` 把一个已公开的 Release 打回草稿。
+
+#### 发行时踩到的两个「只在别人机器上复现」的缺陷
+
+本地四平台产物都出得来、测试全绿，但 `main` 与 `v2.0.0` 的 workflow 全红。
+两条根因都不是逻辑错误，而是**环境耦合**（完整记录见 `docs/testing.md` 文末）：
+
+1. **`.cargo/config.toml` 里硬编码了 `[net] offline = true`** → 所有 Rust 任务报
+   `no matching package named tokio / indexmap found`。cargo 解析依赖图与校验
+   `Cargo.lock` 时**必须访问 registry 索引，即使可选 feature 未启用**；本地一直
+   「看着正常」只是因为依赖缓存是热的。**不要把这个开关落盘到仓库。**
+2. **OUI 数据表 CRLF** → Windows 全新克隆下厂商名带尾随 `\r`，5 条测试挂掉。
+   修法：`find()` 出口剥掉 `\r` + `.gitattributes` 把
+   `cping-core/src/data/*.txt` 钉死为 LF。
+
+修完后 CI 五个任务（core / gui frontend / gui shell / windows / android）**首次全绿**，
+测试数 276。发布前请确认这条：
+
+```bash
+gh run list --workflow=ci.yml --limit 1    # 期望 completed / success
+```
+
+> 上面 10 个产物是在**修复前**的提交上构建的。两处修复都不改变编译进二进制的
+> 内容（一处是构建配置、一处是数据文件的换行符，而本机构建时该文件本来就是 LF），
+> 因此产物有效、无需重建；`SHA256SUMS.txt` 仍与线上附件逐字节对应。
+

@@ -488,11 +488,26 @@ Windows 上同一个用例（连确定关闭的端口）表现为超时，用 Py
    ② `.gitattributes` 把 `cping-core/src/data/*.txt` 钉死为 LF，保证嵌入字节跨平台一致。
    新增两条回归：合成 CRLF 夹具（各平台都能守住修复）+ 真实数据抽查（断言输出不含 `\r`）。
 
-### 这两个缺陷是怎么被发现的
+7. **Release workflow 的 Linux 作业「构建成功、打包却报缺二进制」**：
+   workflow 用 `cargo build --target x86_64-unknown-linux-gnu` 构建，
+   产物落在 `target/<triple>/release/`；而 `scripts/package.sh` 只看
+   `target/release/`，于是打印
+   `[缺失] .../target/release/cping-tui 不存在或不可执行` 并以 1 退出。
+   Windows 作业之所以没这个问题，是因为它显式传了 `-TargetDir target/<triple>/release`，
+   Linux 作业缺了等价项——**两个作业的契约不一致**。
+   修法：① `package.sh` 增加 `BIN_DIR` 显式覆盖，并在原生目录为空时自动回落到
+   `target/*/release`，同时在报错里列出已找到的候选目录；
+   ② workflow 显式传入 `BIN_DIR`，不依赖自动回落。
+   回归验证：合成目录树跑通四种场景——原生优先 / 三元组回落 / 显式 BIN_DIR 覆盖 /
+   全都没有时以非 0 退出，并确认产出的 `SHA256SUMS.txt` 可 `sha256sum -c` 通过。
+
+### 这三个缺陷是怎么被发现的
 
 本地全绿、四平台产物也都出得来，但 `main` 与 `v2.0.0` 的 workflow 是红的。
-顺着日志读下去才挖出上面两条——**都是「只在别人机器上复现」的类型**：
-一条依赖「冷缓存」，一条依赖「换行符转换」。修复后在 CRLF 条件下重跑了完整
+顺着日志读下去才挖出上面三条——**都是「只在别处复现」的类型**：
+一条依赖「冷缓存」，一条依赖「换行符转换」，一条依赖「CI 里的 `--target` 落点」。
+第三条尤其典型：**同一个脚本被两个 job 用不同方式调用**，契约不一致就会在
+「构建成功、打包失败」这种最反直觉的地方炸出来。修复后在 CRLF 条件下重跑了完整
 `cping-core` 套件（236 passed / 0 failed）复现验证，再还原为 LF 并逐字节比对备份。
 
 ## 尚未完成的验证

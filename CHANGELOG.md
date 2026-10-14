@@ -63,6 +63,18 @@
   - 验证：把三份数据临时转成 CRLF 复现 CI 条件，完整 `cping-core` 套件
     236 passed / 0 failed；随后还原为 LF 并与备份逐字节比对一致
 
+- **Release workflow 的 Linux 作业打包失败**：构建明明成功，
+  却打印 `[缺失] .../target/release/cping-tui 不存在或不可执行` 并以 1 退出
+  - 根因：workflow 用 `cargo build --target x86_64-unknown-linux-gnu` 构建，
+    产物落在 `target/<triple>/release/`；而 `scripts/package.sh` 只看
+    `target/release/`。Windows 作业显式传了 `-TargetDir target/<triple>/release`，
+    Linux 作业缺了等价项——**两个作业对同一个脚本的契约不一致**
+  - 修法：① `package.sh` 新增 `BIN_DIR` 显式覆盖，并在原生目录为空时自动回落到
+    `target/*/release`，报错时列出已找到的候选目录；
+    ② `release.yml` 的 Linux 作业显式传入 `BIN_DIR`
+  - 验证：合成目录树跑通四种场景（原生优先 / 三元组回落 / 显式覆盖 /
+    全部缺失时非 0 退出），产出清单可 `sha256sum -c` 通过
+
 ## [2.0.0] - 2026-10-15
 
 主版本。把 v1.1.2 之后的五个阶段（M8–M12）一次交付：持续监控、探测扩展、
