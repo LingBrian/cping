@@ -6,8 +6,8 @@
 
 Rust 核心 · TUI（ratatui）· 桌面 GUI（Tauri 2 + Vue 3）· Android
 
-[![Release](https://img.shields.io/badge/release-v1.0.0-111827)](../../releases)
-[![Tests](https://img.shields.io/badge/tests-84%20passed-brightgreen)](docs/testing.md)
+[![Release](https://img.shields.io/badge/release-v1.1.0-111827)](../../releases)
+[![Tests](https://img.shields.io/badge/tests-151%20passed-brightgreen)](docs/testing.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20Android-lightgrey)](docs/platform-compatibility.md)
 
@@ -26,9 +26,13 @@ Rust 核心 · TUI（ratatui）· 桌面 GUI（Tauri 2 + Vue 3）· Android
 
 **TUI 终端版（同一扫描，`windows-icmp` 后端）**
 
-| 矩阵视图 | 表格视图 |
+| TUI 矩阵视图 | 表格视图 |
 | --- | --- |
 | ![TUI 矩阵](docs/images/tui-matrix.png) | ![TUI 表格](docs/images/tui-table.png) |
+
+**M7：目标信息与快照恢复**（扫描结果回答「这是谁」，不只是「在不在线」）
+
+![启动时发现上次结果，默认不自动恢复](docs/images/m7-gui-restore-prompt.png)
 
 **Android 移动布局**（真实 Android 运行时截图）
 
@@ -62,11 +66,15 @@ cping/
 ├── crates/cping-core/        共享核心（零第三方运行时依赖）
 │   ├── target/result/classify/export   目标生成 · 结果模型 · 分类 · 导出
 │   ├── probe/scheduler                 ProbeBackend 抽象 + std 线程并发调度
+│   ├── oui/neighbor/hostname/enrich    M7：厂商识别 · ARP 取 MAC · 反查主机名 · 信息补全
+│   ├── snapshot                        结果快照落盘与恢复（严格解析，坏数据宁可报错）
+│   ├── data/                           IEEE OUI 三表（54,190 条，编译期嵌入）
 │   └── native.rs                       Windows/Linux/Android 原生 ICMP
 ├── apps/cping-tui/           ratatui + crossterm 交互式终端界面
 ├── apps/cping-gui/           Tauri 2 + Vue 3 + TypeScript
 │   ├── src/                  桌面布局 + 移动布局（自动切换）
-│   └── src-tauri/            Tauri 容器（9 个 Command，唯一前后端通道）
+│   └── src-tauri/            Tauri 容器（16 个 Command，唯一前后端通道）
+├── tools/oui-gen/            IEEE 官方 CSV → 嵌入数据表的确定性生成器
 └── tools/android-forensics/  Android 平台行为取证对照程序（不参与构建）
 ```
 
@@ -109,15 +117,27 @@ cping-tui --prefix 192.168.1
 | `Enter` | 开始探测 | `g` / `t` | 矩阵 / 表格视图 |
 | `i` | 编辑网段前缀 | `f` | 过滤不在线目标 |
 | `Esc` | 取消 / 关闭帮助 | `s` / `S` | 导出 CSV / TXT |
+| `m` | 补全 MAC / 厂商 | `n` | 反查当前行主机名 |
+| `w` | 保存快照 | `l` | 从快照恢复 |
 | `?` / `F1` | 帮助 | `q` / `Ctrl+C` | 退出并恢复终端 |
 
 状态符号：`#` 低延迟 · `+` 中延迟 · `*` 高延迟 · `-` 无回应 · `!` 错误 · `.` 未探测。
 **颜色不是唯一标识**：无颜色终端下符号仍然可区分。
 
+可选 `--snapshot-dir <目录>` 指定快照目录（默认当前目录）。
+
 ### 桌面 GUI
 
 输入 C 类网段前三段 → 开始探测；矩阵/表格切换、仅在线过滤、时延配色自定义、
 保存结果为 CSV（UTF-8 BOM，Excel 直接打开不乱码）或 TXT。
+
+**目标信息（M7）**：扫描结束自动读本机邻居表（ARP）回填 MAC，并按 IEEE 注册数据
+（54,190 条，离线内置）显示厂商；表格里每行可按需反查主机名（阻塞操作所以只在
+点击时对单行发起）。查不到就留空——不猜、不填占位文本。
+
+**结果快照**：每轮扫描结束自动落盘一份快照；下次启动若发现它会先问是否恢复，
+**默认不恢复**（丢弃 / 暂不恢复 / 恢复结果三个出口）。存在的理由是 Android 上
+进程会被系统随时回收（销毁 Activity 即退出进程），内存里的结果不可靠。
 
 ### Android
 
@@ -132,7 +152,7 @@ cping-tui --prefix 192.168.1
 | 版本 | 阶段 | 主题 |
 | --- | --- | --- |
 | **v1.0.0** ✅ | M0–M6 | 核心库 · TUI · 桌面 GUI · Android 构建链 · 真实 ICMP（Windows 实测） |
-| v1.1.0 | M7 | 目标信息增强：厂商识别（OUI）、MAC/ARP、主机名反查 |
+| **v1.1.0** ✅ | M7 | 目标信息增强：OUI 厂商识别（54,190 条离线库）、ARP/MAC、主机名反查、结果快照与恢复 |
 | v1.2.0 | M8 | 持续监控：定时重扫、上下线事件流、变化高亮 |
 | v1.3.0 | M9 | 探测扩展：自定义端口 TCP 探测、多网段、CIDR |
 | v1.4.0 | M10 | 数据与集成：JSON/HTML 导出、扫描对比 diff、无头 CLI |
