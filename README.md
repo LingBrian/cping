@@ -30,15 +30,17 @@ Rust 核心 · TUI（ratatui）· 桌面 GUI（Tauri 2 + Vue 3）· Android
 | --- | --- |
 | ![TUI 矩阵](docs/images/tui-matrix.png) | ![TUI 表格](docs/images/tui-table.png) |
 
-**Android 移动布局**
+**Android 移动布局**（真实 Android 运行时截图）
 
-| 列表视图 | 矩阵视图 |
-| --- | --- |
-| ![Android 列表](docs/images/android-list.png) | ![Android 矩阵](docs/images/android-matrix.png) |
+| 列表视图 | 矩阵视图 | 横屏 |
+| --- | --- | --- |
+| ![Android 列表](docs/images/android-list.png) | ![Android 矩阵](docs/images/android-matrix.png) | ![Android 横屏](docs/images/android-landscape.png) |
 
-> 上排 Android 截图为 `MobileLayout.vue` 在真实应用（Rust 核心 + Tauri WebView）中
-> 以 412×915 手机视口 + 触摸仿真渲染的运行画面，数据来自真实 ICMP 扫描；
-> 与 APK 内运行的是**同一份前端与核心代码**。真机截图待有设备后补充。
+> Android 截图摄于 Android 15 模拟器（WHPX 硬件加速）中运行的 APK 本体——
+> 与发布产物同一份 Rust 核心 + 前端，非浏览器仿真。截图中全部目标显示
+> 「权限不足」是**正确行为**：Android 普通应用无 `CAP_NET_RAW`，无法创建
+> raw ICMP 套接字，本工具如实分类而不假装离线（真机上同理，局域网扫描
+> 请用桌面端，或在 Android 上改用后续版本的独立 TCP 模式）。
 
 ## 为什么重写
 
@@ -119,7 +121,10 @@ cping-tui --prefix 192.168.1
 ### Android
 
 列表优先的触控布局：网段输入（数字键盘）→ 开始探测；列表/矩阵页签、仅在线开关、
-导出到应用可写目录（回报完整路径）、抽屉式设置。
+导出到应用专属外部目录（回报完整路径，Android 10+ 分区存储无需权限）、抽屉式设置。
+已在 Android 15 模拟器完成真机级验收：安装/启动/扫描/导出/横竖屏/前后台全部通过；
+普通权限下 raw ICMP 被拒（`EPERM`/`EACCES`），状态如实显示「权限不足」，
+独立 TCP 连通性模式见路线图 M9。
 
 ## 路线图
 
@@ -158,13 +163,16 @@ cping-tui --prefix 192.168.1
 | Android：`.so` 校验报 missing runtime symbols | `run()` 缺移动端入口宏 | 补 `#[cfg_attr(mobile, tauri::mobile_entry_point)]` |
 | Android：Kotlin 报 different roots | tauri-plugin 源码与工程跨盘符 | `gradle.properties` 设 `kotlin.incremental=false` |
 | Android：compileSdk 37 找不到 | 本机只装到 android-36 | `app/build.gradle.kts` 用 36 |
+| `sdkmanager` 下载极慢（单连接 ~0.3 MB/s） | 无多线程下载 | 多线程分段拉取 zip 后解包 + 手写 `package.xml`（见 `docs/testing.md`） |
+| `avdmanager` 报 *Package path is not valid*（却又把该路径列为合法） | 该版 cmdline-tools 解析系统镜像元数据有 bug | 手写 AVD 的 `config.ini`（emulator 只读它） |
 
 ## 已知限制与使用声明
 
-- **Windows 已实测真实 ICMP**（普通权限可用）；Linux / Android 的原生 ICMP
-  **未在真系统实测**，拿不到权限时按「权限不足」如实上报，绝不把 TCP 连通性
-  伪装成 ICMP 成功。
-- **Android 未真机验证**（构建链已打通，产物通过 aapt2/apksigner 校验）。
+- **Windows 已实测真实 ICMP**（普通权限可用）；Android 已在模拟器实测（raw ICMP
+  被拒，如实显示「权限不足」）；Linux 的原生 ICMP **未实测**。拿不到权限时按
+  「权限不足」如实上报，绝不把 TCP 连通性伪装成 ICMP 成功。
+- **Android 已在 Android 15 模拟器完成真机级验收**（安装/启动/扫描/导出/横竖屏/
+  前后台）；真机上的厂商后台管控与字体缩放仍待验证。
 - 本机地址与 MAC 尚未接入平台枚举，界面显示「未知」，**不伪造**。
 - 目标范围默认 `.1`–`.255`（对齐原版），`.0` 不参与探测。
 - **仅用于你拥有或获授权管理的网络**；并发与目标数均有上限。

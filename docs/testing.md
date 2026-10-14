@@ -260,17 +260,55 @@ Kotlin 增量编译用 `File.relativeTo()` 算相对路径，跨盘符直接抛�
 > 顺带说明：截图最底边那条模糊文字是 DWM 不可见边框外的**背后窗口**透出来，
 > 不是应用内容（GetWindowRect 含 ~7px 不可见边距）。
 
+## Android 模拟器真机级验收（M6 之后）
+
+### 环境搭建（两处 SDK 工具链的坑）
+
+| 坑 | 现象 | 解法 |
+| --- | --- | --- |
+| `sdkmanager` 单连接下载 ~0.3 MB/s | 1.6 GB 镜像要 1.5 h+ | 从仓库 XML 拿真实 URL，多线程分段下载（`analysis/pdl.py`，8 连接 ~9.7 MB/s），解包后**手写 `package.xml`**（`analysis/install_sdk_pkg.py`），`sdkmanager --list_installed` 即可识别 |
+| `avdmanager create avd` 报 *Package path is not valid*，错误信息里却把同一 path 列为「合法」 | 该版 cmdline-tools 解析系统镜像元数据 bug | 手写 `~/.android/avd/<name>.ini` + `<name>.avd/config.ini`（`analysis/make_avd.py`）——emulator 启动只读 config.ini，完全不查 package.xml |
+
+WHPX：`Enable-WindowsOptionalFeature HypervisorPlatform -NoRestart` 之后
+**未重启即生效**（`emulator -accel-check` → `Windows Hypervisor Platform accelerator
+is operational`），模拟器 40 s 完成冷启动。
+
+### 验收矩阵（全部实测）
+
+| 项 | 结果 |
+| --- | --- |
+| 安装（290 MB 通用 APK，双 ABI） | ✅ Success，设备端 `primaryCpuAbi=x86_64` |
+| 冷启动 | ✅ COLD，**不自动扫描**（点击前保持 0/0） |
+| 真实扫描 10.0.2.x | ✅ 255 目标 / 8.27 s = 8 批 × 1 s 超时 |
+| ICMP 权限 | ✅ `EPERM`/`EACCES` → 如实显示「权限不足」，0 在线 |
+| 列表 / 矩阵 / 横屏 / 前后台 | ✅ 全部正常（`docs/images/android-*.png`） |
+| 导出 CSV | ✅ 应用专属外部目录；BOM / 256 行 CRLF / `.1`–`.255` |
+| 真机级截图 | ✅ `android-list / android-matrix / android-landscape`（APK 本体，非仿真） |
+
+### ⚠️ 发现一个间歇性 native abort（开放问题）
+
+```
+F libc: FORTIFY: pthread_mutex_lock called on a destroyed mutex
+ActivityManager: Process com.cping.gui (pid xxx) has died: cch CRE  ← cached
+```
+
+- 仅出现一次：应用**退后台/息屏约 1 分钟**后被系统按 cached 进程处理时；
+- 三次受控重现（前台空闲 60 s、息屏 90 s）均未复现；
+- 本项目调度器的 mutex 均在 `Arc` 保护下、事件通道闭环，未发现可触达的
+  「销毁后加锁」路径；FORTIFY abort 未留 tombstone，归因需复现时
+  `ndk-stack` 抓 native 栈 → 列入 M7。
+- 影响评估：前台交互与扫描全流程未受影响；后台被杀后系统自动重启 Activity，
+  结果因存内存而丢失（与「取消后保留已完成结果」的约定不冲突——进程级回收
+  本来就不保证内存态存活）。
+
 ### 仍未验证（M6 明确未覆盖）
 
-- **Android 真机全流程**：安装、启动、触控、停止、前后台切换、文件保存、网络变化、竖横屏
-- **Android ICMP 能力**：普通应用能否拿到 `SOCK_RAW`（需真机看 errno）
 - 释放版本未签名（`release` APK 需 keystore 才能安装）
+- 真机差异项：厂商 ROM 后台管控、字体缩放、Wi-Fi/蜂窝切换
 
 ## 尚未完成的验证
 
-- **Android 真机**：见上（本机无设备，`adb devices` 为空）
+- **Android 真机**：模拟器已覆盖大部分；真机差异项见上
 - **Linux 平台**：`linux-icmp` 后端仅有代码级审查，未编译未实测（本机无 Linux/WSL）
-- GUI 交互实测：点击开始/停止、视图切换、离线过滤、颜色设置持久化、导出落盘
-  （界面已渲染并跑通端到端探测，但**自动化鼠标点击**验证尚未做）
 - 终端 resize 的动态验证（`Resize` 事件路径已实现并有字符提示）
 - Ctrl+C 与退出时的终端恢复（已在 `main.rs` 用 panic hook + 正常路径双重处理，待人工确认）
