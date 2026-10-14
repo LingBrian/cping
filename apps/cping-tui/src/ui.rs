@@ -44,8 +44,10 @@ pub fn draw(f: &mut Frame, app: &App) {
     // 快照确认框优先级高于帮助：它需要用户明确回答
     if let Some(pending) = &app.pending_restore {
         draw_restore_prompt(f, pending, f.area());
+    } else if app.show_changes {
+        draw_changes(f, app, f.area());
     } else if app.show_help {
-        draw_help(f, f.area());
+        draw_help(f, app, f.area());
     }
 }
 
@@ -56,13 +58,24 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         Style::default()
     };
     let hint = if app.editing {
-        "  ← 输入中：只接受数字与点，Enter 确认"
+        "  ← 输入中：网段 / 单主机 / CIDR / 多网段，Enter 确认"
     } else {
         "  （按 i 编辑）"
     };
+    let mode_tag = if app.mode().is_tcp() {
+        format!(" [{}]", app.mode().describe())
+    } else {
+        String::new()
+    };
     let line = Line::from(vec![
-        Span::styled(" 网段前缀: ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(" 目标: ", Style::default().add_modifier(Modifier::BOLD)),
         Span::styled(format!(" {} ", app.prefix), style),
+        Span::styled(
+            mode_tag,
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .fg(Color::Cyan),
+        ),
         Span::styled(hint, Style::default().fg(Color::DarkGray)),
     ]);
     let block = Block::default()
@@ -165,7 +178,9 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
         let class = app.class_of(result);
         let (status, rtt, mac) = match result {
             Some(r) => (
-                r.status.label_zh().to_string(),
+                // M9：TCP 模式下状态必须显示成 TCP-OPEN / TCP-关闭，
+                // 否则会被读成 ICMP 可达
+                app.mode().status_label(&r.status),
                 r.status.rtt_ms().map(|v| v.to_string()).unwrap_or_default(),
                 r.mac.clone().unwrap_or_default(),
             ),
@@ -176,10 +191,17 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
 
         let class_label = class.map(|c| c.label_zh()).unwrap_or("-");
         let selected = idx == start;
-        let style = if selected {
-            app.style_for(class).add_modifier(Modifier::BOLD)
-        } else {
-            app.style_for(class)
+        let base_style = app.style_for(class);
+        // M8：本轮刚变化的行加粗 + 后缀标记，颜色之外还有形状，无颜色终端同样可读
+        let change = app.change_kind_of_index(target_idx);
+        let style = match (selected, change) {
+            (true, _) => base_style.add_modifier(Modifier::BOLD | Modifier::REVERSED),
+            (false, Some(_kind)) => base_style.add_modifier(Modifier::BOLD),
+            (false, None) => base_style,
+        };
+        let marker = match change {
+            Some(k) => format!(" [{}]", k.label_zh()),
+            None => String::new(),
         };
         let mut spans = vec![
             Span::styled(if selected { ">" } else { " " }, Style::default()),
@@ -190,7 +212,7 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
         if wide {
             spans.push(Span::styled(pad(&mac, MAC_COL_W), style));
         }
-        spans.push(Span::styled(class_label.to_string(), style));
+        spans.push(Span::styled(format!("{class_label}{marker}"), style));
         lines.push(Line::from(spans));
 
         // 详情行：只列真有内容的字段；一个都没有就退回分隔线
@@ -237,7 +259,13 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         ));
     f.render_widget(gauge, chunks[0]);
 
-    let state = if app.running { "探测中" } else { "空闲" };
+    let state = if app.running {
+        "探测中"
+    } else if app.monitor_on() {
+        "监控待扫"
+    } else {
+        "空闲"
+    };
     // M7：把「认出了多少台」如实报出来。计数直接数结果，不另存一份状态。
     let with_vendor = app
         .results
@@ -251,18 +279,32 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         .flatten()
         .filter(|r| r.hostname.is_some())
         .count();
+    // M8：轮次与变化
+    let watch = if app.monitor_on() {
+        format!(
+            "  监控 {}s（{}s 后）",
+            app.watch_seconds.unwrap_or(0),
+            app.seconds_to_next_round()
+        )
+    } else {
+        String::new()
+    };
     let detail = format!(
-        " {:6} 在线 {}  超时 {}  不可达 {}  错误 {}  用时 {:.2}s  后端 {}  本机 {}  厂商 {}  主机名 {}",
+        " {:6} 第{}轮  {}  在线 {}  超时 {}  不可达 {}  错误 {}  变化 {}  用时 {:.2}s  后端 {}  本机 {}  厂商 {}  主机名 {}{}",
         state,
+        app.monitor.round(),
+        app.mode().describe(),
         app.stats.online,
         app.stats.timeout,
         app.stats.unreachable,
         app.stats.error,
+        app.last_changes().len(),
         app.elapsed_ms as f64 / 1000.0,
         app.backend_name(),
         app.local_ip,
         with_vendor,
         with_host,
+        watch,
     );
     // 用默认前景色，避免在浅色/深色主题下出现"看不见的文字"
     f.render_widget(
@@ -272,7 +314,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_keys(f: &mut Frame, app: &App, area: Rect) {
-    let base = "Enter 开始 · i 编辑 · g/t 视图 · f 过滤 · s/S 导出 · m 补厂商 · n 查主机名 · w 存快照 · l 读快照 · ? 帮助 · q 退出";
+    let base = "Enter 开始 · i 编辑 · g/t 视图 · f 过滤 · s/S/j/H 导出 · m 补厂商 · n 查主机名 · w/l 快照 · M 监控 · e 变化 · T/p 方式 · ? 帮助 · q 退出";
     let text = if app.status.is_empty() {
         base.to_string()
     } else {
@@ -329,39 +371,117 @@ fn draw_restore_prompt(f: &mut Frame, pending: &PendingRestore, area: Rect) {
     f.render_widget(Paragraph::new(Text::from(lines)).block(block), popup);
 }
 
-fn draw_help(f: &mut Frame, area: Rect) {
-    let popup = centered(area, 66, 23);
+fn draw_help(f: &mut Frame, app: &App, area: Rect) {
+    let popup = centered(area, 78, 41);
     f.render_widget(Clear, popup);
+    // M12：如实告诉用户「现在用的是哪个后端、它能干什么、不能干什么」。
+    // 内容来自核心注册表，与 `cping-cli --list-backends` 同源，不会两边说法不一。
+    let caps = app.backend_caps();
     let text = Text::from(vec![
         Line::from("快捷键"),
         Line::from("  Enter        开始探测（编辑态下表示确认输入）"),
-        Line::from("  i            进入/退出网段前缀编辑"),
+        Line::from("  i            进入/退出目标编辑"),
         Line::from("  Esc          取消探测 / 关闭本窗口"),
         Line::from("  g / t        切换 矩阵 / 表格 视图"),
         Line::from("  f            过滤不在线目标"),
         Line::from("  s / S        导出 CSV / TXT"),
+        Line::from("  j / H        导出 JSON / HTML 报告"),
         Line::from("  ↑ ↓ PgUp PgDn Home End  表格滚动"),
+        Line::from(""),
+        Line::from("目标与探测方式（M9）"),
+        Line::from("  输入支持     192.168.1（网段）/ 单主机 / CIDR（192.168.1.0/24）/ 多段"),
+        Line::from("               多段用逗号或空格分隔，重复目标只算一次"),
+        Line::from("  T            切换 ICMP ↔ TCP（TCP 结果标注为 TCP-OPEN）"),
+        Line::from("  p            轮换常用 TCP 端口（22/23/80/135/139/443/445/3389）"),
+        Line::from(""),
+        Line::from("探测后端（M12）"),
+        Line::from(format!("  当前          {}", caps.describe())),
+        Line::from("  可选          icmp4（ICMP 方式）/ tcp（TCP 方式）"),
+        Line::from("  IPv6 目标     必须走 TCP：按 T 切到 TCP 方式，或 --mode tcp --port N"),
+        Line::from("  ICMPv6        尚未实装——登记为「不可用」，不会静默超时"),
+        Line::from(format!(
+            "  本机能力      {}",
+            truncate_display(&app.backend_summary(), 60)
+        )),
+        Line::from(""),
+        Line::from("持续监控（M8）"),
+        Line::from("  M            开/关自动重扫（默认 30 秒一轮）"),
+        Line::from("  [ / ]        缩短 / 延长重扫间隔"),
+        Line::from("  e            查看变化事件流（上线/离线/延迟档位变化）"),
         Line::from(""),
         Line::from("目标信息（M7）"),
         Line::from("  m            读邻居表回填 MAC / 厂商"),
         Line::from("  n            反查当前选中行的主机名"),
         Line::from("  w / l        保存快照 / 从快照恢复"),
-        Line::from("  说明          MAC、厂商来自本机邻居表与 IEEE 注册数据；"),
-        Line::from("                主机名走 DNS 反查，查不到就留空，不猜。"),
+        Line::from("  说明         MAC、厂商来自本机邻居表与 IEEE 注册数据；"),
+        Line::from("               主机名走 DNS 反查，查不到就留空，不猜。"),
         Line::from(""),
         Line::from("  ? 或 F1      本帮助"),
         Line::from("  q            退出（运行中需再按一次确认）"),
-        Line::from("  Ctrl+C       退出（自动恢复终端）"),
-        Line::from(""),
-        Line::from("状态符号（无颜色时同样可读）："),
+        Line::from("  Ctrl+C       强制退出（自动恢复终端）"),
         Line::from(format!(
-            "  {SYM_LOW} 低延迟   {SYM_MID} 中延迟   {SYM_HIGH} 高延迟   {SYM_OFFLINE} 无回应   {SYM_ERROR} 错误   {SYM_PENDING} 未探测"
+            "  符号  {SYM_LOW} 低延迟  {SYM_MID} 中延迟  {SYM_HIGH} 高延迟  {SYM_OFFLINE} 无回应  {SYM_ERROR} 错误  {SYM_PENDING} 未探测"
         )),
     ]);
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" 帮助（任意键关闭） ");
     f.render_widget(Paragraph::new(text).block(block), popup);
+}
+
+/// M8 变化事件流：最新在上。
+fn draw_changes(f: &mut Frame, app: &App, area: Rect) {
+    let popup = centered(area, 84, (area.height.saturating_sub(4)).min(24));
+    f.render_widget(Clear, popup);
+    let block = Block::default().borders(Borders::ALL).title(format!(
+        " 变化事件流（累计 {} 条，缓冲上限 {}） ",
+        app.change_log().total_seen(),
+        app.change_log().capacity()
+    ));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    if app.change_log().is_empty() {
+        f.render_widget(
+            Paragraph::new(
+                "还没有变化记录。\n\n用 M 开启持续监控后，每轮扫描都会与上一轮比对：\n\
+                 · 上线 / 离线\n · 延迟档位变化（<50ms / 50–100ms / >100ms）\n · 非在线状态之间的变化\n\n\
+                 首轮只建立基线，不产生变化事件。",
+            )
+            .wrap(Wrap { trim: false }),
+            inner,
+        );
+        return;
+    }
+
+    let rows = (inner.height as usize).saturating_sub(1);
+    let mut lines: Vec<Line> = Vec::with_capacity(rows);
+    for c in app.recent_changes(rows) {
+        let style = if app.no_color {
+            Style::default()
+        } else {
+            match c.kind {
+                cping_core::monitor::ChangeKind::Appeared => Style::default().fg(Color::Green),
+                cping_core::monitor::ChangeKind::Disappeared => Style::default().fg(Color::Gray),
+                _ => Style::default().fg(Color::Yellow),
+            }
+        };
+        lines.push(Line::from(Span::styled(
+            truncate_display(
+                &format!(
+                    "  第{}轮  {:<15} {:<6} {} → {}",
+                    c.round,
+                    c.ip.to_string(),
+                    c.kind.label_zh(),
+                    c.from.label_zh(),
+                    c.to.label_zh()
+                ),
+                inner.width as usize,
+            ),
+            style,
+        )));
+    }
+    f.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {

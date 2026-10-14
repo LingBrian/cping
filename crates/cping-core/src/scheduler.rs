@@ -17,7 +17,7 @@ use crate::probe::ProbeBackend;
 use crate::result::{ProbeEvent, ProbeResult, ProbeStatus, ScanStats, TaskId};
 use crate::target::MAX_TARGETS;
 use std::collections::VecDeque;
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -47,7 +47,7 @@ pub struct RunOutcome {
 }
 
 /// 目标队列项。
-type QueueItem = (u16, Ipv4Addr);
+type QueueItem = (u16, IpAddr);
 
 struct Shared {
     queue: Mutex<VecDeque<QueueItem>>,
@@ -86,11 +86,7 @@ impl ProbeScheduler {
     }
 
     /// 启动一次探测。目标必须是已生成好的列表（顺序即 `index`）。
-    pub fn start(
-        &self,
-        config: &ProbeConfig,
-        targets: Vec<Ipv4Addr>,
-    ) -> CoreResult<SchedulerHandle> {
+    pub fn start(&self, config: &ProbeConfig, targets: Vec<IpAddr>) -> CoreResult<SchedulerHandle> {
         config.validate()?;
         if targets.is_empty() {
             return Err(CoreError::InvalidConfig("目标列表为空".into()));
@@ -261,6 +257,13 @@ pub fn status_from_error(error: ProbeError) -> ProbeStatus {
 pub struct CancelToken(Arc<AtomicBool>);
 
 impl CancelToken {
+    /// 由共享标志构造。crate 内使用：异步调度器（`asynchronous`）与同步调度器
+    /// 必须操作**同一个**取消标志，否则两套实现的取消语义会分叉。
+    #[cfg(feature = "async")]
+    pub(crate) fn from_flag(flag: Arc<AtomicBool>) -> Self {
+        Self(flag)
+    }
+
     /// 请求取消；返回是否本次调用真正触发了取消。
     pub fn cancel(&self) -> bool {
         !self.0.swap(true, Ordering::SeqCst)

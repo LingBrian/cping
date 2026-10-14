@@ -35,6 +35,129 @@
 
 （暂无）
 
+## [2.0.0] - 2026-10-15
+
+主版本。把 v1.1.2 之后的五个阶段（M8–M12）一次交付：持续监控、探测扩展、
+数据与集成、平台与分发、架构升级。**含破坏性变更**，迁移表见本节末。
+
+### 新增
+
+**共享核心 `cping-core`**
+
+- **持续监控（M8）**：`monitor` 模块提供 `MonitorConfig`（间隔 / 启用）、
+  `ChangeKind`（`Appeared` / `Disappeared` / `RttClassChanged` / `StatusChanged`）、
+  `Change` 记录、纯函数 `diff_scans(prev, next)` 与环形缓冲 `ChangeLog`
+  （容量封顶，长跑不涨内存）；`history` 模块按轮次保存精简快照。
+- **目标规格解析（M9）**：`spec` 模块统一解析「网段前缀 / 单主机 / CIDR / 多段」，
+  产出 `TargetSpec { targets, segments }`。CIDR 要求主机位为 0（写错时报错并给出正确网段），
+  `/31`、`/127` 两端都可用，`/32`、`/128` 为单地址；展开数量受 `MAX_TARGETS = 65536` 约束，
+  `/0`、`/64` 这类巨型网段**明确拒绝**而不是静默展开。
+- **探测方式（M9）**：`ProbeMode::{Icmp, Tcp { port }}`。**一次任务只有一种方式**，
+  因此 ICMP 的「在线」与 TCP 的「开放」不会混进同一列统计；
+  TCP 模式下状态显示为 `TCP-OPEN` / `TCP-超时` / `TCP-关闭`，一眼可区分。
+- **JSON 与 HTML 报告（M10）**：零依赖 JSON 序列化（严格转义、键序稳定）；
+  单文件自包含 HTML 报告（内联矩阵 + 表格 + 统计卡片，无外部资源、无 JS）。
+- **扫描差异（M10）**：`diff` 模块对比两次扫描（新增 / 消失 / 延迟档位变化 / 状态变化），
+  可导出 CSV / JSON / HTML；`ScanReport` 是四种格式的唯一构造点。
+- **后端注册表（M12）**：`BackendId`（`icmp4` / `icmp6` / `tcp` / `mock`）、
+  `BackendCaps`（可用性 + 支持哪些地址族 + 是否需要权限 + 说明）、`BackendRegistry`。
+  界面据此**在探测前**就能提示「这个组合不行」，而不是扫完才发现清一色「不支持」。
+- **IPv6（M12）**：目标模型从 `Ipv4Addr` 统一为 `IpAddr`，同一任务里 v4 与 v6 可混排；
+  排序口径 `addr_sort_key` 只定义一次，导出 / 差异 / 监控三处共用。
+- **可选异步调度（M12）**：新增 `async` feature（**默认关闭**），提供 `AsyncScheduler`，
+  用信号量封顶并发 + `spawn_blocking`，语义与同步版逐条对齐。默认构建仍**零第三方依赖**。
+
+**命令行 `cping-cli`（M10，新增二进制）**
+
+- 无头模式：`--target` / `--target-file` / `--range` / `--mode` / `--port` / `--timeout` /
+  `--concurrency` / `--watch` / `--rounds` / `--out`（按扩展名选 csv/txt/json/html）/
+  `--quiet` / `--enrich`。
+- 退出码契约：`0` 全部在线 / `1` 存在离线 / `2` 参数错误 / `3` 权限不足或后端不可用。
+- `--list-backends`：列出本平台全部后端（**含不可用的**）与能力，不猜测。
+- 面向自动化，因此**不提供** `--mock`——无头命令里混进模拟数据会让退出码失去意义。
+
+**TUI（`cping-tui`）**
+
+- 持续监控：`M` 开关、`[` / `]` 调间隔、`e` 查看变化事件流，变化行高亮。
+- 探测方式：`T` 切换 ICMP ↔ TCP、`p` 轮换常用端口（22/23/80/135/139/443/445/3389）。
+- 帮助面板新增「探测后端（M12）」一节：当前后端能力、可选后端、IPv6 走 TCP、
+  ICMPv6 的缺口，内容与 `cping-cli --list-backends` 同源。
+
+**桌面 GUI 与 Android（`cping-gui`）**
+
+- 目标规格输入支持网段 / 单主机 / CIDR / 多段；探测方式单选 + 端口下拉 + 自定义端口。
+- 持续监控开关与间隔、变化页签、变化高亮并自动淡出、状态栏显示轮次与变化计数。
+- 四种导出（CSV / TXT / JSON / HTML）与「导出本轮差异」。
+- IPv6 使矩阵视图失效时**自动切表格**并说明原因（v6 没有「最后一格 = 格号」的语义）。
+
+**分发（M11）**
+
+- `scripts/package.sh`（Linux，产出 tar.gz）与 `scripts/package.ps1`（Windows，产出 zip），
+  每个包内附 `README.txt`（版本、平台、用法、退出码、权限说明），并生成 `SHA256SUMS`。
+- `.github/workflows/ci.yml`：fmt / clippy / test / 前端 typecheck 与构建 /
+  Android 交叉编译检查，并断言 `cping-core` 的依赖树只有它自己一行。
+- `.github/workflows/release.yml`：打 tag 自动构建 Windows(x64/x86) / Linux / Android 产物，
+  合并校验和后创建 Release。
+
+### 变更
+
+- 三端的「选哪个后端」与「`--mock` 走哪个实现」收敛到核心的
+  `resolve_for_run` / `backend_for_run`：此前 TUI 与 GUI 各写一份分支，
+  连模拟分布参数都要手动保持一致。
+- TUI 切换探测方式时**沿用**启动时的 `--mock` 选择；此前切一次方式会静默变成真实探测，
+  看起来像「结果变了」。
+- 矩阵视图的适用条件明确为「非空 && ≤256 个目标 && **无 IPv6**」，
+  由 `TargetSpec::matrix_compatible()` 单点判定。
+- 导出 CSV 追加「探测方式」列（**在末尾**，旧列位置不变），TXT 头部显示本次探测方式。
+- 桌面 GUI 的窗口尺寸收敛逻辑改为桌面专属（`#[cfg(desktop)]`）：
+  `WebviewWindow::center()` 在移动端不存在，此前 Android 构建会直接编译失败。
+
+### 破坏性变更与迁移
+
+| 变更 | 从 | 到 | 迁移方式 |
+| --- | --- | --- | --- |
+| 目标地址类型 | `Ipv4Addr` | `IpAddr` | `TargetSpec::targets` 元素类型改变；排序用 `addr_sort_key` |
+| 探测后端接口 | `probe(Ipv4Addr, Duration)` | `probe(IpAddr, Duration)` | 后端需自行拒绝不支持的地址族（返回 `unsupported`） |
+| 矩阵格号 | `cell_of_addr(Ipv4Addr) -> usize` | `cell_of_addr(IpAddr) -> Option<usize>` | v6 返回 `None`，调用方必须处理 |
+| 矩阵槽位 | `matrix_slots(&[Ipv4Addr])` | `matrix_slots<T: AsTargetAddr>(&[T])` | 传 `&[IpAddr]` 或 `&[Ipv4Addr]` 均可 |
+| 探测方式 | 只有 ICMP | `ProbeMode::{Icmp, Tcp { port }}` | 取平台默认用 `platform_default_mode()` |
+| CSV 格式 | 8 列 | 9 列（末尾新增「探测方式」） | 按列名解析，不要按下标硬编码 |
+| 三端后端选择 | 各自 `backend_for_mode` | `resolve_for_run` / `backend_for_run` | 旧接口仍保留，新代码用注册表 |
+
+- `native::backend_for_mode` 仍保留（不破坏既有调用方），但新代码应改用
+  `registry::backend_for_run` / `resolve_for_run`。
+- 默认 feature 组合下 `cping-core` **仍无第三方运行时依赖**
+  （`cargo tree -p cping-core -e normal` 只有它自己一行）；Tokio 仅随 `async` feature 引入。
+
+### 验证（实测）
+
+- **274 个 Rust 测试全部通过**（`cargo test --workspace`，较 v1.1.0 的 151 个新增 123 个），
+  另有一批真实网络用例按 `#[ignore]` 单独运行；`cargo clippy -D warnings` 与
+  `cargo fmt --check` 在 workspace 与 GUI 两套上均干净。
+- **Windows x64**：`--list-backends` 输出的能力表与实现一致；
+  `-t ::1 --mode icmp` → `不支持 1`、退出码 `3`（ICMPv6 未实装如实上报，**不是**静默超时）；
+  `-t ::1 --mode tcp --port 18081` → `TCP-OPEN`、退出码 `0`。
+- **Linux（WSL Debian 13，Rust 1.99.0，x86_64）**：
+  - 原生 ICMP 实测通过（`127.0.0.1` 1 ms、默认网关 0 ms）；
+  - TCP v4/v6 实测通过（`127.0.0.1:18080`、`::1:18081` 均 `TCP-OPEN`）；
+  - **TCP 关闭端口实测**（`127.0.0.1:18999`）→ 内核回 RST，分类为「不可达」、
+    退出码 `1`、用时 0.000 s——这条路径在 Windows 上无法可靠复现，Linux 上补上了；
+  - 混合族一次任务：`::1, 127.0.0.1` → 「2 个网段 / 2 个目标」，两个都在线；
+  - TUI 在真实伪终端内渲染并进入备用屏，按 `q` **优雅退出（码 0）**；
+  - CSV / TXT / JSON / HTML 四种导出均实测产出且内容正确（含 `::1` 行）。
+- **Windows x86（32 位）**：release 产物构建成功，并可在 x64 系统上运行。
+
+### 已知限制
+
+- **ICMPv6 未实装**：`icmp6` 后端在注册表里登记为 `available: false`，
+  选中它会得到明确的「不支持」而不是静默超时。IPv6 的完整可用路径是 **TCP**。
+- **Android 未真机验证**：本机无设备、无 AVD；安装 / 启动 / 触控 / 前后台 / 文件保存
+  均未实测。release APK 未签名。
+- **Linux 的邻居表（MAC）与主机名链路**未在真实 Linux 上实测，只有单测覆盖。
+- **「TCP-关闭」在 Windows 上不可靠**：本机连确定关闭的端口也表现为超时
+  （用 Python 独立对照同样超时），因此 Windows 侧不宣称该路径已实测。
+- 矩阵视图对 IPv6 不可用（语义所限，非缺陷）。
+
 ## [1.1.0] - 2026-10-14
 
 目标信息增强（M7）：让扫描结果回答「这是谁」，而不是只回答「它在不在线」。
@@ -157,6 +280,7 @@
 - Android 真机验证未做（无设备）；release APK 未签名
 - 本机地址 / MAC 枚举未接入，界面显示「未知」，不伪造
 
+[2.0.0]: https://github.com/LingBrian/cping/releases/tag/v2.0.0
 [1.1.2]: https://github.com/LingBrian/cping/releases/tag/v1.1.2
 [1.1.1]: https://github.com/LingBrian/cping/releases/tag/v1.1.1
 [1.1.0]: https://github.com/LingBrian/cping/releases/tag/v1.1.0

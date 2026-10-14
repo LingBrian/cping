@@ -1,0 +1,333 @@
+name: Release
+
+# 打 tag（v*）时构建四平台产物，生成 SHA256SUMS 并创建 GitHub Release。
+# 也支持手动触发（workflow_dispatch），用于补产物或预演。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布/覆盖的 tag（例如 v2.0.0）；留空则只构建不发布'
+        required: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Windows：x64 与 x86
+  # ---------------------------------------------------------------------------
+  windows:
+    name: windows (x64 + x86)
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            tag: windows-x64
+          - target: i686-pc-windows-msvc
+            tag: windows-x86
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 解析版本号
+        id: ver
+        shell: pwsh
+        run: |
+          $v = if ('${{ github.event.inputs.tag }}') { '${{ github.event.inputs.tag }}' } else { '${{ github.ref_name }}' }
+          $v = $v.TrimStart('v')
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "版本：$v"
+
+      - name: 构建 TUI + CLI
+        run: cargo build --release --locked -p cping-tui -p cping-cli --target ${{ matrix.target }}
+
+      - name: 打包 + SHA256SUMS
+        shell: pwsh
+        run: |
+          scripts\package.ps1 `
+            -Version '${{ steps.ver.outputs.version }}' `
+            -Tag '${{ matrix.tag }}' `
+            -TargetDir 'target/${{ matrix.target }}/release' `
+            -OutDir 'release/${{ steps.ver.outputs.version }}'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.tag }}
+          path: release/${{ steps.ver.outputs.version }}/*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Linux：TUI + CLI（原生 x86_64）
+  # ---------------------------------------------------------------------------
+  linux:
+    name: linux (x86_64)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add x86_64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 解析版本号
+        id: ver
+        run: |
+          v="${{ github.event.inputs.tag }}"
+          [ -z "$v" ] && v="${{ github.ref_name }}"
+          echo "version=${v#v}" >> "$GITHUB_OUTPUT"
+
+      - name: 构建 TUI + CLI
+        run: cargo build --release --locked -p cping-tui -p cping-cli --target x86_64-unknown-linux-gnu
+
+      - name: 冒烟测试（--help 必须退出 0）
+        run: |
+          ./target/x86_64-unknown-linux-gnu/release/cping-cli --help > /dev/null
+          ./target/x86_64-unknown-linux-gnu/release/cping-tui --help > /dev/null || true
+
+      - name: 打包 + SHA256SUMS
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: |
+          chmod +x scripts/package.sh
+          scripts/package.sh '${{ steps.ver.outputs.version }}' linux-x64 cping-tui cping-cli
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux-x64
+          path: release/${{ steps.ver.outputs.version }}/*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Linux GUI：deb + AppImage
+  # ---------------------------------------------------------------------------
+  linux-gui:
+    name: linux gui (deb + AppImage)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Tauri 系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            file
+
+      - name: 安装 Rust 工具链
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/cping-gui/src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 安装前端依赖
+        working-directory: apps/cping-gui
+        run: npm ci --no-audit --no-fund
+
+      - name: 构建 deb 与 AppImage
+        working-directory: apps/cping-gui
+        run: npm run tauri:build -- --bundles deb,appimage
+
+      - name: 重命名产物并生成校验和
+        run: |
+          set -euo pipefail
+          v="${{ github.event.inputs.tag }}"
+          [ -z "$v" ] && v="${{ github.ref_name }}"
+          v="${v#v}"
+          bundle=apps/cping-gui/src-tauri/target/release/bundle
+          out="$PWD/release/$v"
+          mkdir -p "$out"
+          shopt -s nullglob
+          for f in "$bundle"/deb/*.deb "$bundle"/appimage/*.AppImage; do
+            name=$(basename "$f")
+            case "$name" in
+              *.deb)      ext=deb ;;
+              *.AppImage) ext=AppImage ;;
+              *)          ext=bin ;;
+            esac
+            # 统一成 cping-gui-<version>-linux-gui-x64.<ext>
+            cp "$f" "$out/cping-gui-$v-linux-gui-x64.$ext"
+          done
+          cd "$out"
+          : > SHA256SUMS.txt
+          for f in cping-gui-*; do
+            printf '%s *%s\n' "$(sha256sum "$f" | cut -d' ' -f1)" "$f" >> SHA256SUMS.txt
+          done
+          ls -la
+          cat SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux-gui-x64
+          path: |
+            apps/cping-gui/src-tauri/target/release/bundle/deb/*.deb
+            apps/cping-gui/src-tauri/target/release/bundle/appimage/*.AppImage
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Android：universal APK（含 arm64-v8a / armeabi-v7a / x86_64 / x86）
+  # ---------------------------------------------------------------------------
+  android:
+    name: android (universal apk)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链与 Android 目标
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/cping-gui/src-tauri
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 安装 NDK 工具链环境
+        run: |
+          set -euo pipefail
+          NDK="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_ROOT}"
+          if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
+            echo "::error::未找到 Android NDK"
+            exit 1
+          fi
+          echo "NDK_HOME=$NDK" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}" >> "$GITHUB_ENV"
+
+      - name: 安装前端依赖
+        working-directory: apps/cping-gui
+        run: npm ci --no-audit --no-fund
+
+      - name: 初始化 Android 工程
+        working-directory: apps/cping-gui
+        run: npx tauri android init --ci
+
+      - name: 构建 APK（全 ABI）
+        working-directory: apps/cping-gui
+        run: npx tauri android build --apk --ci
+
+      - name: 收集 APK
+        run: |
+          set -euo pipefail
+          v="${{ github.event.inputs.tag }}"
+          [ -z "$v" ] && v="${{ github.ref_name }}"
+          v="${v#v}"
+          out="$PWD/release/android"
+          mkdir -p "$out"
+          find apps/cping-gui/src-tauri/gen/android/app/build/outputs/apk \
+            -name '*.apk' -exec cp -v {} "$out/" \;
+          ls -la "$out"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-android
+          path: release/android/*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 汇总发布：下载全部产物 → 统一 SHA256SUMS → 创建 GitHub Release
+  # ---------------------------------------------------------------------------
+  publish:
+    name: publish release
+    runs-on: ubuntu-22.04
+    needs: [windows, linux, android]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.tag != ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 解析版本号
+        id: ver
+        run: |
+          v="${{ github.event.inputs.tag }}"
+          [ -z "$v" ] && v="${{ github.ref_name }}"
+          echo "version=${v#v}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${v#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 重新计算统一 SHA256SUMS
+        # 各 job 产出的 SHA256SUMS 只覆盖自己那一份；这里合并成一份全局清单。
+        run: |
+          set -euo pipefail
+          cd dist
+          find . -maxdepth 1 -name 'SHA256SUMS.txt' -delete
+          mapfile -t files < <(find . -maxdepth 1 -type f -printf '%f\n' | sort)
+          : > SHA256SUMS.txt
+          for f in "${files[@]}"; do
+            printf '%s *%s\n' "$(sha256sum "$f" | cut -d' ' -f1)" "$f" >> SHA256SUMS.txt
+          done
+          echo "==== 产物清单 ===="
+          ls -la
+          echo "==== SHA256SUMS.txt ===="
+          cat SHA256SUMS.txt
+
+      - name: 准备发布说明
+        # body_path 指向不存在的文件会让 action 报错，所以先兜底生成一份。
+        run: |
+          v="${{ steps.ver.outputs.version }}"
+          src="docs/release-notes-v$v.md"
+          if [ -f "$src" ]; then
+            cp "$src" /tmp/release-body.md
+            echo "使用仓库内的发布说明：$src"
+          else
+            {
+              echo "CPing v$v"
+              echo
+              echo "本次发布由 tag 触发自动构建，仓库内没有 \`docs/release-notes-v$v.md\`，"
+              echo "因此这里只有自动生成的变更记录。产物清单见下方附件与 \`SHA256SUMS.txt\`。"
+            } > /tmp/release-body.md
+            echo "::warning::缺少 $src，已生成占位发布说明"
+          fi
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: CPing v${{ steps.ver.outputs.version }}
+          draft: true
+          generate_release_notes: true
+          body_path: /tmp/release-body.md
+          files: dist/*
+          fail_on_unmatched_files: false

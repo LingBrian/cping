@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/cping-core", "apps/cping-tui"]
+members = ["crates/cping-core", "apps/cping-tui", "apps/cping-cli"]
 
 [workspace.package]
-version = "1.1.2"
+version = "2.0.0"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT"

@@ -6,9 +6,24 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-# 核心不引入任何第三方依赖：
+[features]
+default = []
+# M12：可选异步调度。默认关闭，因此默认构建仍然零第三方运行时依赖
+# （`cargo tree -p cping-core -e normal` 只有它自己一条）。
+# 开启后新增 `cping_core::asynchronous::AsyncScheduler`，语义与同步版一致。
+async = ["dep:tokio"]
+
+# 核心默认不引入任何第三方依赖：
 #   1. 保证 GUI/TUI 与核心的依赖面最小，编译快、无供应链风险；
 #   2. 串行化（serde）等需求在 GUI 层按需再补，不污染核心。
+#
+# `tokio` 是 **optional**：不开启 `async` feature 时它完全不出现在依赖图里。
 [dependencies]
+tokio = { version = "1", optional = true, default-features = false, features = [
+    "rt",
+    "rt-multi-thread",
+    "sync",
+    "time",
+] }
 
 [dev-dependencies]

@@ -21,9 +21,14 @@ pub fn run() {
         // 配置里的尺寸是「理想值」：分辨率不够的机器上直接照搬会把窗口顶出屏幕，
         // 反而逼出滚动条。开窗前先按当前显示器收敛一次。
         .setup(|app| {
+            // 窗口尺寸收敛是**桌面专属**逻辑：Android/iOS 的窗口由系统全屏管理，
+            // 而且 `WebviewWindow::center()` 在移动端根本不存在（编译期就失败）。
+            #[cfg(desktop)]
             if let Some(window) = app.get_webview_window("main") {
                 fit_window_to_monitor(&window);
             }
+            #[cfg(not(desktop))]
+            let _ = app;
             Ok(())
         })
         // 窗口失焦/关闭时顺手落盘一次结果快照。
@@ -36,10 +41,18 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::parse_prefix_cmd,
+            commands::parse_spec_cmd,
+            commands::default_probe_mode,
+            commands::matrix_view_max,
+            commands::backend_caps,
+            commands::backend_summary,
+            commands::async_scheduler_available,
             commands::start_scan,
             commands::cancel_scan,
             commands::snapshot,
+            commands::recent_changes,
             commands::export_results,
+            commands::export_diff,
             commands::export_to_app_dir,
             commands::load_config,
             commands::save_config,
@@ -57,12 +70,16 @@ pub fn run() {
 }
 
 /// 期望尺寸（逻辑像素）。与 `tauri.conf.json` 里的 `width`/`height` 保持一致。
+#[cfg(desktop)]
 const PREFERRED_SIZE: (f64, f64) = (1240.0, 840.0);
 
 /// 把开窗尺寸收敛到当前显示器的**可用区域**内（已扣除任务栏/停靠栏）。
 ///
 /// 只在「屏幕装不下」时才改，且只缩小不放大：显示器够大时窗口尺寸完全由
 /// `tauri.conf.json` 决定，不会因为这段逻辑出现启动瞬间的跳变。
+///
+/// 桌面专属：移动端没有「显示器可用区域」这回事，窗口也由系统管理。
+#[cfg(desktop)]
 fn fit_window_to_monitor(window: &tauri::WebviewWindow) {
     let (mut width, mut height) = PREFERRED_SIZE;
 

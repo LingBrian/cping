@@ -15,6 +15,7 @@
 | M4/M5 真实探测 | ✅ | ✅ +12 = 84 | ✅ **Windows 真实 ICMP**（TUI 与 GUI 双端 255/255） |
 | M6 Android 打包 | ✅ APK ×2 | ✅ 84（回归） | ⚠️ **静态校验通过，真机未验证**（无设备） |
 | M7 目标信息增强 | ✅ | ✅ +67 = 151 | ✅ 真实局域网端到端 + GUI 真实运行截图 |
+| M8–M12 通向 v2.0.0 | ✅ 四平台产物 | ✅ +123 = **274** | ✅ Windows + Linux（WSL）双平台实测，含 IPv6/TCP 与 TUI |
 
 ## 统一检查命令
 
@@ -39,7 +40,13 @@ cargo build
 cd cping/apps/cping-gui
 set ANDROID_HOME=D:\Program Files\Android
 set NDK_HOME=D:\Program Files\Android\ndk\26.1.10909125
-npx tauri android build --apk --debug --target aarch64
+npx tauri android build --apk            # 默认构建全部已安装的 ABI
+npx tauri android build --apk --debug    # debug 版（用 debug 证书签名，可直接安装）
+
+# Linux（WSL Debian，离线 vendored 源；见 docs/release.md §8）
+wsl -d Debian -e bash -c 'export PATH=$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin; \
+  cd ~/cping && cargo test --workspace --offline && \
+  cargo build --release -p cping-cli -p cping-tui --offline'
 ```
 
 > **环境注意**：`cping/.cargo/config.toml` 设了 `[net] offline = true`。
@@ -390,11 +397,83 @@ IP              状态      MAC                 厂商                主机名
 - Linux/Android 真机上的邻居表与主机名链路（`/proc/net/arp` 分支已实现并单测，未实测）
 - MAC/厂商列在 Android 移动布局下的真机视觉效果（逻辑同桌面端）
 
+## M8–M12：通向 v2.0.0（274 个测试）
+
+### 测试结果（2026-10-15）
+
+```text
+cargo test --workspace                                  →  274 passed; 0 failed; 8 ignored
+cargo fmt --all -- --check                              →  clean
+cargo clippy --workspace --all-targets -- -D warnings   →  clean
+（GUI 壳单独一套）cargo clippy --all-targets -- -D warnings  →  clean
+npm run typecheck                                       →  0 errors
+npm run build                                           →  2705 modules / 562 kB JS / 6.3 kB CSS
+```
+
+新增的 123 个测试集中在：目标规格解析（含 IPv6 CIDR 边界）、持续监控的
+`diff_scans` 全状态组合、变化日志容量上限、JSON 严格转义、HTML 无外部引用、
+扫描差异、后端注册表（能力与现实一致）、可选异步调度（与同步版语义对齐）。
+
+### Linux 实测（WSL Debian 13，Rust 1.99.0，x86_64）
+
+本机没有独立 Linux 机器，用 WSL2 里的 Debian 完成：
+
+| 用例 | 命令 | 观察到的结果 |
+| --- | --- | --- |
+| 原生 ICMP | `cping-cli -t 127.0.0.1 --mode icmp` | 在线 1、1 ms、退出码 0 |
+| 原生 ICMP（跨主机） | `cping-cli -t 172.28.160.1 --mode icmp` | 在线 1、0 ms、退出码 0 |
+| ICMPv6（未实装） | `cping-cli -t ::1 --mode icmp` | **不支持 1**、退出码 3 |
+| TCP v4 | `cping-cli -t 127.0.0.1 --mode tcp --port 18080` | `TCP-OPEN`、2 ms、退出码 0 |
+| TCP v6 | `cping-cli -t ::1 --mode tcp --port 18081` | `TCP-OPEN`、1 ms、退出码 0 |
+| **TCP 关闭端口** | `cping-cli -t 127.0.0.1 --mode tcp --port 18999` | **不可达 1**、0.000 s、退出码 1 |
+| 混合 v4+v6 | `cping-cli -t "::1, 127.0.0.1" --mode tcp --port 18081` | 2 个网段 / 2 个目标、两个都在线 |
+| TUI 渲染与退出 | `script -qec "./cping-tui --mock"` 后送 `q` | 进入备用屏正常渲染、**退出码 0** |
+| 四种导出 | `--out r.csv/r.json/r.html/r.txt` | 四个文件均产出且内容正确（含 `::1` 行） |
+
+`--list-backends` 在 Linux 上的输出：
+
+```text
+ICMP 可用（需要原始套接字权限，仅 IPv4）；TCP 可用（IPv4 + IPv6）；ICMPv6 未实装，IPv6 目标请用 TCP
+icmp4  原生 ICMP（IPv4）  是  仅 IPv4    需要原始套接字权限
+icmp6  原生 ICMP（IPv6）  否  —          ICMPv6 尚未实装，请用 TCP 方式探测 IPv6 目标
+tcp    TCP 连接           是  IPv4+IPv6  —
+mock   模拟（测试）        是  IPv4+IPv6  仅测试用
+```
+
+**这次 Linux 实测补上了一条 Windows 上拿不到的结论**：TCP 目标端口关闭时，
+内核回 RST，被归类为「不可达」并立即返回（0.000 s），而**不是**超时。
+Windows 上同一个用例（连确定关闭的端口）表现为超时，用 Python 独立对照同样超时，
+所以 Windows 侧至今不宣称该路径已实测。
+
+### Windows 实测
+
+| 用例 | 观察到的结果 |
+| --- | --- |
+| `--list-backends` | 能力表与实现一致（icmp6 标为不可用） |
+| `-t ::1 --mode icmp` | 不支持 1、退出码 3（**不是**静默超时） |
+| `-t ::1 --mode tcp --port 18081` | `TCP-OPEN`、3 ms、退出码 0 |
+| Windows x86（32 位）产物 | 在 x64 系统上可运行 |
+
+### 本轮抓出并修掉的真实缺陷
+
+1. **Android 构建回归**：`WebviewWindow::center()` 在移动端不存在，
+   v1.1.1 加「窗口尺寸收敛」时引入；因为 Android 一直没重建，直到本次才暴露。
+   已把该逻辑改为桌面专属（`#[cfg(desktop)]`）。
+2. **TUI 切换探测方式会丢掉 `--mock`**：`set_mode()` 里写死了 `false`，
+   演示途中按一次 `T` 就静默变成真实探测，看起来像「结果变了」。
+   已改为沿用启动时的选择。
+3. **三端各写一份后端选择**：TUI 与 GUI 各有一份「mock 就造 MockBackend，
+   否则 `backend_for_mode`」，连模拟参数都要人工对齐。
+   已收敛到核心的 `resolve_for_run` / `backend_for_run`。
+4. **打包脚本在受限环境下中断**：`Remove-Item` 与 `Compress-Archive -Force`
+   都会走回收站并被策略拦下，已改用 .NET 的 `File.Delete`。
+
 ## 尚未完成的验证
 
 - **Android 真机**：模拟器已覆盖大部分；真机差异项见上
-- **Linux 平台**：`linux-icmp` 后端仅有代码级审查，未编译未实测（本机无 Linux/WSL）；
-  M7 的 `/proc/net/arp` 邻居表分支同样未实测
+- **Linux 平台**：原生 ICMP 与 TCP 已在 WSL Debian 内实测（见上）；
+  但 **Linux 的邻居表（MAC/厂商）与主机名反查未实测**，只有单测覆盖
+- **ICMPv6**：未实装，注册表如实登记为不可用；IPv6 目前只能走 TCP
 - 终端 resize 的动态验证（`Resize` 事件路径已实现并有字符提示）
 - Ctrl+C 与退出时的终端恢复（已在 `main.rs` 用 panic hook + 正常路径双重处理，待人工确认）
 - M7 快照在 Android 真实场景下的完整闭环（杀进程 → 重启 → 恢复）：

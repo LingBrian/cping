@@ -6,6 +6,8 @@
 
 use crate::classify::Thresholds;
 use crate::error::{CoreError, CoreResult};
+use crate::monitor::{MonitorConfig, DEFAULT_INTERVAL_MS, MAX_INTERVAL_MS, MIN_INTERVAL_MS};
+use crate::spec::ProbeMode;
 use crate::target::{Ipv4Prefix, TargetRange};
 
 pub const DEFAULT_TIMEOUT_MS: u64 = 1000;
@@ -45,6 +47,8 @@ pub struct ProbeConfig {
     pub timeout_ms: u64,
     pub concurrency: usize,
     pub thresholds: Thresholds,
+    /// 探测方式（M9）：ICMP 或 TCP:<port>。
+    pub mode: ProbeMode,
 }
 
 impl Default for ProbeConfig {
@@ -55,6 +59,7 @@ impl Default for ProbeConfig {
             timeout_ms: DEFAULT_TIMEOUT_MS,
             concurrency: DEFAULT_CONCURRENCY,
             thresholds: Thresholds::default(),
+            mode: ProbeMode::default(),
         }
     }
 }
@@ -79,7 +84,8 @@ impl ProbeConfig {
                 self.concurrency
             )));
         }
-        self.thresholds.validate()
+        self.thresholds.validate()?;
+        self.mode.validate()
     }
 }
 
@@ -162,6 +168,8 @@ pub struct AppConfig {
     pub colors: ColorConfig,
     pub hide_offline: bool,
     pub view: ViewMode,
+    /// 持续监控（M8）。
+    pub monitor: MonitorConfig,
 }
 
 impl Default for AppConfig {
@@ -171,6 +179,7 @@ impl Default for AppConfig {
             colors: ColorConfig::default(),
             hide_offline: false,
             view: ViewMode::Matrix,
+            monitor: MonitorConfig::default(),
         }
     }
 }
@@ -178,7 +187,8 @@ impl Default for AppConfig {
 impl AppConfig {
     pub fn validate(&self) -> CoreResult<()> {
         self.probe.validate()?;
-        self.colors.validate()
+        self.colors.validate()?;
+        self.monitor.validate().map_err(CoreError::InvalidConfig)
     }
 
     /// 序列化为 TOML 文本。
@@ -196,6 +206,11 @@ impl AppConfig {
         out.push_str(&format!("range = \"{}\"\n", self.probe.range.key()));
         out.push_str(&format!("timeout_ms = {}\n", self.probe.timeout_ms));
         out.push_str(&format!("concurrency = {}\n", self.probe.concurrency));
+        out.push_str(&format!("mode = \"{}\"\n", self.probe.mode.key()));
+        out.push_str(&format!(
+            "tcp_port = {}\n",
+            self.probe.mode.tcp_port().unwrap_or(80)
+        ));
         out.push_str(&format!(
             "low_max_ms = {}\n",
             self.probe.thresholds.low_max_ms
@@ -213,6 +228,18 @@ impl AppConfig {
         out.push_str("\n[ui]\n");
         out.push_str(&format!("hide_offline = {}\n", self.hide_offline));
         out.push_str(&format!("view = \"{}\"\n", self.view.key()));
+        out.push_str("\n[monitor]\n");
+        out.push_str(&format!("enabled = {}\n", self.monitor.enabled));
+        out.push_str(&format!("interval_ms = {}\n", self.monitor.interval_ms));
+        out.push_str(&format!(
+            "notify_appeared = {}\n",
+            self.monitor.notify_appeared
+        ));
+        out.push_str(&format!(
+            "notify_disappeared = {}\n",
+            self.monitor.notify_disappeared
+        ));
+        out.push_str(&format!("capacity = {}\n", self.monitor.capacity));
         out
     }
 
@@ -221,6 +248,9 @@ impl AppConfig {
         let mut cfg = AppConfig::default();
         let mut section = String::new();
         let mut prefix_text: Option<String> = None;
+        // 端口先单独收着：`mode` 与 `tcp_port` 谁先出现不影响结果
+        let mut mode_key = cfg.probe.mode.key().to_string();
+        let mut tcp_port: u16 = cfg.probe.mode.tcp_port().unwrap_or(80);
 
         for (lineno, raw) in text.lines().enumerate() {
             let line = strip_comment(raw).trim();
@@ -247,6 +277,17 @@ impl AppConfig {
                 }
                 ("probe", "timeout_ms") => cfg.probe.timeout_ms = parse_u64(value)?,
                 ("probe", "concurrency") => cfg.probe.concurrency = parse_u64(value)? as usize,
+                ("probe", "mode") => mode_key = parse_string(value)?,
+                ("probe", "tcp_port") => {
+                    let raw_port = parse_u64(value)?;
+                    if raw_port > u16::MAX as u64 {
+                        return Err(CoreError::InvalidConfig(format!(
+                            "第 {} 行 tcp_port {raw_port} 超出 0-65535",
+                            lineno + 1
+                        )));
+                    }
+                    tcp_port = raw_port as u16;
+                }
                 ("probe", "low_max_ms") => {
                     cfg.probe.thresholds.low_max_ms = parse_u64(value)? as u32
                 }
@@ -265,6 +306,13 @@ impl AppConfig {
                         _ => ViewMode::Matrix,
                     }
                 }
+                ("monitor", "enabled") => cfg.monitor.enabled = parse_bool(value)?,
+                ("monitor", "interval_ms") => cfg.monitor.interval_ms = parse_u64(value)?,
+                ("monitor", "notify_appeared") => cfg.monitor.notify_appeared = parse_bool(value)?,
+                ("monitor", "notify_disappeared") => {
+                    cfg.monitor.notify_disappeared = parse_bool(value)?
+                }
+                ("monitor", "capacity") => cfg.monitor.capacity = parse_u64(value)? as usize,
                 _ => {} // 未知键：忽略，保证向前兼容
             }
         }
@@ -273,9 +321,23 @@ impl AppConfig {
             Some(s) if !s.trim().is_empty() => Some(crate::target::parse_prefix(&s)?),
             _ => None,
         };
+        cfg.probe.mode = match mode_key.as_str() {
+            "tcp" => ProbeMode::Tcp { port: tcp_port },
+            _ => ProbeMode::Icmp,
+        };
 
         Ok(cfg)
     }
+
+    /// 配置里当前的监控间隔是否合法（界面在改值时用）。
+    pub fn monitor_interval_bounds() -> (u64, u64) {
+        (MIN_INTERVAL_MS, MAX_INTERVAL_MS)
+    }
+}
+
+/// 监控间隔默认值（供界面初始化）。
+pub const fn default_monitor_interval_ms() -> u64 {
+    DEFAULT_INTERVAL_MS
 }
 
 fn strip_comment(line: &str) -> &str {

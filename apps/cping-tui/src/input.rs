@@ -34,6 +34,21 @@ pub enum Action {
     PromptYes,
     /// 快照恢复确认框：不恢复
     PromptNo,
+    /// M8：开/关持续监控（自动重扫）
+    ToggleMonitor,
+    /// M8：查看变化事件流
+    ShowChanges,
+    /// M8：缩短重扫间隔
+    IntervalDown,
+    /// M8：延长重扫间隔
+    IntervalUp,
+    /// M9：在 ICMP 与 TCP 之间切换探测方式
+    ToggleMode,
+    /// M9：轮换常用的 TCP 端口
+    CyclePort,
+    /// M10：导出 JSON / HTML 报告
+    SaveJson,
+    SaveHtml,
     Char(char),
     Backspace,
 }
@@ -60,11 +75,21 @@ pub fn map_key(key: KeyEvent) -> Action {
         KeyCode::Char('f') => Action::ToggleFilter,
         KeyCode::Char('s') => Action::SaveCsv,
         KeyCode::Char('S') => Action::SaveTxt,
+        KeyCode::Char('j') => Action::SaveJson,
+        KeyCode::Char('H') => Action::SaveHtml,
         // M7 快捷键：m 补厂商、n 查主机名、w 存快照、l 读快照
         KeyCode::Char('m') => Action::Enrich,
         KeyCode::Char('n') => Action::LookupHostname,
         KeyCode::Char('w') => Action::SaveSnapshot,
         KeyCode::Char('l') => Action::LoadSnapshot,
+        // M8 持续监控：M 开关、e 事件流、[ ] 调间隔
+        KeyCode::Char('M') => Action::ToggleMonitor,
+        KeyCode::Char('e') => Action::ShowChanges,
+        KeyCode::Char('[') => Action::IntervalDown,
+        KeyCode::Char(']') => Action::IntervalUp,
+        // M9 探测方式：T 切 ICMP/TCP，p 轮换端口
+        KeyCode::Char('T') => Action::ToggleMode,
+        KeyCode::Char('p') => Action::CyclePort,
         // 确认框用：y 恢复、N 不恢复（小写 n 在确认框里也当「不恢复」，
         // 由 app 层按当前状态解释，见 App::on_key）
         KeyCode::Char('y') | KeyCode::Char('Y') => Action::PromptYes,
@@ -111,5 +136,21 @@ mod tests {
         assert_eq!(press('g'), Action::ViewMatrix);
         assert_eq!(press('f'), Action::ToggleFilter);
         assert_eq!(press('q'), Action::Quit);
+        assert_eq!(press('?'), Action::ToggleHelp);
+    }
+
+    #[test]
+    fn m8_and_m9_shortcuts_are_mapped_without_collisions() {
+        assert_eq!(press('M'), Action::ToggleMonitor);
+        assert_eq!(press('e'), Action::ShowChanges);
+        assert_eq!(press('['), Action::IntervalDown);
+        assert_eq!(press(']'), Action::IntervalUp);
+        assert_eq!(press('T'), Action::ToggleMode);
+        assert_eq!(press('p'), Action::CyclePort);
+        assert_eq!(press('j'), Action::SaveJson);
+        assert_eq!(press('H'), Action::SaveHtml);
+        // 大小写敏感：小写 m/t 仍是 M7/M2 的语义
+        assert_eq!(press('m'), Action::Enrich);
+        assert_eq!(press('t'), Action::ViewTable);
     }
 }

@@ -6,8 +6,8 @@
 
 Rust 核心 · TUI（ratatui）· 桌面 GUI（Tauri 2 + Vue 3）· Android
 
-[![Release](https://img.shields.io/badge/release-v1.1.2-111827)](../../releases)
-[![Tests](https://img.shields.io/badge/tests-151%20passed-brightgreen)](docs/testing.md)
+[![Release](https://img.shields.io/badge/release-v2.0.0-111827)](../../releases)
+[![Tests](https://img.shields.io/badge/tests-274%20passed-brightgreen)](docs/testing.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20Android-lightgrey)](docs/platform-compatibility.md)
 
@@ -43,8 +43,9 @@ Rust 核心 · TUI（ratatui）· 桌面 GUI（Tauri 2 + Vue 3）· Android
 > Android 截图摄于 Android 15 模拟器（WHPX 硬件加速）中运行的 APK 本体——
 > 与发布产物同一份 Rust 核心 + 前端，非浏览器仿真。截图中全部目标显示
 > 「权限不足」是**正确行为**：Android 普通应用无 `CAP_NET_RAW`，无法创建
-> raw ICMP 套接字，本工具如实分类而不假装离线（真机上同理，局域网扫描
-> 请用桌面端，或在 Android 上改用后续版本的独立 TCP 模式）。
+> raw ICMP 套接字，本工具如实分类而不假装离线（真机上同理）。
+> Android 上要扫描局域网请切换到 **TCP 方式**——它不需要特权，
+> 且 v2.0.0 起 Android 的默认探测方式就是 TCP（`TCP-OPEN` 与 ICMP 的「在线」分开标注）。
 
 ## 为什么重写
 
@@ -64,22 +65,28 @@ Rust 核心 · TUI（ratatui）· 桌面 GUI（Tauri 2 + Vue 3）· Android
 ```
 cping/
 ├── crates/cping-core/        共享核心（零第三方运行时依赖）
-│   ├── target/result/classify/export   目标生成 · 结果模型 · 分类 · 导出
+│   ├── spec/target/result/classify     目标规格解析 · 生成 · 结果模型 · 分类
 │   ├── probe/scheduler                 ProbeBackend 抽象 + std 线程并发调度
+│   ├── registry                        M12：后端注册表（icmp4/icmp6/tcp/mock）与能力
+│   ├── asynchronous                    M12：可选异步调度（`async` feature，默认关）
+│   ├── monitor/history                 M8：轮次对比 · 变化日志 · 逐轮历史
+│   ├── json/html/diff/export           M10：四种导出格式与两次扫描对比
 │   ├── oui/neighbor/hostname/enrich    M7：厂商识别 · ARP 取 MAC · 反查主机名 · 信息补全
 │   ├── snapshot                        结果快照落盘与恢复（严格解析，坏数据宁可报错）
 │   ├── data/                           IEEE OUI 三表（54,190 条，编译期嵌入）
-│   └── native.rs                       Windows/Linux/Android 原生 ICMP
+│   └── native.rs                       Windows/Linux/Android 原生 ICMP 与 TCP
 ├── apps/cping-tui/           ratatui + crossterm 交互式终端界面
+├── apps/cping-cli/           M10：无头命令行（可判退出码，适合脚本与计划任务）
 ├── apps/cping-gui/           Tauri 2 + Vue 3 + TypeScript
 │   ├── src/                  桌面布局 + 移动布局（自动切换）
-│   └── src-tauri/            Tauri 容器（16 个 Command，唯一前后端通道）
+│   └── src-tauri/            Tauri 容器（唯一前后端通道）
+├── scripts/                  M11：打包脚本（tar.gz / zip + SHA256SUMS）
 ├── tools/oui-gen/            IEEE 官方 CSV → 嵌入数据表的确定性生成器
 └── tools/android-forensics/  Android 平台行为取证对照程序（不参与构建）
 ```
 
-**逻辑只有一份**：GUI 经 Tauri Commands、TUI 直接调用，都走同一个 `cping-core`。
-目标生成、调度、分类、统计、导出不在任何界面里重复实现。
+**逻辑只有一份**：GUI 经 Tauri Commands、TUI 与 CLI 直接调用，都走同一个 `cping-core`。
+目标生成、调度、分类、统计、导出、后端选择不在任何界面里重复实现。
 
 ## 构建与测试
 
@@ -96,7 +103,10 @@ npm install
 npm run typecheck && npm run build
 cd src-tauri && cargo build --release
 
-# Android（arm64-v8a）
+# 命令行（无头）
+cargo run -p cping-cli -- --target 192.168.1 --mode tcp --port 80
+
+# Android APK（默认构建全部已安装的 ABI；需 ANDROID_HOME / NDK_HOME / JDK 17，见 docs/release.md §2）
 cd apps/cping-gui && npm run tauri:android:build
 ```
 
@@ -104,6 +114,20 @@ cd apps/cping-gui && npm run tauri:android:build
 > 见 [README 附表](#构建环境注意事项) 与 [`docs/testing.md`](docs/testing.md)。
 
 ## 使用
+
+### 命令行（无头，适合脚本与计划任务）
+
+```bash
+cping-cli --target 192.168.1 --mode icmp
+cping-cli -t "192.168.1.0/24, ::1" --mode tcp --port 443 --out report.html
+cping-cli -t 192.168.1 --watch 30 --rounds 10 --quiet
+cping-cli --list-backends          # 本平台有哪些后端可用、支持哪些地址族
+```
+
+退出码：`0` 全部在线 / `1` 存在离线 / `2` 参数错误 / `3` 权限不足或后端不可用。
+
+> 一次任务**只用一种探测方式**：ICMP 的「在线」与 TCP 的「开放」（`TCP-OPEN`）
+> 不会混进同一列统计。IPv6 目标目前请用 TCP（ICMPv6 未实装，如实登记为不可用）。
 
 ### TUI
 
@@ -119,7 +143,10 @@ cping-tui --prefix 192.168.1
 | `Esc` | 取消 / 关闭帮助 | `s` / `S` | 导出 CSV / TXT |
 | `m` | 补全 MAC / 厂商 | `n` | 反查当前行主机名 |
 | `w` | 保存快照 | `l` | 从快照恢复 |
-| `?` / `F1` | 帮助 | `q` / `Ctrl+C` | 退出并恢复终端 |
+| `T` | 切换 ICMP ↔ TCP | `p` | 轮换常用 TCP 端口 |
+| `M` | 开/关持续监控 | `e` | 查看变化事件流 |
+| `[` / `]` | 缩短 / 延长重扫间隔 | `?` / `F1` | 帮助 |
+| `q` | 退出（运行中需再按一次确认） | `Ctrl+C` | 强制退出并恢复终端 |
 
 状态符号：`#` 低延迟 · `+` 中延迟 · `*` 高延迟 · `-` 无回应 · `!` 错误 · `.` 未探测。
 **颜色不是唯一标识**：无颜色终端下符号仍然可区分。
@@ -153,11 +180,12 @@ cping-tui --prefix 192.168.1
 | --- | --- | --- |
 | **v1.0.0** ✅ | M0–M6 | 核心库 · TUI · 桌面 GUI · Android 构建链 · 真实 ICMP（Windows 实测） |
 | **v1.1.0** ✅ | M7 | 目标信息增强：OUI 厂商识别（54,190 条离线库）、ARP/MAC、主机名反查、结果快照与恢复 |
-| v1.2.0 | M8 | 持续监控：定时重扫、上下线事件流、变化高亮 |
-| v1.3.0 | M9 | 探测扩展：自定义端口 TCP 探测、多网段、CIDR |
-| v1.4.0 | M10 | 数据与集成：JSON/HTML 导出、扫描对比 diff、无头 CLI |
-| v1.5.0 | M11 | 平台与分发：Linux 实测与打包、GitHub Actions CI/CD |
-| v2.0.0 | M12 | 架构升级：IPv6、可选 Tokio 异步调度、后端插件化 |
+| **v1.2.0–v1.5.0** ✅ | M8–M11 | 持续监控 · 探测扩展（TCP / 多网段 / CIDR）· JSON/HTML/diff 与无头 CLI · Linux 实测与打包、CI/CD |
+| **v2.0.0** ✅ | M12 | 架构升级：IPv4+IPv6 统一目标模型、后端注册表、可选 Tokio 异步调度 |
+| v2.1.0 | M13 | 资产识别：开放端口与服务指纹、设备类型推断 |
+| v2.2.0 | M14 | 历史与趋势：跨会话记录、可用率与延迟趋势 |
+| v2.3.0–v2.7.0 | M15–M19 | 告警与通知 · 配置与模板 · 安全与合规 · 国际化与无障碍 · 规模化性能 |
+| v3.0.0 | M20 | 生态与开放：插件接口、脚本化任务、对外 API（主版本） |
 
 各阶段详细功能与验收条件见 [`docs/plan.md`](docs/plan.md)「路线图」章节。
 
@@ -170,7 +198,8 @@ cping-tui --prefix 192.168.1
 | [`docs/platform-compatibility.md`](docs/platform-compatibility.md) | 各平台 ICMP 能力、权限要求与实测记录 |
 | [`docs/testing.md`](docs/testing.md) | 每阶段真实构建/测试记录与踩坑 |
 | [`docs/release.md`](docs/release.md) | 产物清单与发布说明 |
-| [`CHANGELOG.md`](CHANGELOG.md) | 版本变更记录 |
+| [`docs/release-notes-v2.0.0.md`](docs/release-notes-v2.0.0.md) | v2.0.0 发布说明 |
+| [`CHANGELOG.md`](CHANGELOG.md) | 版本变更记录（含 v2.0.0 破坏性变更迁移表） |
 
 ## 构建环境注意事项
 
@@ -189,12 +218,15 @@ cping-tui --prefix 192.168.1
 
 ## 已知限制与使用声明
 
-- **Windows 已实测真实 ICMP**（普通权限可用）；Android 已在模拟器实测（raw ICMP
-  被拒，如实显示「权限不足」）；Linux 的原生 ICMP **未实测**。拿不到权限时按
-  「权限不足」如实上报，绝不把 TCP 连通性伪装成 ICMP 成功。
+- **Windows 与 Linux 均已实测真实 ICMP**（Windows 普通权限即可；Linux 在 WSL Debian
+  内以 root 实测）；Android 已在模拟器实测（raw ICMP 被拒，如实显示「权限不足」）。
+  拿不到权限时按「权限不足」如实上报，绝不把 TCP 连通性伪装成 ICMP 成功。
+- **ICMPv6 未实装**：后端注册表把它登记为「不可用」并附人话说明，
+  选中会得到明确的「不支持」，而不是静默超时。IPv6 的完整可用路径是 **TCP**。
 - **Android 已在 Android 15 模拟器完成真机级验收**（安装/启动/扫描/导出/横竖屏/
-  前后台）；真机上的厂商后台管控与字体缩放仍待验证。
-- 本机地址与 MAC 尚未接入平台枚举，界面显示「未知」，**不伪造**。
+  前后台）；真机上的厂商后台管控与字体缩放仍待验证，release APK 未签名。
+- TUI 状态栏的本机地址尚未接入网卡枚举，显示「未知」，**不伪造**；
+  MAC 与厂商已通过本机邻居表 + 离线 OUI 库接入。
 - 目标范围默认 `.1`–`.255`（对齐原版），`.0` 不参与探测。
 - **仅用于你拥有或获授权管理的网络**；并发与目标数均有上限。
 

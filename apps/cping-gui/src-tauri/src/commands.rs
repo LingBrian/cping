@@ -12,14 +12,17 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use cping_core::classify::{classify_status, Thresholds};
-use cping_core::config::{AppConfig, ProbeConfig, ViewMode};
+use cping_core::config::{AppConfig, ColorConfig, ProbeConfig, ViewMode};
+use cping_core::diff::{diff_reports, ScanDiff};
 use cping_core::enrich::{enrich_with_mac_and_vendor, lookup_hostname, EnrichReport};
-use cping_core::export::{export, ExportFormat, ExportMeta};
-use cping_core::probe::{MockBackend, MockPolicy};
+use cping_core::export::{ExportFormat, ExportMeta, ScanReport};
+use cping_core::monitor::{Change, MonitorConfig, MonitorState};
+use cping_core::registry::BackendRegistry;
 use cping_core::result::{ProbeResult, ScanStats};
 use cping_core::scheduler::{CancelToken, ProbeScheduler, SchedulerHandle};
 use cping_core::snapshot::{load_from_path, save_to_path, Snapshot};
-use cping_core::target::{build_targets, matrix_slots, parse_prefix, TargetRange};
+use cping_core::spec::{parse_spec, ProbeMode, Segment, TargetSpec, MATRIX_VIEW_MAX};
+use cping_core::target::{matrix_slots, parse_prefix, TargetRange};
 use cping_core::ProbeEvent;
 
 // ---------------------------------------------------------------------------
@@ -43,7 +46,7 @@ pub struct ProbeResultDto {
     pub class_key: Option<String>,
 }
 
-fn to_result_dto(r: &ProbeResult, thresholds: &Thresholds) -> ProbeResultDto {
+fn to_result_dto(r: &ProbeResult, thresholds: &Thresholds, mode: ProbeMode) -> ProbeResultDto {
     ProbeResultDto {
         index: r.index,
         ip: r.ip.to_string(),
@@ -51,7 +54,8 @@ fn to_result_dto(r: &ProbeResult, thresholds: &Thresholds) -> ProbeResultDto {
         vendor: r.vendor.clone(),
         hostname: r.hostname.clone(),
         status_key: r.status.key().to_string(),
-        status_label: r.status.label_zh().to_string(),
+        // M9：TCP 模式下「在线」必须显示成 TCP-OPEN，否则会被读成 ICMP 可达
+        status_label: mode.status_label(&r.status),
         rtt_ms: r.status.rtt_ms(),
         note: r.status.note().map(|s| s.to_string()),
         class_key: classify_status(&r.status, thresholds).map(|c| c.key().to_string()),
@@ -101,6 +105,91 @@ pub struct SnapshotDto {
     pub results: Vec<ProbeResultDto>,
     pub cell_slots: Vec<Option<usize>>,
     pub targets: Vec<String>,
+
+    // ---- M8 / M9 新增 ----
+    /// 探测方式键（`icmp` / `tcp`）。
+    pub mode: String,
+    /// 探测方式展示文本（`ICMP` / `TCP:445`）。
+    pub mode_label: String,
+    /// TCP 端口（非 TCP 模式为 null）。
+    pub tcp_port: Option<u16>,
+    /// 目标范围描述，例如 `192.168.1（255 个）`。
+    pub spec_summary: String,
+    /// 各输入网段在 targets 中的区间（界面分段显示用）。
+    pub segments: Vec<SegmentDto>,
+    /// 是否能用 16×16 矩阵表示（>256 个目标时必须切表格）。
+    pub matrix_compatible: bool,
+    /// 已完成轮次（持续监控）。
+    pub round: u64,
+    /// 本轮变化（含上一轮基线比较的结果）。
+    pub changes: Vec<ChangeDto>,
+    /// 变化日志累计条数。
+    pub change_total: u64,
+    /// 与上一轮相比的差异摘要（没有人话可写时为空串）。
+    pub diff_summary: String,
+}
+
+/// 一个输入网段在目标列表中的区间。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SegmentDto {
+    pub label: String,
+    pub start: usize,
+    pub count: usize,
+}
+
+impl From<&Segment> for SegmentDto {
+    fn from(s: &Segment) -> Self {
+        Self {
+            label: s.label.clone(),
+            start: s.start,
+            count: s.count,
+        }
+    }
+}
+
+/// 一条变化记录（M8）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeDto {
+    pub round: u64,
+    pub index: u16,
+    pub ip: String,
+    pub kind: String,
+    pub kind_label: String,
+    pub from_label: String,
+    pub to_label: String,
+    /// 一行摘要，前端直接显示即可。
+    pub summary: String,
+}
+
+impl From<&Change> for ChangeDto {
+    fn from(c: &Change) -> Self {
+        Self {
+            round: c.round,
+            index: c.index,
+            ip: c.ip.to_string(),
+            kind: c.kind.key().to_string(),
+            kind_label: c.kind.label_zh().to_string(),
+            from_label: c.from.label_zh().to_string(),
+            to_label: c.to.label_zh().to_string(),
+            summary: c.summary(),
+        }
+    }
+}
+
+/// 目标规格解析结果（M9）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpecDto {
+    pub summary: String,
+    pub total: usize,
+    pub segments: Vec<SegmentDto>,
+    pub matrix_compatible: bool,
+    /// 首尾目标，例如 `192.168.1.1 – 192.168.1.255`。
+    pub span: String,
+    pub first: Option<String>,
+    pub last: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -264,7 +353,7 @@ pub enum ProbeEventDto {
     },
 }
 
-fn to_event_dto(ev: &ProbeEvent, thresholds: &Thresholds) -> ProbeEventDto {
+fn to_event_dto(ev: &ProbeEvent, thresholds: &Thresholds, mode: ProbeMode) -> ProbeEventDto {
     match ev {
         ProbeEvent::Started { task_id, total } => ProbeEventDto::Started {
             task_id: task_id.clone(),
@@ -272,7 +361,7 @@ fn to_event_dto(ev: &ProbeEvent, thresholds: &Thresholds) -> ProbeEventDto {
         },
         ProbeEvent::Result { task_id, result } => ProbeEventDto::Result {
             task_id: task_id.clone(),
-            result: to_result_dto(result, thresholds),
+            result: to_result_dto(result, thresholds, mode),
         },
         ProbeEvent::Progress {
             task_id,
@@ -323,6 +412,28 @@ pub struct ProbeConfigDto {
     pub concurrency: usize,
     pub low_max_ms: u32,
     pub mid_max_ms: u32,
+    /// M9：`icmp` / `tcp`。旧配置里没有这一项 → 默认 ICMP。
+    #[serde(default)]
+    pub mode: String,
+    #[serde(default)]
+    pub tcp_port: Option<u16>,
+}
+
+/// 持续监控设置（M8）。独立成块，旧的配置文件缺这一段也能读。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MonitorConfigDto {
+    pub enabled: bool,
+    pub interval_ms: u64,
+}
+
+impl Default for MonitorConfigDto {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_ms: cping_core::MONITOR_DEFAULT_INTERVAL_MS,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -332,10 +443,15 @@ pub struct AppConfigDto {
     pub colors: ColorConfigDto,
     pub hide_offline: bool,
     pub view: String,
+    /// M8：持续监控设置。
+    #[serde(default)]
+    pub monitor: MonitorConfigDto,
 }
 
 /// 前端给的 DTO → 核心配置（唯一一处转换，含范围字符串解析）。
 fn config_from_dto(dto: AppConfigDto) -> AppConfig {
+    // 前缀既可能是三段网段，也可能是 M9 的单主机/CIDR；存不下就留空，
+    // 不因为配置里的一个旧字段把整份配置作废。
     let prefix = if dto.probe.prefix.trim().is_empty() {
         None
     } else {
@@ -345,6 +461,13 @@ fn config_from_dto(dto: AppConfigDto) -> AppConfig {
         "full" => TargetRange::Full,
         "hosts_only" => TargetRange::HostsOnly,
         _ => TargetRange::Standard,
+    };
+    let mode = if dto.probe.mode == "tcp" {
+        ProbeMode::Tcp {
+            port: dto.probe.tcp_port.filter(|p| *p > 0).unwrap_or(80),
+        }
+    } else {
+        ProbeMode::Icmp
     };
     AppConfig {
         probe: ProbeConfig {
@@ -372,6 +495,7 @@ fn config_from_dto(dto: AppConfigDto) -> AppConfig {
                     dto.probe.mid_max_ms
                 },
             ),
+            mode,
         },
         colors: cping_core::ColorConfig {
             low: dto.colors.low,
@@ -386,6 +510,18 @@ fn config_from_dto(dto: AppConfigDto) -> AppConfig {
         } else {
             ViewMode::Matrix
         },
+        // 间隔越界的旧值一律回落到默认值，而不是让保存失败
+        monitor: MonitorConfig {
+            enabled: dto.monitor.enabled,
+            interval_ms: if dto.monitor.interval_ms < cping_core::MONITOR_MIN_INTERVAL_MS
+                || dto.monitor.interval_ms > cping_core::MONITOR_MAX_INTERVAL_MS
+            {
+                cping_core::MONITOR_DEFAULT_INTERVAL_MS
+            } else {
+                dto.monitor.interval_ms
+            },
+            ..MonitorConfig::default()
+        },
     }
 }
 
@@ -398,6 +534,8 @@ fn config_to_dto(cfg: &AppConfig) -> AppConfigDto {
             concurrency: cfg.probe.concurrency,
             low_max_ms: cfg.probe.thresholds.low_max_ms,
             mid_max_ms: cfg.probe.thresholds.mid_max_ms,
+            mode: cfg.probe.mode.key().to_string(),
+            tcp_port: cfg.probe.mode.tcp_port(),
         },
         colors: ColorConfigDto {
             low: cfg.colors.low.clone(),
@@ -408,6 +546,10 @@ fn config_to_dto(cfg: &AppConfig) -> AppConfigDto {
         },
         hide_offline: cfg.hide_offline,
         view: cfg.view.key().to_string(),
+        monitor: MonitorConfigDto {
+            enabled: cfg.monitor.enabled,
+            interval_ms: cfg.monitor.interval_ms,
+        },
     }
 }
 
@@ -423,44 +565,44 @@ struct Shared {
     prefix: String,
     /// 本轮扫描的开始时间（用于快照头部与导出元信息）。
     scan_time: String,
-    targets: Vec<std::net::Ipv4Addr>,
+    targets: Vec<std::net::IpAddr>,
     cell_slots: Vec<Option<usize>>,
     results: Vec<Option<ProbeResult>>,
     stats: ScanStats,
     elapsed_ms: u64,
     thresholds: Thresholds,
     cancel: Option<CancelToken>,
+    /// 当前探测方式（本轮任务的方式；切换方式在 start_scan 时生效）。
+    mode: ProbeMode,
+    /// 当前目标规格（含分段信息）。
+    spec: TargetSpec,
+    /// 持续监控状态机：轮次 + 变化检测 + 变化日志。
+    monitor: MonitorState,
+    /// 最近一次「上一轮 → 本轮」的差异（导出 diff 用）。
+    last_diff: Option<ScanDiff>,
 }
 
 pub struct AppState {
-    scheduler: ProbeScheduler,
     shared: Arc<Mutex<Shared>>,
 }
 
-/// 选择探测后端：默认平台原生 ICMP；设 `CPING_MOCK=1` 时改用模拟数据（演示用）。
+/// 选择探测后端（M9：按探测方式分派）。
 ///
-/// 之所以保留模拟后端：在没有权限或没有网络的机器上仍能演示界面，
-/// 但它**必须**通过环境变量显式开启，避免把模拟结果误当成真实探测。
-fn select_backend() -> Box<dyn cping_core::probe::ProbeBackend> {
+/// `CPING_MOCK=1` 时改用模拟数据（演示用）——**必须显式开启**，
+/// 避免把模拟结果误当成真实探测。
+///
+/// M12：`mock` 分支已收敛到核心的 [`cping_core::backend_for_run`]，
+/// 这里的职责只剩「读环境变量」。
+fn select_backend(mode: ProbeMode) -> Box<dyn cping_core::probe::ProbeBackend> {
     let mock = std::env::var("CPING_MOCK")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    if mock {
-        Box::new(MockBackend::new(MockPolicy::Realistic {
-            online_percent: 62,
-            base_rtt_ms: 6,
-            span_ms: 140,
-        }))
-    } else {
-        cping_core::native::platform_icmp_backend()
-    }
+    cping_core::backend_for_run(mode, mock)
 }
 
 impl AppState {
     pub fn new() -> Self {
         Self {
-            // M5 起默认使用平台原生 ICMP 后端（Windows 已实测；Linux/Android 见文档）。
-            scheduler: ProbeScheduler::new(select_backend()),
             shared: Arc::new(Mutex::new(Shared {
                 running: false,
                 cancelled: false,
@@ -474,6 +616,11 @@ impl AppState {
                 elapsed_ms: 0,
                 thresholds: Thresholds::default(),
                 cancel: None,
+                mode: cping_core::platform_default_mode(),
+                spec: TargetSpec::default(),
+                monitor: MonitorState::new(MonitorConfig::default())
+                    .expect("默认监控配置必然合法"),
+                last_diff: None,
             })),
         }
     }
@@ -496,6 +643,88 @@ pub fn parse_prefix_cmd(input: String) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
+/// M9：解析完整目标规格（网段 / 单主机 / CIDR / 多网段）。
+#[tauri::command]
+pub fn parse_spec_cmd(input: String) -> Result<SpecDto, String> {
+    let spec = parse_spec(&input, TargetRange::Standard).map_err(|e| e.to_string())?;
+    Ok(spec_dto(&spec))
+}
+
+fn spec_dto(spec: &TargetSpec) -> SpecDto {
+    SpecDto {
+        summary: spec.summary(),
+        total: spec.len(),
+        segments: spec.segments.iter().map(SegmentDto::from).collect(),
+        matrix_compatible: spec.matrix_compatible(),
+        span: spec.span_text().unwrap_or_default(),
+        first: spec.targets.first().map(|ip| ip.to_string()),
+        last: spec.targets.last().map(|ip| ip.to_string()),
+    }
+}
+
+/// 平台默认探测方式（Android 上是 TCP:80，桌面是 ICMP）。
+#[tauri::command]
+pub fn default_probe_mode() -> Result<(String, u16), String> {
+    let mode = cping_core::platform_default_mode();
+    Ok((mode.key().to_string(), mode.tcp_port().unwrap_or(80)))
+}
+
+/// 矩阵视图能表示多少目标（前端据此决定是否强制切表格）。
+#[tauri::command]
+pub fn matrix_view_max() -> Result<usize, String> {
+    Ok(MATRIX_VIEW_MAX)
+}
+
+/// 一个探测后端的对外能力描述（M12）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackendCapsDto {
+    pub id: String,
+    pub label: String,
+    pub available: bool,
+    pub ipv4: bool,
+    pub ipv6: bool,
+    pub needs_privilege: bool,
+    pub note: String,
+    /// 一行完整描述，前端可直接展示。
+    pub describe: String,
+}
+
+/// 当前平台全部内置后端的能力（含不可用的，前端自行过滤）。
+///
+/// 「不可用」是**事实**而不是错误：ICMPv6 本版未实装，就如实登记为不可用，
+/// 界面据此提示用户改用 TCP，而不是等扫完才发现清一色「不支持」。
+#[tauri::command]
+pub fn backend_caps() -> Result<Vec<BackendCapsDto>, String> {
+    let reg = BackendRegistry::new();
+    Ok(reg
+        .caps()
+        .into_iter()
+        .map(|c| BackendCapsDto {
+            id: c.id.key().to_string(),
+            label: c.id.label_zh().to_string(),
+            available: c.available,
+            ipv4: c.ipv4,
+            ipv6: c.ipv6,
+            needs_privilege: c.needs_privilege,
+            note: c.note.to_string(),
+            describe: c.describe(),
+        })
+        .collect())
+}
+
+/// 面向界面的一行能力摘要（例如「ICMP 可用（需要权限，仅 IPv4）；ICMPv6 未实装…」）。
+#[tauri::command]
+pub fn backend_summary() -> Result<String, String> {
+    Ok(BackendRegistry::new().summary_zh())
+}
+
+/// v2.0.0 是否带上可选异步调度（编译期决定，供「关于」页如实显示）。
+#[tauri::command]
+pub fn async_scheduler_available() -> Result<bool, String> {
+    Ok(cfg!(feature = "async-scheduler"))
+}
+
 #[tauri::command]
 pub fn start_scan(
     app: AppHandle,
@@ -503,10 +732,30 @@ pub fn start_scan(
     prefix: String,
     timeout_ms: u64,
     concurrency: usize,
+    mode: Option<String>,
+    tcp_port: Option<u16>,
 ) -> Result<String, String> {
-    let parsed = parse_prefix(&prefix).map_err(|e| e.to_string())?;
-    let targets = build_targets(&parsed, TargetRange::Standard).map_err(|e| e.to_string())?;
+    let spec = parse_spec(&prefix, TargetRange::Standard).map_err(|e| e.to_string())?;
+    let targets = spec.targets.clone();
     let total = targets.len();
+
+    let mut mode = match mode.as_deref() {
+        Some("tcp") => ProbeMode::Tcp {
+            port: tcp_port.filter(|p| *p > 0).unwrap_or(80),
+        },
+        Some("icmp") => ProbeMode::Icmp,
+        // 未指定时沿用上一次的方式（首次启动为平台默认）
+        _ => {
+            let sh = state.shared.lock().expect("state poisoned");
+            sh.mode
+        }
+    };
+    if let ProbeMode::Tcp { port } = mode {
+        if port == 0 {
+            mode = ProbeMode::Tcp { port: 80 };
+        }
+    }
+    mode.validate().map_err(|e| e.to_string())?;
 
     let thresholds = {
         let sh = state.shared.lock().expect("state poisoned");
@@ -514,7 +763,7 @@ pub fn start_scan(
     };
 
     let config = ProbeConfig {
-        prefix: Some(parsed),
+        prefix: parse_prefix(&prefix).ok(),
         range: TargetRange::Standard,
         timeout_ms: if timeout_ms == 0 {
             cping_core::DEFAULT_TIMEOUT_MS
@@ -527,10 +776,13 @@ pub fn start_scan(
             concurrency
         },
         thresholds,
+        mode,
     };
 
-    let handle: SchedulerHandle = state
-        .scheduler
+    // 每次扫描按当前方式新建调度器：一次任务只有一种方式，
+    // 这样「ICMP 在线」与「TCP 开放」永远不可能混在同一次统计里。
+    let scheduler = ProbeScheduler::new(select_backend(mode));
+    let handle: SchedulerHandle = scheduler
         .start(&config, targets.clone())
         .map_err(|e| e.to_string())?;
 
@@ -551,6 +803,8 @@ pub fn start_scan(
         sh.stats = ScanStats::from_results_with_total(&[], total);
         sh.elapsed_ms = 0;
         sh.cancel = Some(token);
+        sh.mode = mode;
+        sh.spec = spec;
     }
 
     // 后台线程：消费核心事件 → 更新共享状态 + 推送前端
@@ -600,12 +854,22 @@ pub fn start_scan(
                         *slot = Some(r);
                     }
                 }
+                // M8：把本轮交给监控状态机（轮次 +1、算变化、更新基线），
+                // 并留下「上一轮 → 本轮」的完整差异供导出 diff 报告。
+                let current = collect_results(&sh);
+                let previous: Vec<ProbeResult> = sh.monitor.previous().to_vec();
+                if !previous.is_empty() && !current.is_empty() {
+                    let diff = diff_reports(&previous, &current, &sh.thresholds);
+                    sh.last_diff = Some(diff);
+                }
+                let thresholds_now = sh.thresholds;
+                sh.monitor.commit_round(&current, &thresholds_now);
                 // 进程随时可能被系统回收（Android 上销毁 Activity 即退出进程），
                 // 所以结果一落地就顺手写盘，不依赖退出钩子。
                 let _ = autosave(&app, &sh);
             }
 
-            let dto = to_event_dto(&event, &thresholds);
+            let dto = to_event_dto(&event, &thresholds, mode);
             let _ = app.emit("probe-event", dto);
             if terminal {
                 break;
@@ -630,8 +894,14 @@ fn snapshot_dto(sh: &Shared) -> SnapshotDto {
         .results
         .iter()
         .flatten()
-        .map(|r| to_result_dto(r, &sh.thresholds))
+        .map(|r| to_result_dto(r, &sh.thresholds, sh.mode))
         .collect();
+    let diff_summary = sh
+        .last_diff
+        .as_ref()
+        .filter(|d| !d.is_empty())
+        .map(|d| d.summary())
+        .unwrap_or_default();
     SnapshotDto {
         task_id: sh.task_id.clone(),
         running: sh.running,
@@ -643,6 +913,21 @@ fn snapshot_dto(sh: &Shared) -> SnapshotDto {
         results,
         cell_slots: sh.cell_slots.clone(),
         targets: sh.targets.iter().map(|ip| ip.to_string()).collect(),
+        mode: sh.mode.key().to_string(),
+        mode_label: sh.mode.describe(),
+        tcp_port: sh.mode.tcp_port(),
+        spec_summary: sh.spec.summary(),
+        segments: sh.spec.segments.iter().map(SegmentDto::from).collect(),
+        matrix_compatible: sh.spec.matrix_compatible(),
+        round: sh.monitor.round(),
+        changes: sh
+            .monitor
+            .last_round_changes()
+            .iter()
+            .map(ChangeDto::from)
+            .collect(),
+        change_total: sh.monitor.log().total_seen(),
+        diff_summary,
     }
 }
 
@@ -652,31 +937,89 @@ pub fn snapshot(state: State<'_, AppState>) -> Result<SnapshotDto, String> {
     Ok(snapshot_dto(&sh))
 }
 
+/// 变化事件流（最近 N 条，新的在前）。
+#[tauri::command]
+pub fn recent_changes(state: State<'_, AppState>, limit: usize) -> Result<Vec<ChangeDto>, String> {
+    let sh = state.shared.lock().expect("state poisoned");
+    Ok(sh
+        .monitor
+        .log()
+        .iter_recent_first()
+        .take(limit.max(1))
+        .map(ChangeDto::from)
+        .collect())
+}
+
 fn collect_results(sh: &Shared) -> Vec<ProbeResult> {
     sh.results.iter().flatten().cloned().collect()
 }
 
-fn write_export(sh: &Shared, path: &str) -> Result<String, String> {
+/// 构造导出用的报告（M10：CSV/TXT/JSON/HTML 走同一个构造点）。
+fn build_report(sh: &Shared) -> Result<ScanReport, String> {
     let done = collect_results(sh);
     if done.is_empty() {
         return Err("尚无已完成的结果可导出".into());
     }
-    let format =
-        ExportFormat::from_path(path).ok_or_else(|| "仅支持 .csv / .txt 扩展名".to_string())?;
     let meta = ExportMeta {
-        scan_time: now_string(),
+        scan_time: sh.scan_time.clone(),
         local_ip: local_ip_label(),
         elapsed_ms: sh.elapsed_ms,
+        mode: sh.mode,
+        target_desc: sh.spec.summary(),
+        round: sh.monitor.round(),
     };
-    let bytes = export(&done, format, &meta, &sh.thresholds).map_err(|e| e.to_string())?;
+    Ok(ScanReport::new(
+        &done,
+        meta,
+        sh.thresholds,
+        sh.monitor.last_round_changes().to_vec(),
+    ))
+}
+
+fn write_export(sh: &Shared, path: &str) -> Result<String, String> {
+    let format = ExportFormat::from_path(path)
+        .ok_or_else(|| "仅支持 .csv / .txt / .json / .html 扩展名".to_string())?;
+    let report = build_report(sh)?;
+    let rows = report.results.len();
+    let bytes = report
+        .render(format, &ColorConfig::default())
+        .map_err(|e| e.to_string())?;
     std::fs::write(path, &bytes).map_err(|e| format!("写入 {path} 失败：{e}"))?;
-    Ok(format!("已导出 {} 条结果 → {path}", done.len()))
+    Ok(format!(
+        "已导出 {rows} 条结果（{}）→ {path}",
+        format.label_zh()
+    ))
 }
 
 #[tauri::command]
 pub fn export_results(state: State<'_, AppState>, path: String) -> Result<String, String> {
     let sh = state.shared.lock().expect("state poisoned");
     write_export(&sh, &path)
+}
+
+/// M10：把「上一轮 → 本轮」的差异导出成 CSV / JSON（按扩展名决定）。
+#[tauri::command]
+pub fn export_diff(state: State<'_, AppState>, path: String) -> Result<String, String> {
+    let sh = state.shared.lock().expect("state poisoned");
+    let diff = sh
+        .last_diff
+        .as_ref()
+        .ok_or_else(|| "还没有可对比的上一轮结果（至少完成两轮扫描）".to_string())?;
+    let bytes = match ExportFormat::from_path(&path) {
+        Some(ExportFormat::Csv) => diff.to_csv().map_err(|e| e.to_string())?,
+        Some(other) => {
+            return Err(format!(
+                "差异报告目前只支持 .csv，收到 {}（差异也含在 JSON/HTML 报告的 changes 段里）",
+                other.label_zh()
+            ))
+        }
+        None => return Err("请用 .csv 扩展名".into()),
+    };
+    std::fs::write(&path, &bytes).map_err(|e| format!("写入 {path} 失败：{e}"))?;
+    Ok(format!(
+        "已导出差异报告（{} 项）→ {path}",
+        diff.entries.len()
+    ))
 }
 
 /// Android 等无桌面文件对话框的场景：写到平台提供的可写目录并回报完整路径。
@@ -693,10 +1036,12 @@ pub fn export_to_app_dir(
         .map_err(|e| format!("无法确定保存目录：{e}"))?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建目录 {}：{e}", dir.display()))?;
 
-    let fmt = if format == "txt" {
-        ExportFormat::Txt
-    } else {
-        ExportFormat::Csv
+    let fmt = match format.as_str() {
+        "txt" => ExportFormat::Txt,
+        "json" => ExportFormat::Json,
+        // M10：HTML 报告在移动端同样可用（单文件、无外部资源）
+        "html" => ExportFormat::Html,
+        _ => ExportFormat::Csv,
     };
     let path = dir.join(format!("cping-{}.{}", file_stamp(), fmt.extension()));
     let path_str = path.to_string_lossy().to_string();
@@ -1050,7 +1395,11 @@ pub fn restore_snapshot(
     // 这种快照宁可拒绝恢复，也不能给出一份看似正常的错位数据。
     let parsed = parse_prefix(&snap.prefix)
         .map_err(|e| format!("快照中的网段 {:?} 无法解析：{e}", snap.prefix))?;
-    let targets = build_targets(&parsed, TargetRange::Standard).map_err(|e| e.to_string())?;
+    // 快照里只存三段网段，所以这里固定用 Standard 规则重建
+    let rebuilt = parse_spec(&snap.prefix, TargetRange::Standard)
+        .or_else(|_| parse_spec(&parsed.to_string(), TargetRange::Standard))
+        .map_err(|e| e.to_string())?;
+    let targets = rebuilt.targets.clone();
     if targets.len() != snap.total {
         return Err(format!(
             "快照与当前目标规则不一致（快照记录 {} 个目标，按网段 {:?} 算出 {} 个）",
@@ -1085,6 +1434,10 @@ pub fn restore_snapshot(
         sh.elapsed_ms = snap.elapsed_ms;
         sh.thresholds = snap.thresholds;
         sh.cancel = None;
+        // 恢复的是历史结果：变化基线清空，免得把「上次的结果」当成上一轮去比对
+        sh.spec = rebuilt;
+        sh.monitor.reset_baseline();
+        sh.last_diff = None;
         snapshot_dto(&sh)
     };
 

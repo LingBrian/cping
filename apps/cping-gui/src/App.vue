@@ -33,6 +33,8 @@ onMounted(async () => {
   await store.loadConfig()
   await store.attachEvents()
   await store.loadLocalAddresses()
+  // M12：拉一次后端能力，用于「设置」里如实说明当前平台能做什么（含不能做的）。
+  await store.loadBackendCaps()
   // M7：进程随时可能被系统回收（Android 上销毁 Activity 即退出进程），
   // 所以启动时先看看有没有上次没处理完的结果。只检查、不自动恢复。
   await store.checkPendingSnapshot()

@@ -7,7 +7,7 @@
 //!   它应当实现为一个语义独立的策略（见 `docs/platform-compatibility.md`）。
 
 use crate::error::ProbeError;
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -32,7 +32,7 @@ impl<T: ProbeBackend + ?Sized> ProbeBackend for Box<T> {
         (**self).name()
     }
 
-    fn probe(&self, target: Ipv4Addr, timeout: Duration) -> Result<ProbeOutcome, ProbeError> {
+    fn probe(&self, target: IpAddr, timeout: Duration) -> Result<ProbeOutcome, ProbeError> {
         (**self).probe(target, timeout)
     }
 }
@@ -43,7 +43,7 @@ pub trait ProbeBackend: Send + Sync {
     fn name(&self) -> &'static str;
 
     /// 探测单个目标。**必须**在 `timeout` 量级内返回，不得无限阻塞。
-    fn probe(&self, target: Ipv4Addr, timeout: Duration) -> Result<ProbeOutcome, ProbeError>;
+    fn probe(&self, target: IpAddr, timeout: Duration) -> Result<ProbeOutcome, ProbeError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -118,7 +118,18 @@ pub enum MockPolicy {
         span_ms: u32,
     },
     /// 显式脚本；未列出的目标按超时处理。
-    Scripted(Vec<(Ipv4Addr, MockResponse)>),
+    Scripted(Vec<(IpAddr, MockResponse)>),
+}
+
+/// 模拟后端用的「主机字节」：结果只与目标地址本身有关，因此可重复。
+///
+/// IPv4 取第 4 段，IPv6 取最后一个字节——两条路径都只是把地址映射到一个
+/// 稳定的 0–255 值，不承载任何真实网络语义。
+fn host_byte(ip: IpAddr) -> u8 {
+    match ip {
+        IpAddr::V4(v4) => v4.octets()[3],
+        IpAddr::V6(v6) => v6.octets()[15],
+    }
 }
 
 /// 可观测的模拟后端：记录调用次数与峰值并发，便于断言「并发不超过上限」。
@@ -162,8 +173,8 @@ impl MockBackend {
         self.peak.load(Ordering::SeqCst)
     }
 
-    fn resolve(&self, target: Ipv4Addr) -> MockResponse {
-        let host = target.octets()[3];
+    fn resolve(&self, target: IpAddr) -> MockResponse {
+        let host = host_byte(target);
         match &self.policy {
             MockPolicy::AllOnline {
                 base_rtt_ms,
@@ -222,7 +233,7 @@ impl ProbeBackend for MockBackend {
         "mock"
     }
 
-    fn probe(&self, target: Ipv4Addr, timeout: Duration) -> Result<ProbeOutcome, ProbeError> {
+    fn probe(&self, target: IpAddr, timeout: Duration) -> Result<ProbeOutcome, ProbeError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let running = self.current.fetch_add(1, Ordering::SeqCst) + 1;
         self.peak.fetch_max(running, Ordering::SeqCst);
@@ -239,7 +250,7 @@ impl ProbeBackend for MockBackend {
 #[derive(Debug)]
 pub struct RecordingBackend {
     inner_policy: MockPolicy,
-    seen: std::sync::Mutex<Vec<Ipv4Addr>>,
+    seen: std::sync::Mutex<Vec<IpAddr>>,
     current: AtomicUsize,
     peak: AtomicUsize,
     delay_ms: u64,
@@ -262,7 +273,7 @@ impl RecordingBackend {
         self
     }
 
-    pub fn seen_targets(&self) -> Vec<Ipv4Addr> {
+    pub fn seen_targets(&self) -> Vec<IpAddr> {
         self.seen.lock().expect("poisoned").clone()
     }
 
@@ -276,7 +287,7 @@ impl ProbeBackend for RecordingBackend {
         "recording"
     }
 
-    fn probe(&self, target: Ipv4Addr, timeout: Duration) -> Result<ProbeOutcome, ProbeError> {
+    fn probe(&self, target: IpAddr, timeout: Duration) -> Result<ProbeOutcome, ProbeError> {
         {
             let mut seen = self.seen.lock().expect("poisoned");
             seen.push(target);

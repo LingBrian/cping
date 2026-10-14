@@ -193,6 +193,27 @@ adb shell dumpsys activity exit-info com.cping.gui   # EXIT_SELF / status=0
 生命周期的固有行为，当前由「导出 CSV」缓解；如需保留，应做「退前台时落盘快照 +
 重启后恢复」，属于功能增强而非缺陷修复。
 
+### 3.6 Linux 实测结果（M11，WSL Debian 13，2026-10-15）
+
+本机没有独立的 Linux 机器，用 WSL2 里的 Debian 13 + Rust 1.99.0 完成构建与实测。
+
+| 项 | 结果 |
+| --- | --- |
+| 构建 | ✅ `cargo test --workspace` 全绿；`cargo build --release` 产出 ELF x86-64（已 strip） |
+| 原生 ICMP（有权限） | ✅ `127.0.0.1` 1 ms、默认网关 0 ms（WSL 内以 root 运行，具备 `CAP_NET_RAW`） |
+| TCP v4 / v6 | ✅ `127.0.0.1:18080`、`::1:18081` 均 `TCP-OPEN` |
+| **TCP 关闭端口** | ✅ 内核回 RST → 归类「不可达」、**0.000 s** 返回、退出码 1 |
+| ICMPv6 | ⚠️ 未实装：`-t ::1 --mode icmp` → 「不支持」、退出码 3（如实上报，非静默超时） |
+| TUI | ✅ 在真实伪终端内渲染、进入备用屏，按 `q` 优雅退出（码 0） |
+| 导出 | ✅ CSV / TXT / JSON / HTML 四种均正确产出（含 IPv6 行） |
+
+**与 Windows 的关键差异**：Linux 上「TCP 端口关闭」能可靠复现为 RST →「不可达」；
+Windows 上同一用例表现为超时（用 Python 独立对照同样超时），
+因此 Windows 侧不宣称该路径已实测。
+
+**未测**：Linux 的邻居表（`/proc/net/arp`）与主机名反查链路只有单测覆盖；
+`CAP_NET_RAW` 缺失时的 `EPERM` 映射未单独复现（WSL 内以 root 运行）。
+
 ## 4. 本机地址与 MAC
 
 | 项 | 现状 |
@@ -205,7 +226,11 @@ adb shell dumpsys activity exit-info com.cping.gui   # EXIT_SELF / status=0
 
 - [x] Windows：无管理员权限下 raw ICMP 是否可用 —— ✅ 可用（`SOCK_DGRAM + IPPROTO_ICMP`）
 - [ ] Windows：`IcmpSendEcho` 的错误码到状态映射（本机未触发权限错误）
-- [ ] Linux：`CAP_NET_RAW` 缺失时的错误码是否为 `EPERM`（应映射为「权限不足」）
+- [ ] Linux：`CAP_NET_RAW` 缺失时的错误码是否为 `EPERM`（应映射为「权限不足」）——
+      WSL 内以 root 运行，未单独复现无权限路径
+- [x] Linux：原生 ICMP 与 TCP 的真实连通性 —— ✅ 实测通过（见 §3.6）
+- [x] Linux：TCP 关闭端口是否被判为「不可达」而非超时 —— ✅ 是（RST，0.000 s）
+- [ ] Linux：`/proc/net/arp` 邻居表与主机名反查 —— 仅单测覆盖，未实测
 - [x] Android：`socket(AF_INET, SOCK_DGRAM/SOCK_RAW, IPPROTO_ICMP)` 的 errno ——
       ✅ `EPERM`/`EACCES`，状态如实分类为「权限不足」（模拟器实测）
 - [ ] Android：`/system/bin/ping` 是否存在、普通应用能否执行（未测，不依赖）

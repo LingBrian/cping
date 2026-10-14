@@ -14,6 +14,13 @@ async function onLookup(index: number) {
   const msg = await store.lookupHostname(index)
   if (!msg) message.error(store.status)
 }
+
+/** M8：把本轮变化拼进单元格 title，鼠标悬停就能看到「从什么变成了什么」。 */
+function changeTitle(index: number, base: string): string {
+  const c = store.changeMap.get(index)
+  const note = store.changeNoteOf(index)
+  return c && note ? `${base} —— ${note}` : base
+}
 </script>
 
 <template>
@@ -34,9 +41,17 @@ async function onLookup(index: number) {
         </tr>
       </thead>
       <tbody>
-        <tr v-for="row in store.visibleRows" :key="row.index">
+        <tr
+          v-for="row in store.visibleRows"
+          :key="row.index"
+          :class="{ 'result-table__row--changed': store.isChanged(row.index) }"
+        >
           <td class="cping-mono" :title="row.ip">{{ row.ip }}</td>
-          <td :title="row.result ? row.result.statusLabel : '等待'">
+          <td :title="changeTitle(row.index, row.result ? row.result.statusLabel : '等待')">
+            <!-- M8：变化用「符号 + 文字」双通道标出，不靠颜色单独表意 -->
+            <span v-if="store.isChanged(row.index)" class="badge badge--change">{{
+              store.changeMap.get(row.index)?.kindLabel ?? '变化'
+            }}</span>
             <span v-if="row.result" class="badge">{{
               row.result.classKey ? CLASS_SYMBOLS[row.result.classKey] : '·'
             }}</span>

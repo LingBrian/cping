@@ -39,7 +39,7 @@
 use crate::classify::Thresholds;
 use crate::error::{CoreError, CoreResult};
 use crate::result::{ProbeResult, ProbeStatus, ScanStats};
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 
 /// 签名首字段。
 pub const SIGNATURE: &str = "CPING-SNAPSHOT";
@@ -238,7 +238,7 @@ fn parse_row(cols: &[&str]) -> CoreResult<ProbeResult> {
         .trim()
         .parse()
         .map_err(|_| CoreError::Snapshot(format!("下标非法: {:?}", cols[0])))?;
-    let ip: Ipv4Addr = cols[1]
+    let ip: IpAddr = cols[1]
         .trim()
         .parse()
         .map_err(|_| CoreError::Snapshot(format!("IP 非法: {:?}", cols[1])))?;
@@ -322,7 +322,7 @@ mod tests {
         let results = vec![
             ProbeResult {
                 index: 0,
-                ip: Ipv4Addr::new(192, 168, 1, 1),
+                ip: IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 1)),
                 status: ProbeStatus::Online { rtt_ms: 12 },
                 mac: Some("AA:BB:CC:DD:EE:01".into()),
                 vendor: Some("Example Vendor".into()),
@@ -330,12 +330,12 @@ mod tests {
             },
             ProbeResult::new(
                 1,
-                Ipv4Addr::new(192, 168, 1, 2),
+                IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 2)),
                 ProbeStatus::PermissionDenied,
             ),
             ProbeResult::new(
                 7,
-                Ipv4Addr::new(192, 168, 1, 8),
+                IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 8)),
                 ProbeStatus::Error("内部错误：socket 创建失败".into()),
             ),
         ];

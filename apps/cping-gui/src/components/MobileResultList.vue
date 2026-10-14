@@ -10,7 +10,12 @@ const store = usePingStore()
     <div v-if="store.visibleRows.length === 0" class="cping-panel" style="text-align: center; color: #6b7280">
       暂无数据（可关闭「仅在线」过滤后查看）
     </div>
-    <div v-for="row in store.visibleRows" :key="row.index" class="mobile-list__row mobile-list__row--stacked">
+    <div
+      v-for="row in store.visibleRows"
+      :key="row.index"
+      class="mobile-list__row mobile-list__row--stacked"
+      :class="{ 'mobile-list__row--changed': store.isChanged(row.index) }"
+    >
       <div class="mobile-list__head">
         <span class="mobile-list__ip">{{ row.ip }}</span>
         <span>
@@ -21,6 +26,11 @@ const store = usePingStore()
         <span class="mobile-list__rtt">
           {{ row.result?.rttMs != null ? `${row.result.rttMs} ms` : '--' }}
         </span>
+      </div>
+      <!-- M8：本轮变化单独一行，触控下比挤在状态里更容易读 -->
+      <div v-if="store.isChanged(row.index)" class="mobile-list__change">
+        <span class="badge badge--change">{{ store.changeMap.get(row.index)?.kindLabel ?? '变化' }}</span>
+        {{ store.changeNoteOf(row.index) }}
       </div>
       <!-- M7：MAC / 厂商 / 主机名。触控下多占一行比挤在一行更容易读。 -->
       <div v-if="row.result" class="mobile-list__info">

@@ -17,7 +17,7 @@ use crate::neighbor::{self, NeighborEntry};
 use crate::oui::{self, mac_to_string};
 use crate::result::ProbeResult;
 use std::collections::HashMap;
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 use std::time::Duration;
 
 /// 一次补全的结果统计，供界面如实提示（而不是只说「完成」）。
@@ -42,7 +42,9 @@ pub fn apply_neighbors(results: &mut [ProbeResult], table: &[NeighborEntry]) -> 
     if table.is_empty() {
         return (0, 0);
     }
-    let index: HashMap<Ipv4Addr, [u8; 6]> = table.iter().map(|e| (e.ip, e.mac)).collect();
+    // ARP/邻居表只覆盖 IPv4，因此索引键统一转成 `IpAddr` 后，IPv6 目标查不到
+    // 任何条目——这是事实，不是缺陷：v6 目标的 mac 恒为 None。
+    let index: HashMap<IpAddr, [u8; 6]> = table.iter().map(|e| (IpAddr::V4(e.ip), e.mac)).collect();
     let (mut mac_filled, mut vendor_filled) = (0, 0);
     for r in results.iter_mut() {
         if r.mac.is_some() {

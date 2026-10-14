@@ -6,7 +6,7 @@
 [package]
 name = "cping-gui"
 description = "CPing 图形界面（Tauri 2 容器）"
-version = "1.1.2"
+version = "2.0.0"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT"
@@ -14,6 +14,13 @@ license = "MIT"
 [lib]
 name = "cping_gui_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = []
+# M12：可选异步调度。把 `cping-core` 的 `async` feature 透传到壳里，
+# 默认**不开启**，因此默认的桌面 / Android 包不含 Tokio（保持依赖面最小）。
+# 界面会如实显示当前构建是否带异步调度（探测方式提示区）。
+async-scheduler = ["cping-core/async"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

@@ -14,12 +14,20 @@
 //! CSV 侧则完整保留原文。
 
 use crate::classify::{classify_status, Thresholds};
+use crate::config::ColorConfig;
 use crate::error::{CoreError, CoreResult};
-use crate::result::{ProbeResult, ScanStats};
-use std::net::Ipv4Addr;
+use crate::json::Json;
+use crate::monitor::Change;
+use crate::result::{ProbeResult, ProbeStatus, ScanStats};
+use crate::spec::ProbeMode;
+use std::net::IpAddr;
 
 pub const CSV_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
-pub const CSV_HEADER: [&str; 8] = [
+
+/// 导出格式的**报告版本号**：结构性变更时递增，消费方据此判断能否解析。
+pub const REPORT_FORMAT_VERSION: u32 = 2;
+
+pub const CSV_HEADER: [&str; 9] = [
     "扫描时间",
     "IP地址",
     "状态",
@@ -28,48 +36,95 @@ pub const CSV_HEADER: [&str; 8] = [
     "备注",
     "厂商",
     "主机名",
+    // M9 追加列：仍然只在末尾追加，旧列位置与内容不变
+    "探测方式",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportFormat {
     Csv,
     Txt,
+    /// 结构化 JSON（M10）。
+    Json,
+    /// 单文件自包含 HTML 报告（M10）。
+    Html,
 }
 
 impl ExportFormat {
+    pub const ALL: [ExportFormat; 4] = [
+        ExportFormat::Csv,
+        ExportFormat::Txt,
+        ExportFormat::Json,
+        ExportFormat::Html,
+    ];
+
     pub const fn extension(self) -> &'static str {
         match self {
             ExportFormat::Csv => "csv",
             ExportFormat::Txt => "txt",
+            ExportFormat::Json => "json",
+            ExportFormat::Html => "html",
+        }
+    }
+
+    pub const fn label_zh(self) -> &'static str {
+        match self {
+            ExportFormat::Csv => "CSV",
+            ExportFormat::Txt => "TXT",
+            ExportFormat::Json => "JSON",
+            ExportFormat::Html => "HTML 报告",
         }
     }
 
     /// 由文件名/路径推断格式（大小写不敏感），无法识别时返回 `None`。
     pub fn from_path(path: &str) -> Option<Self> {
         let lower = path.to_ascii_lowercase();
-        if lower.ends_with(".csv") {
-            Some(ExportFormat::Csv)
-        } else if lower.ends_with(".txt") {
-            Some(ExportFormat::Txt)
-        } else {
-            None
+        for fmt in Self::ALL {
+            if lower.ends_with(&format!(".{}", fmt.extension())) {
+                return Some(fmt);
+            }
         }
+        None
     }
 }
 
 /// 导出时附加的元信息。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportMeta {
     /// 扫描开始时间（调用方格式化，推荐 `YYYY-MM-DD HH:MM:SS`）。
     pub scan_time: String,
     pub local_ip: String,
     pub elapsed_ms: u64,
+    /// 探测方式（M9）：决定状态列显示成「在线」还是 `TCP-OPEN`。
+    pub mode: ProbeMode,
+    /// 目标范围描述（M9/M10），例如 `192.168.1（255 个）`。
+    pub target_desc: String,
+    /// 轮次编号（M8 持续监控）；`0` 表示单次扫描。
+    pub round: u64,
+}
+
+impl Default for ExportMeta {
+    fn default() -> Self {
+        Self {
+            scan_time: String::new(),
+            local_ip: String::new(),
+            elapsed_ms: 0,
+            mode: ProbeMode::Icmp,
+            target_desc: String::new(),
+            round: 0,
+        }
+    }
 }
 
 impl ExportMeta {
     /// 用时的人类可读形式，例如 `1.234 s`。
     pub fn elapsed_human(&self) -> String {
         format!("{:.3} s", self.elapsed_ms as f64 / 1000.0)
+    }
+
+    /// 状态列在该模式下的展示文本。
+    pub fn status_label(&self, status: &ProbeStatus) -> String {
+        self.mode.status_label(status)
     }
 }
 
@@ -93,13 +148,15 @@ pub fn csv_escape(field: &str) -> String {
     out
 }
 
-/// IPv4 数值排序键。
-pub const fn ip_sort_key(ip: Ipv4Addr) -> u32 {
-    let o = ip.octets();
-    ((o[0] as u32) << 24) | ((o[1] as u32) << 16) | ((o[2] as u32) << 8) | (o[3] as u32)
+/// 目标地址的稳定排序键：`(族, 数值)`，族 0 = IPv4、1 = IPv6。
+///
+/// 与 [`crate::spec::addr_sort_key`] 同一套规则——排序口径只定义一次，
+/// 导出、差异、监控三处不得各写一份。
+pub fn ip_sort_key(ip: IpAddr) -> (u8, u128) {
+    crate::spec::addr_sort_key(ip)
 }
 
-/// 按 IPv4 数值升序返回结果副本。
+/// 按地址升序返回结果副本（v4 在前、v6 在后，同族内按数值）。
 pub fn sorted_by_ip(results: &[ProbeResult]) -> Vec<ProbeResult> {
     let mut out = results.to_vec();
     out.sort_by_key(|r| ip_sort_key(r.ip));
@@ -119,13 +176,15 @@ pub fn export_csv(results: &[ProbeResult], meta: &ExportMeta) -> CoreResult<Vec<
         let fields = [
             meta.scan_time.clone(),
             r.ip.to_string(),
-            r.status.label_zh().to_string(),
+            meta.status_label(&r.status),
             rtt,
             mac,
             note,
             // M7 追加列：必须留在末尾
             r.vendor.clone().unwrap_or_default(),
             r.hostname.clone().unwrap_or_default(),
+            // M9 追加列：同样只在末尾追加
+            meta.mode.describe(),
         ];
         let line: Vec<String> = fields.iter().map(|f| csv_escape(f)).collect();
         text.push_str(&line.join(","));
@@ -151,6 +210,10 @@ pub fn export_txt(
     out.push_str("C网群PING工具 · 扫描结果\n");
     out.push_str("============================================================\n");
     out.push_str(&format!("扫描时间 : {}\n", meta.scan_time));
+    out.push_str(&format!("探测方式 : {}\n", meta.mode.describe()));
+    if !meta.target_desc.is_empty() {
+        out.push_str(&format!("目标范围 : {}\n", meta.target_desc));
+    }
     out.push_str(&format!("本机 IP  : {}\n", meta.local_ip));
     out.push_str(&format!("用时     : {}\n", meta.elapsed_human()));
     out.push_str(&format!("目标总数 : {}\n", stats.total));
@@ -194,7 +257,10 @@ pub fn export_txt(
         out.push_str(&format!(
             "{}{}{}{}{}{}{}\n",
             pad(&r.ip.to_string(), W_IP),
-            pad(r.status.label_zh(), W_STATUS),
+            pad(
+                &truncate_display(&meta.status_label(&r.status), W_STATUS),
+                W_STATUS
+            ),
             pad(&rtt, W_RTT),
             pad(&mac, W_MAC),
             // 定宽表里超长内容必须截断，否则整张表的列会错位
@@ -207,7 +273,10 @@ pub fn export_txt(
     Ok(out.into_bytes())
 }
 
-/// 统一入口。
+/// 统一入口（CSV / TXT）。
+///
+/// JSON / HTML 需要额外的统计与变化信息，请用 [`ScanReport::render`]；
+/// 这里为兼容既有调用方保留，遇到 JSON/HTML 时会用最小报告包装。
 pub fn export(
     results: &[ProbeResult],
     format: ExportFormat,
@@ -217,6 +286,10 @@ pub fn export(
     match format {
         ExportFormat::Csv => export_csv(results, meta),
         ExportFormat::Txt => export_txt(results, meta, thresholds),
+        ExportFormat::Json | ExportFormat::Html => {
+            ScanReport::new(results, meta.clone(), *thresholds, Vec::new())
+                .render(format, &ColorConfig::default())
+        }
     }
 }
 
@@ -228,9 +301,153 @@ pub fn export_to_path(
     thresholds: &Thresholds,
 ) -> CoreResult<Vec<u8>> {
     let format = ExportFormat::from_path(path).ok_or_else(|| {
-        CoreError::Export(format!("无法从 {path:?} 推断格式，仅支持 .csv / .txt"))
+        CoreError::Export(format!(
+            "无法从 {path:?} 推断格式，仅支持 .csv / .txt / .json / .html"
+        ))
     })?;
     export(results, format, meta, thresholds)
+}
+
+// ---------------------------------------------------------------------------
+// 扫描报告：CSV / TXT / JSON / HTML 的唯一构造点
+// ---------------------------------------------------------------------------
+
+/// 一份完整的扫描报告。
+///
+/// 四种导出格式都从这一个结构渲染，保证「界面看到的」与「文件里的」
+/// 出自同一份数据与同一套口径。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScanReport {
+    pub meta: ExportMeta,
+    /// 已按 IP 数值升序排列。
+    pub results: Vec<ProbeResult>,
+    pub stats: ScanStats,
+    pub thresholds: Thresholds,
+    /// 本轮变化（M8）；单次扫描时为空。
+    pub changes: Vec<Change>,
+}
+
+impl ScanReport {
+    /// 构造报告；`results` 会被排序去引用，原始切片不变。
+    pub fn new(
+        results: &[ProbeResult],
+        meta: ExportMeta,
+        thresholds: Thresholds,
+        changes: Vec<Change>,
+    ) -> Self {
+        let sorted = sorted_by_ip(results);
+        let stats = ScanStats::from_results_with_total(&sorted, sorted.len());
+        Self {
+            meta,
+            results: sorted,
+            stats,
+            thresholds,
+            changes,
+        }
+    }
+
+    /// 按格式渲染为字节缓冲（调用方决定落盘方式）。
+    pub fn render(&self, format: ExportFormat, palette: &ColorConfig) -> CoreResult<Vec<u8>> {
+        match format {
+            ExportFormat::Csv => export_csv(&self.results, &self.meta),
+            ExportFormat::Txt => export_txt(&self.results, &self.meta, &self.thresholds),
+            ExportFormat::Json => Ok(self.to_json_text().into_bytes()),
+            ExportFormat::Html => Ok(crate::html::render_report(self, palette).into_bytes()),
+        }
+    }
+
+    /// 结构化 JSON 文本（两空格缩进，键序稳定）。
+    pub fn to_json_text(&self) -> String {
+        self.to_json().render_pretty()
+    }
+
+    /// 结构化 JSON 值模型。
+    pub fn to_json(&self) -> Json {
+        let meta = &self.meta;
+        let stats = &self.stats;
+
+        let targets = Json::array(self.results.iter().map(|r| {
+            let class = classify_status(&r.status, &self.thresholds);
+            Json::object([
+                ("index", Json::UInt(r.index as u64)),
+                ("ip", Json::str(r.ip.to_string())),
+                ("status", Json::str(r.status.key())),
+                ("status_label", Json::str(meta.status_label(&r.status))),
+                ("online", Json::Bool(r.status.is_online())),
+                (
+                    "rtt_ms",
+                    match r.status.rtt_ms() {
+                        Some(v) => Json::UInt(v as u64),
+                        None => Json::Null,
+                    },
+                ),
+                (
+                    "class",
+                    match class {
+                        Some(c) => Json::str(c.key()),
+                        None => Json::Null,
+                    },
+                ),
+                ("mac", Json::opt_str(r.mac.clone())),
+                ("vendor", Json::opt_str(r.vendor.clone())),
+                ("hostname", Json::opt_str(r.hostname.clone())),
+                ("note", Json::opt_str(r.status.note().map(str::to_string))),
+            ])
+        }));
+
+        let changes = Json::array(self.changes.iter().map(|c| {
+            Json::object([
+                ("round", Json::UInt(c.round)),
+                ("ip", Json::str(c.ip.to_string())),
+                ("kind", Json::str(c.kind.key())),
+                ("from", Json::str(c.from.key())),
+                ("to", Json::str(c.to.key())),
+            ])
+        }));
+
+        Json::object([
+            ("tool", Json::str("cping")),
+            ("version", Json::str(crate::VERSION)),
+            ("format_version", Json::UInt(REPORT_FORMAT_VERSION as u64)),
+            (
+                "meta",
+                Json::object([
+                    ("scan_time", Json::str(meta.scan_time.clone())),
+                    ("local_ip", Json::str(meta.local_ip.clone())),
+                    ("elapsed_ms", Json::UInt(meta.elapsed_ms)),
+                    ("mode", Json::str(meta.mode.key())),
+                    (
+                        "tcp_port",
+                        match meta.mode.tcp_port() {
+                            Some(p) => Json::UInt(p as u64),
+                            None => Json::Null,
+                        },
+                    ),
+                    ("target_desc", Json::str(meta.target_desc.clone())),
+                    ("round", Json::UInt(meta.round)),
+                ]),
+            ),
+            (
+                "stats",
+                Json::object([
+                    ("total", Json::UInt(stats.total as u64)),
+                    ("completed", Json::UInt(stats.completed as u64)),
+                    ("pending", Json::UInt(stats.pending as u64)),
+                    ("online", Json::UInt(stats.online as u64)),
+                    ("timeout", Json::UInt(stats.timeout as u64)),
+                    ("unreachable", Json::UInt(stats.unreachable as u64)),
+                    (
+                        "permission_denied",
+                        Json::UInt(stats.permission_denied as u64),
+                    ),
+                    ("unsupported", Json::UInt(stats.unsupported as u64)),
+                    ("error", Json::UInt(stats.error as u64)),
+                ]),
+            ),
+            ("changes", changes),
+            ("targets", targets),
+        ])
+    }
 }
 
 // ---------------------------------------------------------------------------

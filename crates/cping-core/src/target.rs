@@ -6,11 +6,14 @@
 //! 由于原版目标范围是 `.1`–`.255`，`格号 0`（对应 `.0`）**没有目标**，恒为空。
 
 use crate::error::{CoreError, CoreResult};
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::ops::RangeInclusive;
 
 /// 目标数量的硬上限：防止误扫超出预期的网络。
-pub const MAX_TARGETS: usize = 1024;
+///
+/// M9 由 1024 提升到 65536（`/16` 级别批量扫描）；**矩阵视图另有 256 的上限**
+/// （见 [`crate::spec::MATRIX_VIEW_MAX`]），那是表示能力限制，不是性能限制。
+pub const MAX_TARGETS: usize = 65536;
 
 /// C 类网段前缀（前三段），例如 `192.168.1`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -166,20 +169,51 @@ pub const fn cell_of_host(host: u8) -> usize {
     host as usize
 }
 
-/// 目标 IP → 格号（第 4 段）。
+/// 目标 IP → 格号（第 4 段）。**仅对 IPv4 有意义**。
 pub const fn cell_of_ip(ip: Ipv4Addr) -> usize {
     cell_of_host(ip.octets()[3])
+}
+
+/// [`cell_of_ip`] 的通用版本：IPv6 目标没有「最后一跳 = 格号」语义，
+/// 因此返回 `None`，由调用方退化为列表视图。
+pub const fn cell_of_addr(ip: IpAddr) -> Option<usize> {
+    match ip {
+        IpAddr::V4(v4) => Some(cell_of_ip(v4)),
+        IpAddr::V6(_) => None,
+    }
+}
+
+/// 「可以当作目标地址」的类型。存在的唯一理由是让 `matrix_slots`
+/// 同时接受 `&[IpAddr]`（M12 之后的目标列表）和 `&[Ipv4Addr]`（历史调用点），
+/// 不必在每个调用处手动转换。
+pub trait AsTargetAddr {
+    fn as_target_addr(&self) -> IpAddr;
+}
+
+impl AsTargetAddr for IpAddr {
+    fn as_target_addr(&self) -> IpAddr {
+        *self
+    }
+}
+
+impl AsTargetAddr for Ipv4Addr {
+    fn as_target_addr(&self) -> IpAddr {
+        IpAddr::V4(*self)
+    }
 }
 
 /// 给定一个目标列表，返回 (格号, 目标下标) 映射；`格号 0` 通常为空。
 ///
 /// 返回长度固定为 `MATRIX_CELLS`，元素为 `Option<usize>`（目标在列表中的下标）。
-pub fn matrix_slots(targets: &[Ipv4Addr]) -> Vec<Option<usize>> {
+/// IPv6 目标不占格位——它们没有「最后一跳 = 格号」的对应关系，
+/// 此时矩阵不完整，界面必须切到表格视图（见 [`crate::spec::TargetSpec::matrix_compatible`]）。
+pub fn matrix_slots<T: AsTargetAddr>(targets: &[T]) -> Vec<Option<usize>> {
     let mut slots = vec![None; MATRIX_CELLS];
     for (idx, ip) in targets.iter().enumerate() {
-        let cell = cell_of_ip(*ip);
-        if cell < MATRIX_CELLS {
-            slots[cell] = Some(idx);
+        if let Some(cell) = cell_of_addr(ip.as_target_addr()) {
+            if cell < MATRIX_CELLS {
+                slots[cell] = Some(idx);
+            }
         }
     }
     slots

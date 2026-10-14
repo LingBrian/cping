@@ -18,12 +18,12 @@ use cping_core::oui::{parse_mac, vendor_of};
 use cping_core::snapshot::{load_from_path, save_to_path, Snapshot};
 use cping_core::target::{build_targets, parse_prefix, TargetRange};
 use cping_core::ProbeScheduler;
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 use std::time::Duration;
 
-fn targets_from_env() -> Option<Vec<Ipv4Addr>> {
+fn targets_from_env() -> Option<Vec<IpAddr>> {
     let raw = std::env::var("CPING_M7_TARGETS").ok()?;
-    let list: Vec<Ipv4Addr> = raw
+    let list: Vec<IpAddr> = raw
         .split(',')
         .filter_map(|s| s.trim().parse().ok())
         .collect();
@@ -199,7 +199,10 @@ fn real_results_survive_a_snapshot_roundtrip() {
     let prefix = results
         .first()
         .map(|r| {
-            let o = r.ip.octets();
+            let o = match r.ip {
+                IpAddr::V4(v4) => v4.octets(),
+                IpAddr::V6(_) => [0, 0, 0, 0],
+            };
             format!("{}.{}.{}", o[0], o[1], o[2])
         })
         .unwrap_or_else(|| "0.0.0".to_string());

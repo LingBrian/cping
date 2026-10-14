@@ -8,10 +8,19 @@ use cping_core::scheduler::{next_task_id, status_from_error, ProbeScheduler};
 use cping_core::target::{build_targets, parse_prefix, TargetRange};
 use cping_core::{CoreError, ProbeError};
 use std::collections::HashSet;
+use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+
+/// 测试用：取 IPv4 的第 4 段（测试数据都是 v4）。
+fn last4(ip: IpAddr) -> u8 {
+    match ip {
+        IpAddr::V4(v4) => v4.octets()[3],
+        IpAddr::V6(v6) => v6.octets()[15],
+    }
+}
 
 fn cfg(concurrency: usize) -> ProbeConfig {
     ProbeConfig {
@@ -21,9 +30,13 @@ fn cfg(concurrency: usize) -> ProbeConfig {
     }
 }
 
-fn targets(count_prefix: &str, range: TargetRange) -> Vec<Ipv4Addr> {
+fn targets(count_prefix: &str, range: TargetRange) -> Vec<IpAddr> {
     let p = parse_prefix(count_prefix).unwrap();
-    build_targets(&p, range).unwrap()
+    build_targets(&p, range)
+        .unwrap()
+        .into_iter()
+        .map(IpAddr::V4)
+        .collect()
 }
 
 #[test]
@@ -111,7 +124,7 @@ impl cping_core::probe::ProbeBackend for SharedBackend {
     }
     fn probe(
         &self,
-        target: Ipv4Addr,
+        target: IpAddr,
         timeout: Duration,
     ) -> Result<cping_core::probe::ProbeOutcome, ProbeError> {
         self.0.probe(target, timeout)
@@ -259,7 +272,12 @@ fn mixed_outcomes_are_counted_separately() {
         (prefix.with_host(7), MockResponse::Unsupported),
         (prefix.with_host(8), MockResponse::Error("internal".into())),
     ];
-    let sched = ProbeScheduler::new(MockBackend::new(MockPolicy::Scripted(scripted)));
+    let sched = ProbeScheduler::new(MockBackend::new(MockPolicy::Scripted(
+        scripted
+            .into_iter()
+            .map(|(ip, r)| (IpAddr::V4(ip), r))
+            .collect(),
+    )));
     let handle = sched
         .start(&cfg(4), targets("192.168.7", TargetRange::Standard))
         .unwrap();
@@ -279,7 +297,7 @@ fn mixed_outcomes_are_counted_separately() {
         outcome
             .results
             .iter()
-            .find(|r| r.ip.octets()[3] == h)
+            .find(|r| last4(r.ip) == h)
             .map(|r| classify_status(&r.status, &t))
             .unwrap()
     };
@@ -305,8 +323,8 @@ fn results_are_ordered_by_index() {
     let mut sorted = indices.clone();
     sorted.sort_unstable();
     assert_eq!(indices, sorted, "结果必须按下标升序");
-    assert_eq!(outcome.results.first().unwrap().ip.octets()[3], 1);
-    assert_eq!(outcome.results.last().unwrap().ip.octets()[3], 255);
+    assert_eq!(last4(outcome.results.first().unwrap().ip), 1);
+    assert_eq!(last4(outcome.results.last().unwrap().ip), 255);
 }
 
 #[test]
@@ -325,7 +343,7 @@ fn timeout_policy_marks_everything_timeout() {
 fn slow_backend_respects_timeout_budget() {
     // 每次探测要 200ms，但超时只有 50ms → 必须被判定为超时，而不是「在线」
     let policy = MockPolicy::Scripted(vec![(
-        Ipv4Addr::new(10, 50, 0, 1),
+        IpAddr::V4(Ipv4Addr::new(10, 50, 0, 1)),
         MockResponse::Slow {
             sleep_ms: 200,
             rtt_ms: 5,
@@ -335,7 +353,7 @@ fn slow_backend_respects_timeout_budget() {
     let mut config = cfg(1);
     config.timeout_ms = 50;
     let handle = sched
-        .start(&config, vec![Ipv4Addr::new(10, 50, 0, 1)])
+        .start(&config, vec![IpAddr::V4(Ipv4Addr::new(10, 50, 0, 1))])
         .unwrap();
     let outcome = handle.run_to_completion();
     assert_eq!(outcome.stats.timeout, 1, "超出超时预算的探测不得记为在线");
@@ -346,7 +364,7 @@ fn slow_backend_respects_timeout_budget() {
 fn stats_from_results_with_total_accounts_pending() {
     let results = vec![cping_core::ProbeResult::new(
         0,
-        Ipv4Addr::new(10, 0, 0, 1),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
         ProbeStatus::Online { rtt_ms: 5 },
     )];
     let stats = ScanStats::from_results_with_total(&results, 10);

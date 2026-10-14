@@ -26,16 +26,36 @@
 //! 该缺口已记入 `docs/plan.md`。
 
 use std::collections::HashMap;
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 use std::sync::{mpsc, Mutex, OnceLock};
 use std::time::Duration;
 
 /// 默认超时：局域网 PTR 慢于这个值就当作查不到。
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
 
-static CACHE: OnceLock<Mutex<HashMap<Ipv4Addr, Option<String>>>> = OnceLock::new();
+// getnameinfo 需要正确的地址族与对应长度的 sockaddr。这两个常量按平台硬编码，
+// 与 `native.rs` 里 ICMP 套接字用的是同一套数值。
+#[cfg(windows)]
+const AF_INET6: u16 = 23;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const AF_INET6: u16 = 10;
 
-fn cache() -> &'static Mutex<HashMap<Ipv4Addr, Option<String>>> {
+/// IPv6 版 `sockaddr`（`sockaddr_in6`）。
+///
+/// M12 新增：反查对 v4/v6 一视同仁，只是要传对结构体。
+#[cfg(any(windows, target_os = "linux", target_os = "android"))]
+#[repr(C)]
+struct SockAddrIn6 {
+    sin6_family: u16,
+    sin6_port: u16,
+    sin6_flowinfo: u32,
+    sin6_addr: [u8; 16],
+    sin6_scope_id: u32,
+}
+
+static CACHE: OnceLock<Mutex<HashMap<IpAddr, Option<String>>>> = OnceLock::new();
+
+fn cache() -> &'static Mutex<HashMap<IpAddr, Option<String>>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -55,7 +75,7 @@ pub fn normalize_ptr_name(raw: &str) -> Option<String> {
     if name.is_empty() {
         return None;
     }
-    if name.parse::<Ipv4Addr>().is_ok() || name.parse::<std::net::Ipv6Addr>().is_ok() {
+    if name.parse::<IpAddr>().is_ok() || name.parse::<std::net::Ipv6Addr>().is_ok() {
         return None;
     }
     let labels: Vec<&str> = name.split('.').collect();
@@ -99,7 +119,7 @@ const NI_NAMEREQD: i32 = 4;
 
 #[cfg(windows)]
 mod ffi {
-    use super::{SockAddrIn, NI_NAMEREQD};
+    use super::{IpAddr, SockAddrIn, SockAddrIn6, AF_INET, AF_INET6, NI_NAMEREQD};
 
     #[link(name = "ws2_32")]
     extern "system" {
@@ -115,26 +135,54 @@ mod ffi {
     }
 
     /// 返回 `Ok(主机名)`；无 PTR 记录或出错返回 `Err(说明)`。
-    pub fn ptr(ip: std::net::Ipv4Addr) -> Result<String, String> {
+    ///
+    /// M12：v4 与 v6 走同一套 `getnameinfo`，只是传入的 `sockaddr` 结构体不同。
+    pub fn ptr(ip: IpAddr) -> Result<String, String> {
         // getnameinfo 依赖 WinSock 已初始化
         crate::native::ensure_winsock().map_err(|e| e.to_string())?;
-        let sa = SockAddrIn {
-            sin_family: super::AF_INET as u16,
-            sin_port: 0,
-            sin_addr: u32::from_ne_bytes(ip.octets()),
-            sin_zero: [0; 8],
-        };
         let mut buf = [0u8; 256];
-        let rc = unsafe {
-            getnameinfo(
-                &sa,
-                std::mem::size_of::<SockAddrIn>() as i32,
-                buf.as_mut_ptr(),
-                buf.len() as u32,
-                std::ptr::null_mut(),
-                0,
-                NI_NAMEREQD,
-            )
+        let rc = match ip {
+            IpAddr::V4(v4) => {
+                let sa = SockAddrIn {
+                    sin_family: AF_INET as u16,
+                    sin_port: 0,
+                    sin_addr: u32::from_ne_bytes(v4.octets()),
+                    sin_zero: [0; 8],
+                };
+                unsafe {
+                    getnameinfo(
+                        &sa,
+                        std::mem::size_of::<SockAddrIn>() as i32,
+                        buf.as_mut_ptr(),
+                        buf.len() as u32,
+                        std::ptr::null_mut(),
+                        0,
+                        NI_NAMEREQD,
+                    )
+                }
+            }
+            IpAddr::V6(v6) => {
+                let sa = SockAddrIn6 {
+                    sin6_family: AF_INET6,
+                    sin6_port: 0,
+                    sin6_flowinfo: 0,
+                    sin6_addr: v6.octets(),
+                    sin6_scope_id: 0,
+                };
+                unsafe {
+                    // getnameinfo 只按 (指针, 长度) 解释内存，转成同一类型指针是安全的；
+                    // 长度由下面显式传入，两个结构体各自的大小都是准确的。
+                    getnameinfo(
+                        (&sa as *const SockAddrIn6).cast::<SockAddrIn>(),
+                        std::mem::size_of::<SockAddrIn6>() as i32,
+                        buf.as_mut_ptr(),
+                        buf.len() as u32,
+                        std::ptr::null_mut(),
+                        0,
+                        NI_NAMEREQD,
+                    )
+                }
+            }
         };
         if rc != 0 {
             return Err(format!("getnameinfo 返回 {rc}（通常表示没有 PTR 记录）"));
@@ -146,7 +194,7 @@ mod ffi {
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod ffi {
-    use super::{SockAddrIn, NI_NAMEREQD};
+    use super::{IpAddr, SockAddrIn, SockAddrIn6, AF_INET, AF_INET6, NI_NAMEREQD};
 
     extern "C" {
         fn getnameinfo(
@@ -160,24 +208,48 @@ mod ffi {
         ) -> i32;
     }
 
-    pub fn ptr(ip: std::net::Ipv4Addr) -> Result<String, String> {
-        let sa = SockAddrIn {
-            sin_family: super::AF_INET as u16,
-            sin_port: 0,
-            sin_addr: u32::from_ne_bytes(ip.octets()),
-            sin_zero: [0; 8],
-        };
+    pub fn ptr(ip: IpAddr) -> Result<String, String> {
         let mut buf = [0u8; 256];
-        let rc = unsafe {
-            getnameinfo(
-                &sa,
-                std::mem::size_of::<SockAddrIn>() as u32,
-                buf.as_mut_ptr(),
-                buf.len() as u32,
-                std::ptr::null_mut(),
-                0,
-                NI_NAMEREQD,
-            )
+        let rc = match ip {
+            IpAddr::V4(v4) => {
+                let sa = SockAddrIn {
+                    sin_family: AF_INET as u16,
+                    sin_port: 0,
+                    sin_addr: u32::from_ne_bytes(v4.octets()),
+                    sin_zero: [0; 8],
+                };
+                unsafe {
+                    getnameinfo(
+                        &sa,
+                        std::mem::size_of::<SockAddrIn>() as u32,
+                        buf.as_mut_ptr(),
+                        buf.len() as u32,
+                        std::ptr::null_mut(),
+                        0,
+                        NI_NAMEREQD,
+                    )
+                }
+            }
+            IpAddr::V6(v6) => {
+                let sa = SockAddrIn6 {
+                    sin6_family: AF_INET6,
+                    sin6_port: 0,
+                    sin6_flowinfo: 0,
+                    sin6_addr: v6.octets(),
+                    sin6_scope_id: 0,
+                };
+                unsafe {
+                    getnameinfo(
+                        (&sa as *const SockAddrIn6).cast::<SockAddrIn>(),
+                        std::mem::size_of::<SockAddrIn6>() as u32,
+                        buf.as_mut_ptr(),
+                        buf.len() as u32,
+                        std::ptr::null_mut(),
+                        0,
+                        NI_NAMEREQD,
+                    )
+                }
+            }
         };
         if rc != 0 {
             return Err(format!("getnameinfo 返回 {rc}（通常表示没有 PTR 记录）"));
@@ -189,7 +261,7 @@ mod ffi {
 
 #[cfg(not(any(windows, target_os = "linux", target_os = "android")))]
 mod ffi {
-    pub fn ptr(_ip: std::net::Ipv4Addr) -> Result<String, String> {
+    pub fn ptr(_ip: std::net::IpAddr) -> Result<String, String> {
         Err("该平台尚未实现主机名反查".to_string())
     }
 }
@@ -203,7 +275,7 @@ mod ffi {
 /// - 命中缓存直接返回（包括「已确认无 PTR」的否定缓存）；
 /// - 超时返回 `None` 且**不写缓存**；
 /// - 没有 PTR 记录返回 `None` 并写否定缓存。
-pub fn reverse_lookup(ip: Ipv4Addr, timeout: Duration) -> Option<String> {
+pub fn reverse_lookup(ip: IpAddr, timeout: Duration) -> Option<String> {
     if let Some(cached) = cache().lock().ok()?.get(&ip).cloned() {
         return cached;
     }
@@ -233,7 +305,7 @@ pub fn reverse_lookup(ip: Ipv4Addr, timeout: Duration) -> Option<String> {
 }
 
 /// 用默认超时反查。
-pub fn reverse_lookup_default(ip: Ipv4Addr) -> Option<String> {
+pub fn reverse_lookup_default(ip: IpAddr) -> Option<String> {
     reverse_lookup(ip, DEFAULT_TIMEOUT)
 }
 
@@ -310,7 +382,7 @@ mod tests {
     fn reverse_lookup_returns_none_for_reserved_unresolvable() {
         // RFC 5737 TEST-NET-1：保留给文档，不可能有 PTR
         clear_cache();
-        let ip = Ipv4Addr::new(192, 0, 2, 123);
+        let ip = IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 123));
         let t0 = std::time::Instant::now();
         let got = reverse_lookup(ip, Duration::from_millis(1500));
         assert_eq!(got, None, "TEST-NET 地址不应有主机名");
@@ -321,7 +393,7 @@ mod tests {
     fn reverse_lookup_respects_tiny_timeout() {
         // 1ms 超时必须立刻返回 None，而不是等 DNS 自己放弃
         clear_cache();
-        let ip = Ipv4Addr::new(198, 51, 100, 7); // RFC 5737 TEST-NET-2
+        let ip = IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, 7)); // RFC 5737 TEST-NET-2
         let t0 = std::time::Instant::now();
         let got = reverse_lookup(ip, Duration::from_millis(1));
         assert_eq!(got, None);
@@ -335,7 +407,7 @@ mod tests {
     #[test]
     fn negative_result_is_cached_and_reused() {
         clear_cache();
-        let ip = Ipv4Addr::new(203, 0, 113, 5); // RFC 5737 TEST-NET-3
+        let ip = IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 5)); // RFC 5737 TEST-NET-3
         assert_eq!(reverse_lookup(ip, Duration::from_millis(800)), None);
         // 第二次应命中缓存：即使给极短超时也立刻返回
         let t0 = std::time::Instant::now();
@@ -349,7 +421,7 @@ mod tests {
     #[test]
     fn timeout_does_not_poison_cache() {
         clear_cache();
-        let ip = Ipv4Addr::new(127, 0, 0, 1);
+        let ip = IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
         // 用 0 纳秒超时强制走超时分支
         let _ = reverse_lookup(ip, Duration::from_nanos(0));
         let poisoned = cache().lock().unwrap().contains_key(&ip);

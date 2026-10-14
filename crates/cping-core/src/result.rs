@@ -2,7 +2,7 @@
 //!
 //! 这是 GUI 与 TUI **唯一**共享的结果模型：两侧都不得自行定义状态或统计口径。
 
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 
 /// 任务标识：每个探测任务一个唯一 `task_id`。
 pub type TaskId = String;
@@ -92,8 +92,11 @@ impl ProbeStatus {
 pub struct ProbeResult {
     /// 目标在任务内的下标（0 基）。
     pub index: u16,
-    pub ip: Ipv4Addr,
+    /// 目标地址。M12 起同时容纳 IPv4 与 IPv6（[`IpAddr`]）。
+    pub ip: IpAddr,
     /// MAC 地址；取不到时为 `None` —— **不得伪造**。
+    ///
+    /// 注意：ARP/邻居表只覆盖 IPv4，因此 IPv6 目标的 `mac` 恒为 `None`。
     pub mac: Option<String>,
     /// 由 MAC 前缀查到的厂商名（IEEE 注册表）；本地管理地址或未注册前缀为 `None`。
     pub vendor: Option<String>,
@@ -103,7 +106,7 @@ pub struct ProbeResult {
 }
 
 impl ProbeResult {
-    pub fn new(index: u16, ip: Ipv4Addr, status: ProbeStatus) -> Self {
+    pub fn new(index: u16, ip: IpAddr, status: ProbeStatus) -> Self {
         Self {
             index,
             ip,

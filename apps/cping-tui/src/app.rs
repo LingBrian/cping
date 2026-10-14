@@ -1,7 +1,7 @@
 //! 应用状态机。所有探测与统计口径都来自 `cping-core`，这里**不重新实现**。
 
 use std::io;
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -10,10 +10,11 @@ use cping_core::classify::{classify_status, ResultClass, Thresholds};
 use cping_core::config::{ColorConfig, ProbeConfig, ViewMode};
 use cping_core::enrich::{enrich_with_mac_and_vendor, EnrichReport};
 use cping_core::export::{export_to_path, ExportMeta};
-use cping_core::probe::{MockBackend, MockPolicy};
+use cping_core::monitor::{Change, ChangeKind, MonitorConfig, MonitorState};
 use cping_core::scheduler::{ProbeScheduler, SchedulerHandle};
 use cping_core::snapshot::{load_from_path, save_to_path, Snapshot};
-use cping_core::target::{build_targets, matrix_slots, parse_prefix, TargetRange, MATRIX_CELLS};
+use cping_core::spec::{parse_spec, spec_from_prefix, ProbeMode, TargetSpec};
+use cping_core::target::{matrix_slots, parse_prefix, TargetRange, MATRIX_CELLS};
 use cping_core::{ProbeEvent, ProbeResult, ScanStats};
 
 use ratatui::backend::Backend;
@@ -32,6 +33,7 @@ pub const HANDLED_FILE: &str = "cping-autosave.handled";
 /// 命令行选项（仅作为初始值，不替代交互界面）。
 #[derive(Debug, Clone)]
 pub struct Options {
+    /// 目标规格（M9 起支持 `192.168.1` / `192.168.1.0/24` / 单主机 / 多网段）。
     pub prefix: String,
     pub no_color: bool,
     pub hide_offline: bool,
@@ -39,6 +41,10 @@ pub struct Options {
     pub help: bool,
     /// 用模拟后端（不做真实探测）；仅用于演示与 UI 调试。
     pub mock: bool,
+    /// 探测方式（M9）。
+    pub mode: ProbeMode,
+    /// 启动即开启持续监控（秒）；`None` 表示不自动重扫（M8）。
+    pub watch_seconds: Option<u64>,
     /// 快照文件所在目录；`None` 表示当前工作目录（单元测试会改到临时目录，
     /// 避免测试往仓库里写文件）。
     pub snapshot_dir: Option<PathBuf>,
@@ -53,6 +59,8 @@ impl Default for Options {
             view: ViewMode::Matrix,
             help: false,
             mock: false,
+            mode: cping_core::platform_default_mode(),
+            watch_seconds: None,
             snapshot_dir: None,
         }
     }
@@ -71,9 +79,38 @@ impl Options {
                 "--no-color" => opts.no_color = true,
                 "--hide-offline" => opts.hide_offline = true,
                 "--mock" => opts.mock = true,
-                "--prefix" => {
+                "--prefix" | "--target" => {
                     if let Some(v) = it.next() {
                         opts.prefix = v;
+                    }
+                }
+                "--mode" => {
+                    if let Some(v) = it.next() {
+                        opts.mode = if v.eq_ignore_ascii_case("tcp") {
+                            ProbeMode::Tcp {
+                                port: opts.mode.tcp_port().unwrap_or(80),
+                            }
+                        } else {
+                            ProbeMode::Icmp
+                        };
+                    }
+                }
+                "--port" => {
+                    if let Some(v) = it.next() {
+                        if let Ok(port) = v.parse::<u16>() {
+                            if port > 0 {
+                                opts.mode = ProbeMode::Tcp { port };
+                            }
+                        }
+                    }
+                }
+                "--watch" => {
+                    if let Some(v) = it.next() {
+                        if let Ok(secs) = v.parse::<u64>() {
+                            if secs > 0 {
+                                opts.watch_seconds = Some(secs);
+                            }
+                        }
                     }
                 }
                 "--snapshot-dir" => {
@@ -113,7 +150,7 @@ pub struct PendingRestore {
 /// 一次进行中的主机名反查（放到线程里做，避免阻塞界面）。
 struct HostnameJob {
     index: usize,
-    ip: Ipv4Addr,
+    ip: IpAddr,
     rx: Receiver<Option<String>>,
 }
 
@@ -128,7 +165,7 @@ pub struct App {
     pub show_help: bool,
 
     pub results: Vec<Option<ProbeResult>>,
-    pub targets: Vec<Ipv4Addr>,
+    pub targets: Vec<IpAddr>,
     /// 矩阵格号(0..256) → results 下标
     pub cell_slots: Vec<Option<usize>>,
     pub stats: ScanStats,
@@ -160,6 +197,27 @@ pub struct App {
     snapshot_dir: Option<PathBuf>,
     hostname_job: Option<HostnameJob>,
 
+    // ---- M8 持续监控 ----
+    /// 当前目标规格（含 CIDR / 多网段展开结果）。
+    pub spec: TargetSpec,
+    /// 监控状态机（轮次、变化日志、上一轮基线）。
+    pub monitor: MonitorState,
+    /// 自动重扫间隔（秒）；`None` = 关闭监控。
+    pub watch_seconds: Option<u64>,
+    /// 早于这个时刻不启动下一轮。
+    next_round_at: Option<Instant>,
+    /// 是否显示变化事件流面板。
+    pub show_changes: bool,
+    /// 当前探测方式（ICMP / TCP），切换后需要重建调度器。
+    backend_mode: ProbeMode,
+    /// 是否使用模拟后端（`--mock`）。
+    ///
+    /// 必须记住它：切换探测方式时要沿用，否则演示途中按一次 `m`
+    /// 就会**静默**从模拟数据换成真实探测，看起来像「结果变了」。
+    use_mock: bool,
+    /// 当前实际选中的后端标识（M12），与 `scheduler` 里的后端同源。
+    backend_id: cping_core::BackendId,
+
     handle: Option<SchedulerHandle>,
     scheduler: ProbeScheduler,
 }
@@ -167,6 +225,16 @@ pub struct App {
 impl App {
     pub fn new(options: Options) -> Self {
         let snapshot_dir = options.snapshot_dir.clone();
+        let spec = parse_spec(&options.prefix, TargetRange::Standard)
+            .unwrap_or_else(|_| TargetSpec::default());
+        let monitor = MonitorState::new(MonitorConfig {
+            enabled: options.watch_seconds.is_some(),
+            ..MonitorConfig::default()
+        })
+        .expect("默认监控配置必然合法");
+        let mode = options.mode;
+        // M12：后端**与它的标识**由核心一次给出，界面不再自己按 mock/方式推一遍
+        let (backend_id, backend) = cping_core::resolve_for_run(mode, options.mock);
         let mut app = Self {
             prefix: options.prefix,
             editing: false,
@@ -184,7 +252,7 @@ impl App {
             running: false,
             cancelled: false,
             started_at: None,
-            status: "就绪。按 i 编辑网段，Enter 开始探测，? 查看帮助。".into(),
+            status: "就绪。按 i 编辑网段，Enter 开始探测，M 开监控，? 查看帮助。".into(),
             last_export: None,
             local_ip: local_ip_label(),
             scroll: 0,
@@ -196,9 +264,18 @@ impl App {
             pending_restore: None,
             snapshot_dir,
             hostname_job: None,
+            spec,
+            monitor,
+            watch_seconds: options.watch_seconds,
+            next_round_at: None,
+            show_changes: false,
+            backend_mode: mode,
+            use_mock: options.mock,
+            backend_id,
             handle: None,
             // M5 起默认使用**平台原生 ICMP**；`--mock` 可切回模拟后端做演示。
-            scheduler: ProbeScheduler::new(select_backend(options.mock)),
+            // M12：后端选择（含 mock 分支）统一走核心注册表，三端共用一处。
+            scheduler: ProbeScheduler::new(backend),
         };
         app.check_pending_snapshot();
         app
@@ -206,6 +283,60 @@ impl App {
 
     pub fn backend_name(&self) -> &'static str {
         self.scheduler.backend_name()
+    }
+
+    /// 当前后端的能力（M12）：帮助面板据此如实说明地址族与权限要求。
+    pub fn backend_caps(&self) -> cping_core::BackendCaps {
+        cping_core::BackendRegistry::new().caps_of(self.backend_id)
+    }
+
+    /// 本平台的后端能力摘要（M12），与 `cping-cli --list-backends` 同源。
+    pub fn backend_summary(&self) -> String {
+        cping_core::BackendRegistry::new().summary_zh()
+    }
+
+    /// 当前探测方式。
+    pub fn mode(&self) -> ProbeMode {
+        self.backend_mode
+    }
+
+    /// 切换 ICMP ↔ TCP（TCP 用当前端口，默认 80）。切换后重建调度器。
+    pub fn toggle_mode(&mut self) {
+        let next = if self.backend_mode.is_tcp() {
+            ProbeMode::Icmp
+        } else {
+            ProbeMode::Tcp {
+                port: self.backend_mode.tcp_port().unwrap_or(80),
+            }
+        };
+        self.set_mode(next);
+    }
+
+    /// 在常用端口之间轮换（在 ICMP 模式下会先切到 TCP）。
+    pub fn cycle_port(&mut self) {
+        let ports = ProbeMode::COMMON_PORTS;
+        let current = self.backend_mode.tcp_port().unwrap_or(0);
+        let idx = ports.iter().position(|p| *p == current);
+        let next = match idx {
+            Some(i) => ports[(i + 1) % ports.len()],
+            None => ports[0],
+        };
+        self.set_mode(ProbeMode::Tcp { port: next });
+    }
+
+    pub fn set_mode(&mut self, mode: ProbeMode) {
+        if self.running {
+            self.status = "任务运行中不能切换探测方式，请先取消（Esc）".into();
+            return;
+        }
+        self.backend_mode = mode;
+        // 沿用启动时的 mock 选择：演示途中切换方式不该把模拟换成真实探测
+        let (backend_id, backend) = cping_core::resolve_for_run(mode, self.use_mock);
+        self.backend_id = backend_id;
+        self.scheduler = ProbeScheduler::new(backend);
+        // 换方式后旧结果不再可比，重置变化基线
+        self.monitor.reset_baseline();
+        self.status = format!("探测方式已切换为 {}", mode.describe());
     }
 
     pub fn run<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> io::Result<()> {
@@ -225,6 +356,7 @@ impl App {
                     self.elapsed_ms = t0.elapsed().as_millis() as u64;
                 }
             }
+            self.tick_monitor();
             if self.quit_requested {
                 break;
             }
@@ -237,6 +369,14 @@ impl App {
 
     fn on_key(&mut self, key: KeyEvent) {
         let action = map_key(key);
+
+        // 变化事件流面板：任意键关闭（与帮助面板一致）
+        if self.show_changes {
+            self.show_changes = false;
+            if !matches!(action, Action::Quit | Action::ForceQuit) {
+                return;
+            }
+        }
 
         // 「发现上次结果」的确认框优先级最高：此时只有恢复/丢弃两个有效选择，
         // 免得用户在没意识到有弹窗的情况下误按其它键。
@@ -256,7 +396,9 @@ impl App {
         if self.editing {
             match action {
                 Action::Char(c) => {
-                    if c.is_ascii_digit() || c == '.' {
+                    // M9 起目标规格可以是「网段 / 单主机 / CIDR / 多网段」，
+                    // 所以除了数字与点，还要放行 / , 空格 -（写 CIDR 与多段用）
+                    if c.is_ascii_digit() || matches!(c, '.' | '/' | ',' | ' ' | '-') {
                         self.prefix.push(c);
                     }
                 }
@@ -316,10 +458,18 @@ impl App {
             }
             Action::SaveCsv => self.save("csv"),
             Action::SaveTxt => self.save("txt"),
+            Action::SaveJson => self.save("json"),
+            Action::SaveHtml => self.save("html"),
             Action::Enrich => self.enrich(false),
             Action::LookupHostname => self.lookup_selected_hostname(),
             Action::SaveSnapshot => self.save_snapshot(),
             Action::LoadSnapshot => self.load_snapshot_from_disk(),
+            Action::ToggleMonitor => self.toggle_monitor(),
+            Action::ShowChanges => self.show_changes = true,
+            Action::IntervalDown => self.shift_interval(-1),
+            Action::IntervalUp => self.shift_interval(1),
+            Action::ToggleMode => self.toggle_mode(),
+            Action::CyclePort => self.cycle_port(),
             Action::ToggleHelp => self.show_help = !self.show_help,
             Action::ScrollUp => self.scroll = self.scroll.saturating_sub(1),
             Action::ScrollDown => self.scroll = self.scroll.saturating_add(1),
@@ -339,30 +489,145 @@ impl App {
     }
 
     // ------------------------------------------------------------------
+    // M8：持续监控
+    // ------------------------------------------------------------------
+
+    /// 开/关自动重扫。
+    pub fn toggle_monitor(&mut self) {
+        if self.watch_seconds.is_some() {
+            self.watch_seconds = None;
+            self.monitor
+                .set_config(MonitorConfig {
+                    enabled: false,
+                    ..self.monitor.config().clone()
+                })
+                .ok();
+            self.status = "持续监控已关闭".into();
+        } else {
+            self.watch_seconds = Some(cping_core::MONITOR_DEFAULT_INTERVAL_MS / 1000);
+            self.monitor
+                .set_config(MonitorConfig {
+                    enabled: true,
+                    ..self.monitor.config().clone()
+                })
+                .ok();
+            self.next_round_at = Some(Instant::now());
+            self.status = format!(
+                "持续监控已开启：每 {} 秒重扫一次（M 关闭，[ ] 调间隔）",
+                self.watch_seconds.unwrap_or(0)
+            );
+        }
+    }
+
+    /// 按预设档位调整重扫间隔（5s / 10s / 30s / 60s / 300s / 900s）。
+    pub fn shift_interval(&mut self, dir: i32) {
+        const STEPS: [u64; 6] = [5, 10, 30, 60, 300, 900];
+        let current = self.watch_seconds.unwrap_or(30);
+        let idx = STEPS
+            .iter()
+            .position(|s| *s >= current)
+            .unwrap_or(STEPS.len() - 1);
+        let next_idx = if dir < 0 {
+            idx.saturating_sub(1)
+        } else {
+            (idx + 1).min(STEPS.len() - 1)
+        };
+        self.watch_seconds = Some(STEPS[next_idx]);
+        self.monitor
+            .set_config(MonitorConfig {
+                enabled: true,
+                interval_ms: STEPS[next_idx] * 1000,
+                ..self.monitor.config().clone()
+            })
+            .ok();
+        self.next_round_at = Some(Instant::now());
+        self.status = format!("重扫间隔 = {} 秒", STEPS[next_idx]);
+    }
+
+    /// 主循环每帧调用：到点且空闲时自动开下一轮。
+    fn tick_monitor(&mut self) {
+        if self.watch_seconds.is_none() || self.running {
+            return;
+        }
+        let due = match self.next_round_at {
+            Some(t) => Instant::now() >= t,
+            None => true,
+        };
+        if due {
+            self.start_scan();
+        }
+    }
+
+    /// 监控是否处于开启状态。
+    pub fn monitor_on(&self) -> bool {
+        self.watch_seconds.is_some()
+    }
+
+    /// 距离下一轮还有多少秒。
+    pub fn seconds_to_next_round(&self) -> u64 {
+        match (self.watch_seconds, self.next_round_at) {
+            (Some(_), Some(t)) => {
+                let now = Instant::now();
+                if t <= now {
+                    0
+                } else {
+                    (t - now).as_secs()
+                }
+            }
+            _ => 0,
+        }
+    }
+
+    /// 本轮变化。
+    pub fn last_changes(&self) -> &[Change] {
+        self.monitor.last_round_changes()
+    }
+
+    /// 变化日志（供事件流面板与状态栏计数）。
+    pub fn change_log(&self) -> &cping_core::monitor::ChangeLog {
+        self.monitor.log()
+    }
+
+    /// 变化最多的前 N 条（新的在前），给事件流面板用。
+    pub fn recent_changes(&self, n: usize) -> Vec<Change> {
+        self.monitor
+            .log()
+            .iter_recent_first()
+            .take(n)
+            .cloned()
+            .collect()
+    }
+
+    /// 某目标在当前轮次是否刚变化（表格高亮用）。
+    pub fn change_kind_of_index(&self, index: usize) -> Option<ChangeKind> {
+        self.monitor
+            .last_round_changes()
+            .iter()
+            .find(|c| c.index as usize == index)
+            .map(|c| c.kind)
+    }
+
+    // ------------------------------------------------------------------
     // 任务控制
     // ------------------------------------------------------------------
 
     pub fn start_scan(&mut self) {
-        let prefix = match parse_prefix(&self.prefix) {
-            Ok(p) => p,
+        let spec = match parse_spec(&self.prefix, TargetRange::Standard) {
+            Ok(s) => s,
             Err(e) => {
                 self.status = format!("输入无效：{e}");
+                self.watch_seconds = None;
                 return;
             }
         };
-        let targets = match build_targets(&prefix, TargetRange::Standard) {
-            Ok(t) => t,
-            Err(e) => {
-                self.status = format!("目标生成失败：{e}");
-                return;
-            }
-        };
+        let targets = spec.targets.clone();
         let config = ProbeConfig {
-            prefix: Some(prefix),
+            prefix: parse_prefix(&self.prefix).ok(),
             range: TargetRange::Standard,
             timeout_ms: 1000,
             concurrency: 32,
             thresholds: self.thresholds,
+            mode: self.backend_mode,
         };
 
         match self.scheduler.start(&config, targets.clone()) {
@@ -370,6 +635,7 @@ impl App {
                 self.cell_slots = matrix_slots(&targets);
                 self.results = vec![None; targets.len()];
                 self.targets = targets;
+                self.spec = spec;
                 self.stats = ScanStats::from_results_with_total(&[], self.targets.len());
                 self.elapsed_ms = 0;
                 self.started_at = Some(Instant::now());
@@ -380,10 +646,17 @@ impl App {
                 self.last_export = None;
                 self.scroll = 0;
                 self.quit_confirm = false;
-                self.status = format!("开始探测 {}（后端 {}）", self.prefix, self.backend_name());
+                self.status = format!(
+                    "开始探测 {}（{} · 后端 {}）",
+                    self.spec.summary(),
+                    self.backend_mode.describe(),
+                    self.backend_name()
+                );
             }
             Err(e) => {
                 self.status = format!("无法启动：{e}");
+                // 启动失败就别继续空转重试
+                self.watch_seconds = None;
             }
         }
     }
@@ -435,12 +708,16 @@ impl App {
                 self.handle = None;
                 // 扫描刚结束时 ARP 表最新鲜：顺手补一次 MAC/厂商（内部会落盘）
                 self.enrich(true);
+                self.commit_round();
+                self.schedule_next_round();
                 self.status = format!(
-                    "扫描完成：{} 个目标，{} 在线，用时 {:.2}s {}",
+                    "第 {} 轮完成：{} 个目标，{} 在线，用时 {:.2}s {}{}",
+                    self.monitor.round(),
                     self.stats.total,
                     self.stats.online,
                     elapsed_ms as f64 / 1000.0,
-                    self.enrich_note
+                    self.enrich_note,
+                    self.change_note()
                 );
             }
             ProbeEvent::Cancelled {
@@ -453,12 +730,48 @@ impl App {
                 self.handle = None;
                 // 已完成的那些结果一样值得补全，不能因为取消就丢掉
                 self.enrich(true);
+                self.commit_round();
+                // 用户主动取消就不要自动再来一轮
+                self.watch_seconds = None;
+                self.next_round_at = None;
                 self.status = format!(
                     "已取消：完成 {}/{}，其中 {} 在线，已完成结果保留 {}",
                     self.stats.completed, self.stats.total, self.stats.online, self.enrich_note
                 );
             }
         }
+    }
+
+    /// 把本轮结果交给监控状态机，算出变化。
+    fn commit_round(&mut self) {
+        let done: Vec<ProbeResult> = self.results.iter().flatten().cloned().collect();
+        if done.is_empty() {
+            return;
+        }
+        self.monitor.commit_round(&done, &self.thresholds);
+    }
+
+    /// 变化摘要（无变化时返回空串，不写「变化 0 项」这种噪音）。
+    fn change_note(&self) -> String {
+        let changes = self.monitor.last_round_changes();
+        if changes.is_empty() {
+            return String::new();
+        }
+        let up = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::Appeared)
+            .count();
+        let down = changes
+            .iter()
+            .filter(|c| c.kind == ChangeKind::Disappeared)
+            .count();
+        format!("，本轮变化 {} 项（上线 {up} / 离线 {down}）", changes.len())
+    }
+
+    fn schedule_next_round(&mut self) {
+        self.next_round_at = self
+            .watch_seconds
+            .map(|secs| Instant::now() + Duration::from_secs(secs));
     }
 
     fn recompute_stats(&mut self) {
@@ -689,8 +1002,10 @@ impl App {
                 return;
             }
         };
-        let targets = match build_targets(&parsed, TargetRange::Standard) {
-            Ok(t) => t,
+        // 用规格解析器重建目标：它与 `start_scan` 走的是同一条路径，
+        // 因此「快照声明的目标数」与「今天算出来的目标数」可直接比较。
+        let targets = match spec_from_prefix(&parsed, TargetRange::Standard) {
+            Ok(spec) => spec.targets,
             Err(e) => {
                 self.status = format!("按快照网段生成目标失败：{e}");
                 return;
@@ -830,8 +1145,11 @@ impl App {
             scan_time: now_string(),
             local_ip: self.local_ip.clone(),
             elapsed_ms: self.elapsed_ms,
+            mode: self.backend_mode,
+            target_desc: self.spec.summary(),
+            round: self.monitor.round(),
         };
-        let safe_prefix = self.prefix.replace('.', "_");
+        let safe_prefix = self.prefix.replace(['.', '/', ',', ' ', ':'], "_");
         let path = format!("cping-{safe_prefix}-{}.{}", file_stamp(), ext);
         match export_to_path(&done, &path, &meta, &self.thresholds) {
             Ok(bytes) => {
@@ -887,19 +1205,6 @@ fn fingerprint(snap: &Snapshot) -> String {
         snap.results.len(),
         snap.elapsed_ms
     )
-}
-
-/// 选择探测后端：默认平台原生 ICMP，`--mock` 时用确定性模拟数据。
-fn select_backend(mock: bool) -> Box<dyn cping_core::probe::ProbeBackend> {
-    if mock {
-        Box::new(MockBackend::new(MockPolicy::Realistic {
-            online_percent: 62,
-            base_rtt_ms: 6,
-            span_ms: 140,
-        }))
-    } else {
-        cping_core::native::platform_icmp_backend()
-    }
 }
 
 fn local_ip_label() -> String {
@@ -1026,9 +1331,9 @@ mod tests {
     fn renders_input_and_matrix_title() {
         let app = App::new(opts());
         let out = render(&app, 100, 32);
-        assert!(out.contains("网段前缀"), "应显示前缀输入区");
+        assert!(out.contains("目标"), "应显示目标输入区");
         assert!(out.contains("图形显示"), "应显示矩阵标题");
-        assert!(out.contains("192.168.1"), "应显示默认前缀");
+        assert!(out.contains("192.168.1"), "应显示默认目标");
     }
 
     #[test]
@@ -1044,10 +1349,22 @@ mod tests {
     fn help_overlay_renders() {
         let mut app = App::new(opts());
         app.show_help = true;
-        let out = render(&app, 100, 30);
+        let out = render(&app, 130, 40);
         assert!(out.contains("快捷键"));
         assert!(out.contains("Ctrl+C"));
-        assert!(out.contains("无颜色"));
+        // M8 / M9 的新键也必须在帮助里
+        assert!(out.contains("持续监控"), "帮助应含 M8 段落");
+        assert!(out.contains("TCP-OPEN"), "帮助应说明 TCP 模式的状态语义");
+        assert!(out.contains("CIDR"), "帮助应说明 M9 的目标写法");
+    }
+
+    #[test]
+    fn changes_overlay_explains_the_empty_state() {
+        let mut app = App::new(opts());
+        app.show_changes = true;
+        let out = render(&app, 110, 32);
+        assert!(out.contains("变化事件流"), "应有变化面板标题");
+        assert!(out.contains("首轮只建立基线"), "空态要解释为什么没有变化");
     }
 
     #[test]
@@ -1181,7 +1498,7 @@ mod tests {
         wait_done(&mut app, 300);
 
         let before_stats = app.stats.clone();
-        let before: Vec<(Ipv4Addr, cping_core::ProbeStatus)> = app
+        let before: Vec<(IpAddr, cping_core::ProbeStatus)> = app
             .results
             .iter()
             .flatten()
@@ -1192,7 +1509,7 @@ mod tests {
 
         // 补全只允许写 mac/vendor 两个字段，其它一律不动
         assert_eq!(app.stats, before_stats, "补全不得改变统计");
-        let after: Vec<(Ipv4Addr, cping_core::ProbeStatus)> = app
+        let after: Vec<(IpAddr, cping_core::ProbeStatus)> = app
             .results
             .iter()
             .flatten()

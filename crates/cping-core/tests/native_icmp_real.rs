@@ -12,6 +12,7 @@
 use cping_core::error::ProbeError;
 use cping_core::native::{platform_icmp_backend, TcpConnectBackend};
 use cping_core::probe::ProbeBackend;
+use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
@@ -23,7 +24,7 @@ fn real_icmp_loopback_succeeds() {
     println!("后端 = {}", backend.name());
     println!("平台提示 = {}", cping_core::native::native_icmp_hint());
 
-    match backend.probe(Ipv4Addr::LOCALHOST, Duration::from_millis(1000)) {
+    match backend.probe(IpAddr::V4(Ipv4Addr::LOCALHOST), Duration::from_millis(1000)) {
         Ok(o) => {
             println!("127.0.0.1 => 在线, rtt = {} ms", o.rtt_ms);
             assert!(o.rtt_ms <= 1000, "回环 RTT 不应超过超时上限");
@@ -44,7 +45,7 @@ fn real_icmp_loopback_succeeds() {
 fn real_icmp_absent_target_times_out_not_online() {
     let backend = platform_icmp_backend();
     // 保留地址段，网络上不会有人应答
-    let target = Ipv4Addr::new(192, 0, 2, 123);
+    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 123));
     let started = std::time::Instant::now();
     let res = backend.probe(target, Duration::from_millis(800));
     let took = started.elapsed();
@@ -65,7 +66,7 @@ fn real_icmp_absent_target_times_out_not_online() {
 fn tcp_backend_never_impersonates_icmp() {
     let tcp = TcpConnectBackend::new(9); // discard 端口，通常关闭
     assert_eq!(tcp.name(), "tcp-connect");
-    let res = tcp.probe(Ipv4Addr::LOCALHOST, Duration::from_millis(500));
+    let res = tcp.probe(IpAddr::V4(Ipv4Addr::LOCALHOST), Duration::from_millis(500));
     println!("tcp-connect 127.0.0.1:9 => {res:?}");
     assert_ne!(
         tcp.name(),

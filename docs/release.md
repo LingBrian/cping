@@ -3,7 +3,7 @@
 > 本文件记录**实际产出过的**产物、构建命令与已知限制。
 > 「编译成功」不等于完成——每个产物都标注了它的验证程度。
 
-## 1. 产物清单
+## 1. 产物清单（v1.0.0 时期；**v2.0.0 见 §8**）
 
 | 目标 | 产物 | 构建命令 | 验证程度 |
 | --- | --- | --- | --- |
@@ -81,18 +81,19 @@ Rust 目标：`aarch64-linux-android`、`armv7-linux-androideabi`、
 3. **release APK 未签名**：`app-arm64-v8a-release-unsigned.apk` 无法直接安装。
    发布前需生成 keystore 并在 `app/build.gradle.kts` 配 `signingConfig`，
    或改产 AAB。**要立刻试用请用 debug APK**（已用 debug 证书签名）。
-4. **Linux 未构建**：本机是 Windows，无 WSL/容器。
-   `linux-icmp` 后端已实现但只做过代码级审查，未编译、未实测。
+4. ~~**Linux 未构建**~~ → **v2.0.0 已补齐**：在 WSL2 的 Debian 13 内构建并实测
+   原生 ICMP、TCP（v4/v6）、TUI 渲染与退出、四种导出格式。详见 §8。
 5. **Windows 安装包未生成**：`tauri.conf.json` 的 `bundle.active = false`，
    需要 `npm run tauri:build` 配合 WiX/NSIS 才能产出 MSI/EXE 安装包。
-6. **仅产出 arm64-v8a**：为节省构建时间只交叉编译了 `aarch64`。
-   如需 armeabi-v7a / x86_64（模拟器），去掉 `--target aarch64` 或分别指定。
+6. ~~**仅产出 arm64-v8a**~~ → **v2.0.0 起默认构建全部已安装的 ABI**；
+   只想要某一个 ABI 时用 `--target aarch64` 显式指定。
 
 ## 5. 发布前检查清单
 
 - [ ] 替换 `src-tauri/icons/` 的占位图标为正式设计稿
 - [ ] 在真实 Android 设备上完成 `docs/platform-compatibility.md` §5 的验收项
-- [ ] 在 Linux 上构建并实测 `linux-icmp`（注意 `CAP_NET_RAW`）
+- [x] ~~在 Linux 上构建并实测 `linux-icmp`（注意 `CAP_NET_RAW`）~~ →
+      **v2.0.0 已完成**（WSL Debian 13；原生 ICMP / TCP / TUI 全部实测，见 §8）
 - [ ] 生成 Android keystore 并配置 release 签名（当前 release APK 未签名）
 - [ ] 复核 `docs/platform-compatibility.md` 的平台结论
 - [ ] 确认默认并发（32）与超时（1000ms）在真实网络下的表现
@@ -117,3 +118,75 @@ Rust 目标：`aarch64-linux-android`、`armv7-linux-androideabi`、
 
 - 两版都未改核心逻辑；Android APK 未重新构建
 - 发布说明：`docs/release-notes-v1.1.1.md`、`docs/release-notes-v1.1.2.md`
+
+## 8. v2.0.0 产物（M8–M12，2026-10-15）
+
+四平台一次性发行，**全部产物在同一台机器上构建**，归集在 `release/v2.0.0/`。
+
+| 产物 | 体积 | 构建方式 | 验证程度 |
+| --- | --- | --- | --- |
+| `cping-cli-2.0.0-windows-x64.zip` | 0.75 MB | `cargo build --release -p cping-cli -p cping-tui` + `scripts/package.ps1` | ✅ 真实 ICMP、IPv6 TCP、`--list-backends`、退出码实测 |
+| `cping-tui-2.0.0-windows-x64.zip` | 0.95 MB | 同上 | ✅ `--help` 冒烟；核心逻辑与 CLI 是同一份 |
+| `cping-gui-2.0.0-windows-x64.exe` | 12.6 MB | `npm run build` + `src-tauri` 内 `cargo build --release` | ✅ 启动创建主窗口（冒烟） |
+| `cping-cli-2.0.0-windows-x86.zip` | 0.74 MB | 同上 + `--target i686-pc-windows-msvc` | ✅ 在 x64 系统上可运行 |
+| `cping-tui-2.0.0-windows-x86.zip` | 0.93 MB | 同上 | ✅ 同上 |
+| `cping-cli-2.0.0-linux-x64.tar.gz` | 0.84 MB | WSL Debian 内 `cargo build --release` + `scripts/package.sh` | ✅ ICMP / TCP v4+v6 / 关闭端口 / 四种导出实测 |
+| `cping-tui-2.0.0-linux-x64.tar.gz` | 1.07 MB | 同上 | ✅ 伪终端内渲染并进入备用屏，按 `q` 优雅退出（码 0） |
+| `cping-2.0.0-android-universal-release-unsigned.apk` | 50.9 MB | `npx tauri android build --apk` | ⚠️ 构建与 aapt2 校验通过；**未签名**，不能直接安装 |
+| `cping-2.0.0-android-universal-release-debugkey-signed.apk` | 50.9 MB | 上面的包 + `apksigner`（debug 密钥） | ✅ 已签名可安装；**证书是 Android Debug**，仅供侧载试用，不可上架；真机未验证 |
+| `SHA256SUMS.txt` | — | 汇总上述全部产物 | 可 `sha256sum -c` 直接校验 |
+
+> Android 的 APK 是 **universal 单包全 ABI**：`lib/arm64-v8a`、`lib/armeabi-v7a`、
+> `lib/x86`、`lib/x86_64` 四个 `.so` 都在同一个包里，用户不需要判断该装哪个。
+> 包名 `com.cping.gui`，`versionName 2.0.0` / `versionCode 2000000`，
+> `targetSdk 36` / `minSdk 24`（用 aapt2 校验确认）。
+
+### 8.1 校验
+
+```bash
+# Linux / macOS / WSL
+cd release/v2.0.0 && sha256sum -c SHA256SUMS.txt
+```
+
+```powershell
+# Windows
+Get-ChildItem release\v2.0.0 -File -Exclude SHA256SUMS.txt |
+  ForEach-Object { "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLower()) *$($_.Name)" }
+```
+
+### 8.2 Linux 构建链路（WSL 内无外网）
+
+WSL 里访问不到 crates.io，因此先在 Windows 侧落一份依赖快照，再同步进 WSL：
+
+```bash
+cargo vendor vendor-offline        # Windows 侧执行
+```
+
+WSL 内的 `.cargo/config.toml` 指向它：
+
+```toml
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor-offline"
+```
+
+`vendor-offline/` 已在 `.gitignore` 中（体积大，且用同一条命令随时可重建）。
+
+### 8.3 Android 构建与签名
+
+```bash
+cd apps/cping-gui
+npx tauri android build --apk           # 默认构建全部已安装的 ABI，产出 universal 包
+npx tauri android build --apk --debug   # debug 变体（debug 证书已签名，可直接安装）
+```
+
+给未签名的 release 包补签名：
+
+```bash
+apksigner sign --ks ~/.android/debug.keystore \
+  --ks-pass pass:android --key-pass pass:android \
+  --ks-key-alias androiddebugkey \
+  --out <输出>.apk <输入>-unsigned.apk
+```

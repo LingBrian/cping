@@ -11,7 +11,7 @@
 
 use crate::error::ProbeError;
 use crate::probe::{ProbeBackend, ProbeOutcome};
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
@@ -358,8 +358,15 @@ impl ProbeBackend for WindowsIcmpBackend {
         "windows-icmp"
     }
 
-    fn probe(&self, target: Ipv4Addr, timeout: Duration) -> Result<ProbeOutcome, ProbeError> {
+    fn probe(&self, target: IpAddr, timeout: Duration) -> Result<ProbeOutcome, ProbeError> {
         Self::ensure_wsa()?;
+        // M12：ICMPv6 需要 Icmp6SendEcho2 与 AF_INET6 套接字，本版未实装。
+        // 明确报「不支持」，而不是静默超时——两者对用户的含义完全不同。
+        let IpAddr::V4(target) = target else {
+            return Err(ProbeError::unsupported(
+                "ICMPv6 后端尚未实装；IPv6 目标请改用 TCP 方式（--mode tcp）",
+            ));
+        };
         let id = std::process::id() as u16;
         let seq = next_seq();
         let payload = self.payload_len;
@@ -609,7 +616,13 @@ impl ProbeBackend for PosixIcmpBackend {
         }
     }
 
-    fn probe(&self, target: Ipv4Addr, timeout: Duration) -> Result<ProbeOutcome, ProbeError> {
+    fn probe(&self, target: IpAddr, timeout: Duration) -> Result<ProbeOutcome, ProbeError> {
+        // M12：与 Windows 侧同理，ICMPv6（SOCK_RAW + IPPROTO_ICMPV6）本版未实装。
+        let IpAddr::V4(target) = target else {
+            return Err(ProbeError::unsupported(
+                "ICMPv6 后端尚未实装；IPv6 目标请改用 TCP 方式（--mode tcp）",
+            ));
+        };
         let id = std::process::id() as u16;
         let seq = next_seq();
         let payload = self.payload_len;
@@ -659,18 +672,22 @@ impl ProbeBackend for TcpConnectBackend {
         "tcp-connect"
     }
 
-    fn probe(&self, target: Ipv4Addr, timeout: Duration) -> Result<ProbeOutcome, ProbeError> {
-        // 是否可达用 ICMP 判定；这里只做 TCP 握手能否建立
+    fn probe(&self, target: IpAddr, timeout: Duration) -> Result<ProbeOutcome, ProbeError> {
+        // 是否可达用 ICMP 判定；这里只做 TCP 握手能否建立。
+        // M12：`SocketAddr::new` 同时支持 v4 / v6，所以 IPv6 目标在这里是
+        // 原生可用的——IPv6 支持以 TCP 方式为完整路径。
+        let started = std::time::Instant::now();
         match std::net::TcpStream::connect_timeout(
-            &std::net::SocketAddr::from((target, self.port)),
+            &std::net::SocketAddr::new(target, self.port),
             timeout,
         ) {
-            Ok(_) => Ok(ProbeOutcome::online(0)),
+            Ok(_) => Ok(ProbeOutcome::online(started.elapsed().as_millis() as u32)),
             Err(e) => Err(match e.kind() {
                 std::io::ErrorKind::TimedOut => ProbeError::timeout(timeout.as_millis() as u64),
+                // 端口关闭 ≠ 平台不支持。主机显然有响应（发了 RST），只是该端口没开。
+                // 归到 Unreachable（服务不可达），界面在 TCP 模式下会显示成「TCP-关闭」。
                 std::io::ErrorKind::ConnectionRefused => {
-                    // 端口关闭说明主机是活的，但**不是** ICMP 可达
-                    ProbeError::unsupported("TCP 端口关闭（主机可能有响应，但这不是 ICMP 结果）")
+                    ProbeError::unreachable("TCP 端口未开放（主机有响应）")
                 }
                 std::io::ErrorKind::PermissionDenied => {
                     ProbeError::permission_denied(e.to_string())
@@ -702,11 +719,39 @@ pub fn platform_icmp_backend() -> Box<dyn ProbeBackend> {
             fn name(&self) -> &'static str {
                 "unsupported"
             }
-            fn probe(&self, _t: Ipv4Addr, _to: Duration) -> Result<ProbeOutcome, ProbeError> {
+            fn probe(&self, _t: IpAddr, _to: Duration) -> Result<ProbeOutcome, ProbeError> {
                 Err(ProbeError::unsupported("该平台尚未实现原生 ICMP 后端"))
             }
         }
         Box::new(Unsupported)
+    }
+}
+
+/// 按探测方式返回后端（M9）。
+///
+/// **一次任务只有一种方式**，所以这里不需要「组合后端」：ICMP 与 TCP 结果
+/// 永远不会出现在同一次扫描里，统计口径天然不混。
+pub fn backend_for_mode(mode: crate::spec::ProbeMode) -> Box<dyn ProbeBackend> {
+    match mode {
+        crate::spec::ProbeMode::Icmp => platform_icmp_backend(),
+        crate::spec::ProbeMode::Tcp { port } => Box::new(TcpConnectBackend::new(port)),
+    }
+}
+
+/// 平台默认探测方式。
+///
+/// - 桌面（Windows/Linux）：默认 ICMP（普通用户即可用，语义最准确）。
+/// - **Android：默认 TCP:80**。普通应用拿不到 `CAP_NET_RAW`，ICMP 必然全部
+///   「权限不足」；把默认值设成一个能真正出结果的方式，比让用户对着一屏
+///   错误发呆更有用。界面与导出都会显著标注 `TCP-OPEN`，不会与 ICMP 混淆。
+pub const fn platform_default_mode() -> crate::spec::ProbeMode {
+    #[cfg(target_os = "android")]
+    {
+        crate::spec::ProbeMode::Tcp { port: 80 }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        crate::spec::ProbeMode::Icmp
     }
 }
 

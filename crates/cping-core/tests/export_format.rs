@@ -7,6 +7,7 @@ use cping_core::export::{
 };
 use cping_core::result::{ProbeResult, ProbeStatus, ScanStats};
 use cping_core::{CoreError, Ipv4Prefix};
+use std::net::IpAddr;
 use std::net::Ipv4Addr;
 
 fn meta() -> ExportMeta {
@@ -14,6 +15,7 @@ fn meta() -> ExportMeta {
         scan_time: "2026-10-13 21:40:00".into(),
         local_ip: "192.168.1.100".into(),
         elapsed_ms: 1234,
+        ..ExportMeta::default()
     }
 }
 
@@ -22,19 +24,23 @@ fn sample() -> Vec<ProbeResult> {
         // 故意乱序，验证按 IP 数值排序
         ProbeResult::new(
             2,
-            Ipv4Addr::new(192, 168, 1, 3),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 3)),
             ProbeStatus::Online { rtt_ms: 250 },
         )
         .with_target_info(Some("AA-BB-CC-DD-EE-FF".into()), None, None),
         ProbeResult::new(
             0,
-            Ipv4Addr::new(192, 168, 1, 1),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
             ProbeStatus::Online { rtt_ms: 12 },
         ),
-        ProbeResult::new(1, Ipv4Addr::new(192, 168, 1, 2), ProbeStatus::Timeout),
+        ProbeResult::new(
+            1,
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2)),
+            ProbeStatus::Timeout,
+        ),
         ProbeResult::new(
             3,
-            Ipv4Addr::new(192, 168, 1, 10),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)),
             ProbeStatus::PermissionDenied,
         ),
     ]
@@ -72,12 +78,20 @@ fn csv_header_is_exact() {
     let text = String::from_utf8(bytes[3..].to_vec()).unwrap();
     let header = text.split("\r\n").next().unwrap();
     assert_eq!(
-        header, "扫描时间,IP地址,状态,RTT(ms),MAC地址,备注,厂商,主机名",
-        "M7 新列只能追加在末尾"
+        header, "扫描时间,IP地址,状态,RTT(ms),MAC地址,备注,厂商,主机名,探测方式",
+        "M7/M9 新列只能追加在末尾"
     );
     // 前 6 列必须与 M7 之前逐字节一致（旧脚本按列号解析仍然可用）
     let legacy = header.split(',').take(6).collect::<Vec<_>>().join(",");
     assert_eq!(legacy, "扫描时间,IP地址,状态,RTT(ms),MAC地址,备注");
+    // 第 7/8 列必须与 M7 逐字节一致（M9 只在第 9 列追加）
+    let m7 = header
+        .split(',')
+        .skip(6)
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(m7, "厂商,主机名");
 }
 
 #[test]
@@ -127,7 +141,7 @@ fn csv_records_error_status_text() {
 fn csv_escapes_mac_with_quotes_if_needed() {
     let results = vec![ProbeResult::new(
         0,
-        Ipv4Addr::new(10, 0, 0, 1),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
         ProbeStatus::Online { rtt_ms: 5 },
     )
     .with_target_info(Some("AA,BB".into()), None, None)];
@@ -167,9 +181,19 @@ fn format_dispatch_matches_extension() {
         Some(ExportFormat::Csv)
     );
     assert_eq!(ExportFormat::from_path("out.txt"), Some(ExportFormat::Txt));
-    assert_eq!(ExportFormat::from_path("data.json"), None);
+    assert_eq!(
+        ExportFormat::from_path("data.json"),
+        Some(ExportFormat::Json)
+    );
+    assert_eq!(
+        ExportFormat::from_path("report.HTML"),
+        Some(ExportFormat::Html)
+    );
+    assert_eq!(ExportFormat::from_path("noext"), None);
     assert_eq!(ExportFormat::Csv.extension(), "csv");
     assert_eq!(ExportFormat::Txt.extension(), "txt");
+    assert_eq!(ExportFormat::Json.extension(), "json");
+    assert_eq!(ExportFormat::Html.extension(), "html");
 
     let csv = export(
         &sample(),
@@ -219,7 +243,7 @@ fn empty_export_is_still_valid() {
     let text = String::from_utf8(bytes[3..].to_vec()).unwrap();
     assert_eq!(
         text,
-        "扫描时间,IP地址,状态,RTT(ms),MAC地址,备注,厂商,主机名\r\n"
+        "扫描时间,IP地址,状态,RTT(ms),MAC地址,备注,厂商,主机名,探测方式\r\n"
     );
 
     let txt = export_txt(&[], &meta(), &Thresholds::default()).unwrap();
@@ -237,11 +261,13 @@ fn legacy_columns_are_byte_identical_when_no_new_info() {
     let mut checked = 0;
     for line in lines {
         let cols: Vec<&str> = line.split(',').collect();
-        assert_eq!(cols.len(), 8, "新列必须存在（可为空），不能缺列: {line}");
+        assert_eq!(cols.len(), 9, "新列必须存在（可为空），不能缺列: {line}");
         assert_eq!(cols[0], "2026-10-13 21:40:00");
         // 后两列在本样例里没有任何信息 → 必须是空串而不是占位文本
         assert_eq!(cols[6], "", "无厂商信息时必须留空: {line}");
         assert_eq!(cols[7], "", "无主机名信息时必须留空: {line}");
+        // M9 追加列：默认 ICMP
+        assert_eq!(cols[8], "ICMP", "探测方式列必须写出后端语义: {line}");
         checked += 1;
     }
     assert_eq!(checked, 4);
@@ -253,7 +279,7 @@ fn new_columns_are_written_and_escaped() {
     let results = vec![
         ProbeResult::new(
             0,
-            Ipv4Addr::new(10, 0, 0, 1),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             ProbeStatus::Online { rtt_ms: 4 },
         )
         .with_target_info(
@@ -264,7 +290,7 @@ fn new_columns_are_written_and_escaped() {
         // 厂商名里带逗号 → 必须加引号，否则列会错位
         ProbeResult::new(
             1,
-            Ipv4Addr::new(10, 0, 0, 2),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             ProbeStatus::Online { rtt_ms: 9 },
         )
         .with_target_info(None, Some("Acme, Inc.".into()), None),
@@ -274,15 +300,42 @@ fn new_columns_are_written_and_escaped() {
     let rows: Vec<&str> = text.split("\r\n").filter(|l| !l.is_empty()).collect();
 
     assert!(
-        rows[1].ends_with("\"Cisco Systems, Inc\",router.example.com"),
+        rows[1].ends_with("\"Cisco Systems, Inc\",router.example.com,ICMP"),
         "含逗号的厂商名会被加引号，主机名紧随其后: {}",
         rows[1]
     );
     assert!(
-        rows[2].ends_with(",\"Acme, Inc.\","),
+        rows[2].ends_with(",\"Acme, Inc.\",,ICMP"),
         "含逗号的厂商名必须被引号包裹: {}",
         rows[2]
     );
+}
+
+/// M9：TCP 模式下「状态」列不得再显示成「在线」，否则会被误读为 ICMP 可达。
+#[test]
+fn tcp_mode_relabels_the_status_column() {
+    let results = vec![
+        ProbeResult::new(
+            0,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            ProbeStatus::Online { rtt_ms: 4 },
+        ),
+        ProbeResult::new(
+            1,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            ProbeStatus::Timeout,
+        ),
+    ];
+    let meta = ExportMeta {
+        mode: cping_core::ProbeMode::Tcp { port: 80 },
+        ..meta()
+    };
+    let text = String::from_utf8(export_csv(&results, &meta).unwrap()[3..].to_vec()).unwrap();
+    let rows: Vec<&str> = text.split("\r\n").filter(|l| !l.is_empty()).collect();
+    assert!(rows[1].contains("TCP-OPEN"), "{}", rows[1]);
+    assert!(!rows[1].contains("在线"), "{}", rows[1]);
+    assert!(rows[1].ends_with("TCP:80"), "{}", rows[1]);
+    assert!(rows[2].contains("TCP-超时"), "{}", rows[2]);
 }
 
 /// TXT 是定宽表：超长厂商名必须按显示宽度截断，否则后续列全部错位。
@@ -292,7 +345,7 @@ fn txt_truncates_overlong_columns_and_keeps_alignment() {
     let results = vec![
         ProbeResult::new(
             0,
-            Ipv4Addr::new(10, 0, 0, 1),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             ProbeStatus::Online { rtt_ms: 4 },
         )
         .with_target_info(
@@ -302,7 +355,7 @@ fn txt_truncates_overlong_columns_and_keeps_alignment() {
         ),
         ProbeResult::new(
             1,
-            Ipv4Addr::new(10, 0, 0, 2),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             ProbeStatus::Online { rtt_ms: 9 },
         ),
     ];
@@ -355,7 +408,7 @@ fn prefix_display_roundtrip_in_export() {
     let p = Ipv4Prefix::new(192, 168, 1);
     let results = vec![ProbeResult::new(
         0,
-        p.with_host(1),
+        IpAddr::V4(p.with_host(1)),
         ProbeStatus::Online { rtt_ms: 3 },
     )];
     let csv = export_csv(&results, &meta()).unwrap();

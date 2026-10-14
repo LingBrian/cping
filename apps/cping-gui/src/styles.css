@@ -247,6 +247,30 @@ button {
   font-weight: 700;
 }
 
+/* ---------- M8：变化高亮 ---------- */
+/* 高亮只持续几秒（store 里 CHANGE_HIGHLIGHT_MS），到点自动淡出，
+   所以样式上只需要「一眼能看出这行刚变了」，不需要常驻强调。 */
+.result-table__row--changed {
+  background: #fffbeb;
+  box-shadow: inset 3px 0 0 #f59e0b;
+}
+
+.grid-matrix__cell--changed {
+  outline: 2px solid #f59e0b;
+  outline-offset: -2px;
+}
+
+/* 变化标签：文字形式，避免只靠颜色表意（色盲/黑白打印同样可读） */
+.badge--change {
+  min-width: auto;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: #fde68a;
+  color: #78350f;
+  font-size: 10px;
+  font-weight: 600;
+}
+
 /* ---------- 移动端 ---------- */
 .mobile {
   display: flex;
@@ -372,6 +396,21 @@ button {
   opacity: 0.5;
 }
 
+/* M8：变化行与变化说明。高亮由 store 定时淡出，样式只负责「看得出来」。 */
+.mobile-list__row--changed {
+  background: #fffbeb;
+  border-color: #f59e0b;
+}
+
+.mobile-list__change {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: #92400e;
+}
+
 .mobile__footer {
   font-size: 12px;
   color: var(--cping-muted);
@@ -384,4 +423,100 @@ button {
 .touchable {
   min-height: 44px;
   min-width: 44px;
+}
+
+/* ---------- M8：变化面板 ---------- */
+.change-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  height: 100%;
+  min-height: 0;
+}
+
+.change-panel__head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--cping-muted);
+}
+
+.change-panel__diff {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: #92400e;
+}
+
+.change-panel__empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 0;
+}
+
+.change-panel__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1;
+}
+
+.change-panel__item {
+  display: grid;
+  grid-template-columns: 68px 84px 130px 1fr;
+  gap: 8px;
+  align-items: center;
+  padding: 5px 8px;
+  border-bottom: 1px solid #eef0f3;
+  font-size: 12px;
+}
+
+.change-panel__round {
+  color: var(--cping-muted);
+}
+
+.change-panel__ip {
+  font-size: 12px;
+}
+
+.change-panel__summary {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 变化类型：文字 + 底色双通道，黑白打印/色觉差异下同样可读 */
+.change-kind {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.change-kind--appeared {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.change-kind--disappeared {
+  background: #e5e7eb;
+  color: #374151;
+}
+
+.change-kind--rtt-class-changed {
+  background: #fef9c3;
+  color: #854d0e;
+}
+
+.change-kind--status-changed {
+  background: #dbeafe;
+  color: #1e40af;
 }

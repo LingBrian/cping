@@ -5,12 +5,17 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import type {
   AppConfigDto,
+  BackendCapsDto,
+  ChangeDto,
   EnrichReportDto,
+  ExportFormatKey,
   HostnameLookupDto,
   PendingSnapshotDto,
   ProbeEventDto,
+  ProbeModeKey,
   SnapshotDto,
   SnapshotSavedDto,
+  SpecDto,
 } from '../shared/types'
 
 export function isTauri(): boolean {
@@ -21,12 +26,60 @@ export async function parsePrefix(input: string): Promise<string> {
   return invoke<string>('parse_prefix_cmd', { input })
 }
 
+/** M9：解析完整目标规格（网段 / 单主机 / CIDR / 多网段）。 */
+export async function parseSpec(input: string): Promise<SpecDto> {
+  return invoke<SpecDto>('parse_spec_cmd', { input })
+}
+
+/** 平台默认探测方式：桌面为 ICMP，Android 为 TCP:80。 */
+export async function defaultProbeMode(): Promise<[ProbeModeKey, number]> {
+  return invoke<[ProbeModeKey, number]>('default_probe_mode')
+}
+
+/** M12：当前平台全部内置后端的能力（含不可用的，前端自行过滤）。 */
+export async function backendCaps(): Promise<BackendCapsDto[]> {
+  return invoke<BackendCapsDto[]>('backend_caps')
+}
+
+/** M12：面向界面的一行能力摘要。 */
+export async function backendSummary(): Promise<string> {
+  return invoke<string>('backend_summary')
+}
+
+/** M12：本构建是否带可选异步调度（编译期决定）。 */
+export async function asyncSchedulerAvailable(): Promise<boolean> {
+  return invoke<boolean>('async_scheduler_available')
+}
+
+/** 矩阵视图能表示的目标数上限（256）。 */
+export async function matrixViewMax(): Promise<number> {
+  return invoke<number>('matrix_view_max')
+}
+
 export async function startScan(
   prefix: string,
   timeoutMs: number,
   concurrency: number,
+  mode?: ProbeModeKey,
+  tcpPort?: number,
 ): Promise<string> {
-  return invoke<string>('start_scan', { prefix, timeoutMs, concurrency })
+  return invoke<string>('start_scan', {
+    prefix,
+    timeoutMs,
+    concurrency,
+    mode: mode ?? null,
+    tcpPort: tcpPort ?? null,
+  })
+}
+
+/** M8：变化事件流（最近 limit 条，新的在前）。 */
+export async function recentChanges(limit: number): Promise<ChangeDto[]> {
+  return invoke<ChangeDto[]>('recent_changes', { limit })
+}
+
+/** M10：导出「上一轮 → 本轮」差异报告（.csv）。 */
+export async function exportDiff(path: string): Promise<string> {
+  return invoke<string>('export_diff', { path })
 }
 
 export async function cancelScan(): Promise<void> {
@@ -45,7 +98,7 @@ export async function exportResults(path: string): Promise<string> {
  * 移动端（Android）保存路径：不走桌面文件对话框，
  * 由 Rust 侧写到应用可写的公共目录并回报完整路径。
  */
-export async function exportToAppDir(format: 'csv' | 'txt'): Promise<string> {
+export async function exportToAppDir(format: ExportFormatKey): Promise<string> {
   return invoke<string>('export_to_app_dir', { format })
 }
 
