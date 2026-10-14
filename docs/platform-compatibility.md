@@ -101,20 +101,69 @@ APK 为 v1.0.0 双 ABI 通用 debug 包（`native-code: 'arm64-v8a' 'x86_64'`，
 **8.27 s / 255 目标的节奏**正好是 `255 / 并发32 ≈ 8 批 × 1 s 超时`——
 即使 socket 创建立刻失败，探测仍按超时节拍走完，符合调度器设计。
 
-### 3.5 已发现的问题（开放）
+### 3.5 退后台路径的 FORTIFY 日志：已归因，**不是本项目缺陷**
 
-**Android 后台回收路径出现一次 native abort**（间歇性，三次受控重现未复现）：
+**现象**（最初记录为「间歇性 native abort」）：
 
 ```
 F libc: FORTIFY: pthread_mutex_lock called on a destroyed mutex
 ActivityManager: Process com.cping.gui (pid xxx) has died: cch CRE   ← cached（后台）
 ```
 
-- 发生时机：应用退到后台/息屏后约 1 分钟，被系统按 cached 进程处理时；
-- 前台保持 60 s、息屏 90 s 两次受控重现均未复现，crash buffer 为空；
-- 调度器自身的 mutex 全部在 `Arc` 保护下、事件通道生命周期闭环，未发现
-  本项目代码存在「销毁后加锁」路径；无 tombstone（FORTIFY abort 未留下回溯），
-  归因需在复现时用 `ndk-stack` 抓 native 栈，列为 **M7 待办**。
+**归因结论**：这**不是崩溃**，而是 `tao` 的 Android 退出路径 + Chromium WebView
+拆卸并发产生的日志噪音。证据链如下（2026-10-14 取证，可稳定复现）：
+
+1. **退出原因是主动 `exit(0)`，不是致命信号**：
+   `adb shell dumpsys activity exit-info com.cping.gui` 给出
+   `process=com.cping.gui reason=1 (EXIT_SELF) subreason=0 (UNKNOWN) status=0`
+   ——`EXIT_SELF` + `status=0` 表示进程自己调用了 `exit(0)`；
+   系统回收（LMK）会记成 `EXIT_LOW_MEMORY`/`EXIT_OTHER_KILL`，被强停会记成
+   `USER REQUESTED/FORCE STOP`，两者都不是本次的取值。
+2. **没有任何致命信号**：`/data/tombstones` 目录**为空**（目录 mtime 停留在事件之前，
+   未随事件更新）；`libc: Fatal signal`、`SIGABRT`、`tombstone` 关键字命中数 **0**。
+   真发生 FORTIFY `abort()` 时必然出现 `Fatal signal 6 (SIGABRT)` 并留下 tombstone——
+   **无 tombstone 本身就是「没有 abort」的证据**（此前文档把它误读成「无回溯所以无法归因」）。
+3. **代码层面的触发点明确**：`tao-0.37.1/src/platform_impl/android/mod.rs:199`
+   ```rust
+   pub fn run<F>(mut self, event_handler: F) -> ! {
+       let exit_code = self.run_return(event_handler);
+       ::std::process::exit(exit_code);   // Android：退出码默认 0
+   }
+   ```
+   Activity 被销毁 → `WindowEvent::Destroyed` → Tauri 置 `ControlFlow::ExitWithCode(0)`
+   → tao 在 Android 上**直接 `process::exit(0)`**。这是平台上「Activity 没了就退出进程」
+   的既有约定，不是异常。
+4. **FORTIFY 行来自进程内的其它线程，且与 WebView 拆卸同时发生**：
+   同一次事件里三条 FORTIFY 来自 **3 个不同 tid**、命中 **2 个不同互斥量地址**，
+   紧接 `wm_on_destroy_called`（Activity 销毁），而 WebView 沙箱进程在 4 ms 后
+   以 `subreason=17 (ISOLATED NOT NEEDED)` 退出——即 `exit(0)` 与 Chromium
+   WebView 拆卸**并发**，被销毁的是平台侧（WebView）的互斥量。
+5. **本项目代码不可能产生「销毁后加锁」**：bionic 上 `std::sync::Mutex` 是
+   futex 实现，**没有 `pthread_mutex_destroy` 调用路径**；全仓库锁点只有
+   `Arc<Mutex<Shared>>`（Tauri 托管状态）与调度器内部锁，`Arc` 生命周期长于
+   所有相关线程，事件通道也已闭环。另外本项目**完全不使用剪贴板**
+   （`grep -rn clipboard apps/` 为空），后台反复出现的
+   `ClipboardService: Denying clipboard access to com.cping.gui` 同样来自
+   WebView/Chromium 自身请求，非本应用逻辑。
+
+**确定性复现步骤**（不再依赖「后台等 1 分钟」这种概率触发）：
+
+```bash
+adb logcat -c
+adb shell am start -n com.cping.gui/.MainActivity
+sleep 14
+adb shell input keyevent KEYCODE_BACK     # finish MainActivity → onDestroy
+adb logcat -b crash -d                    # 立即出现 3 条 FORTIFY
+adb shell dumpsys activity exit-info com.cping.gui   # EXIT_SELF / status=0
+```
+
+此路径实测 1 次即命中。反过来，**只按 HOME 不销毁 Activity（仅 `onPause`/`onStop`）
+不会触发**，这正是先前「三次受控重现均未复现」的原因：当时复现的是前台/息屏空闲，
+而非 Activity 销毁。
+
+**真正的影响**（非崩溃带来的）：进程退出后**内存态结果丢失**。这是 Android
+生命周期的固有行为，当前由「导出 CSV」缓解；如需保留，应做「退前台时落盘快照 +
+重启后恢复」，属于功能增强而非缺陷修复。
 
 ## 4. 本机地址与 MAC
 
@@ -133,7 +182,8 @@ ActivityManager: Process com.cping.gui (pid xxx) has died: cch CRE   ← cached�
       ✅ `EPERM`/`EACCES`，状态如实分类为「权限不足」（模拟器实测）
 - [ ] Android：`/system/bin/ping` 是否存在、普通应用能否执行（未测，不依赖）
 - [ ] Android：Wi-Fi ↔ 蜂窝 ↔ VPN 切换时的行为与任务状态（模拟器无法覆盖）
-- [x] Android：前后台切换 —— ✅ 正常；进程回收 —— ⚠️ 出现一次 native abort（见 §3.5，待归因）
+- [x] Android：前后台切换 —— ✅ 正常；Activity 销毁后的进程退出 —— ✅
+      已归因为 `tao` 主动 `exit(0)`，**非本项目缺陷**（见 §3.5，附确定性复现步骤）
 - [x] Android：竖屏 / 横屏布局 —— ✅ 均正常；系统字体缩放未测
 - [x] Android：文件保存 —— ✅ 落盘应用专属外部目录，内容/编码校验通过
 - [x] Android：能否产出可安装的 APK —— ✅ 能（debug 变体已签名）

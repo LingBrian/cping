@@ -199,9 +199,15 @@ cargo test --workspace -- --nocapture
 2. **MAC 地址获取**：Windows 用 `GetIpNetTable2`（ARP 缓存），Linux/Android 读
    `/proc/net/arp`；拿不到就显示空，不伪造。
 3. **主机名反查**：DNS 反解（`getnameinfo`）+ Windows NetBIOS 后缀查询（可选）。
+4. **结果快照与恢复**（源自 Android 生命周期取证结论，见
+   `platform-compatibility.md` §3.5）：Activity 被销毁会带动进程退出，内存态结果必然丢失。
+   因此改为在「退到后台」时把当前结果快照落盘（应用专属外部目录，无需任何权限），
+   下次启动时提示「检测到上次未保存的扫描结果（N 个目标 / 时间），是否恢复」；
+   **默认不自动恢复**，避免旧数据被误当成新扫描结果。
 
 验收要点：OUI 查询纯函数化并全覆盖单测；MAC/主机名缺失时界面与导出仍结构完整；
-导出列扩展后 CSV/TXT 向后兼容（新列追加在末尾）。
+导出列扩展后 CSV/TXT 向后兼容（新列追加在末尾）；快照恢复必须显式确认，
+且恢复前后 `total/online/elapsed` 等统计与快照时刻完全一致。
 
 ### M8 — v1.2.0 持续监控模式
 

@@ -285,21 +285,29 @@ is operational`），模拟器 40 s 完成冷启动。
 | 导出 CSV | ✅ 应用专属外部目录；BOM / 256 行 CRLF / `.1`–`.255` |
 | 真机级截图 | ✅ `android-list / android-matrix / android-landscape`（APK 本体，非仿真） |
 
-### ⚠️ 发现一个间歇性 native abort（开放问题）
+### ✅ 曾经的「间歇性 native abort」：已归因，**不是缺陷**
 
 ```
 F libc: FORTIFY: pthread_mutex_lock called on a destroyed mutex
 ActivityManager: Process com.cping.gui (pid xxx) has died: cch CRE  ← cached
 ```
 
-- 仅出现一次：应用**退后台/息屏约 1 分钟**后被系统按 cached 进程处理时；
-- 三次受控重现（前台空闲 60 s、息屏 90 s）均未复现；
-- 本项目调度器的 mutex 均在 `Arc` 保护下、事件通道闭环，未发现可触达的
-  「销毁后加锁」路径；FORTIFY abort 未留 tombstone，归因需复现时
-  `ndk-stack` 抓 native 栈 → 列入 M7。
-- 影响评估：前台交互与扫描全流程未受影响；后台被杀后系统自动重启 Activity，
-  结果因存内存而丢失（与「取消后保留已完成结果」的约定不冲突——进程级回收
-  本来就不保证内存态存活）。
+- **结论**：这是 `tao` 的 Android 退出路径（`platform_impl/android/mod.rs:199`
+  在 `run_return()` 返回后 `::std::process::exit(exit_code)`，退出码 0）与
+  Chromium WebView 拆卸并发产生的日志噪音，**不是本项目崩溃**。
+- 证据：`dumpsys activity exit-info` 记为 `reason=1 (EXIT_SELF) status=0`（主动退出）；
+  `/data/tombstones` 为空、`SIGABRT`/`Fatal signal` 命中 0（无致命信号，故无回溯）；
+  三条 FORTIFY 来自本进程 3 个不同 tid、命中 2 个不同互斥量，紧接
+  `wm_on_destroy_called`，WebView 沙箱进程 4 ms 后以 `ISOLATED NOT NEEDED` 退出。
+- 本项目不可能触发该日志：bionic 上 `std::sync::Mutex` 无 `pthread_mutex_destroy`
+  路径，全部锁点都在 `Arc` 保护下；`clipboard` 全仓库零使用。
+- **确定性复现**：`adb shell input keyevent KEYCODE_BACK`（finish MainActivity）
+  即可 1 次命中；只按 HOME（`onStop` 而不 `onDestroy`）**不会**触发——这就是当初
+  「三次受控重现均未复现」的原因。
+- 影响评估：前台交互与扫描全流程不受影响；进程退出后**内存态结果丢失**属 Android
+  生命周期固有行为（与「取消后保留已完成结果」不冲突——进程级回收本不保证内存态存活），
+  当前由导出 CSV 缓解。
+- 详见 `docs/platform-compatibility.md` §3.5。
 
 ### 仍未验证（M6 明确未覆盖）
 
