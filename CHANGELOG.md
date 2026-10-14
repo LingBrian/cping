@@ -3,6 +3,21 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.1.2] - 2026-10-14
+
+### 修正
+
+- **「表单显示」的结果无法用滚轮滚动查看**（255 行只能看到前 22 行左右，
+  之后的内容既没有滚动条、滚轮也滚不动）
+  - 根因：naive-ui Tabs 的高度链有两环是断的——`.n-tabs-pane-wrapper` 是
+    `overflow: hidden` 的可收缩 flex 项（内容被静默裁掉但不提供滚动），
+    `.n-tab-pane` 高度是 `auto`，于是内层 `height: 100%` 全部退化成 `auto`，
+    表格容器撑到 255 行全高后被裁掉。「图形显示」只是恰好放得下才没暴露
+  - 修复：在桌面布局里补上这两环（`flex: 1 1 auto; min-height: 0` +
+    `height: 100%`），滚动容器的 `max-height: 100%` 恢复生效
+  - 验证：恢复 255 行快照后向 WebView2 输入窗口注入滚轮消息，
+    表格正常滚动、滚动条滑块同步移动、表头保持吸顶
+
 ## [1.1.1] - 2026-10-14
 
 ### 修正
@@ -142,6 +157,7 @@
 - Android 真机验证未做（无设备）；release APK 未签名
 - 本机地址 / MAC 枚举未接入，界面显示「未知」，不伪造
 
+[1.1.2]: https://github.com/LingBrian/cping/releases/tag/v1.1.2
 [1.1.1]: https://github.com/LingBrian/cping/releases/tag/v1.1.1
 [1.1.0]: https://github.com/LingBrian/cping/releases/tag/v1.1.0
 [1.0.0]: https://github.com/LingBrian/cping/releases/tag/v1.0.0

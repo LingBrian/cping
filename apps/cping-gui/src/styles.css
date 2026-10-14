@@ -161,6 +161,27 @@ button {
   margin-right: 1px;
 }
 
+/* naive-ui Tabs 的高度链有两环是断的，必须在这里补上，否则内层滚动容器
+   完全失效（表单显示的 255 行结果既没有滚动条、滚轮也滚不动）：
+
+   .n-tabs（flex 列容器，height:100%）
+     └ .n-tabs-pane-wrapper  ← ① overflow:hidden 的 flex 项，高度可被压扁，
+                               内容被静默裁掉，但不提供任何滚动能力
+         └ .n-tab-pane       ← ② 高度是 auto，导致内层 height:100% 全部退化
+             └ <div height:100%> ← 变成 auto → .result-table__scroll 撑到内容全高
+
+   ① 让 wrapper 撑满 n-tabs 剩余空间并允许收缩（min-height:0），
+   ② 让 pane 的百分比高度有明确的参照物。两环补齐后，
+   .result-table__scroll 的 max-height:100% 才真正生效，滚动条才会出现。 */
+.desktop__main .n-tabs-pane-wrapper {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.desktop__main .n-tab-pane {
+  height: 100%;
+}
+
 /* ---------- 表格 ---------- */
 .result-table {
   /* 关键：固定布局 + 100% 宽 = 列宽由表头定义并按容器宽度等比分配。

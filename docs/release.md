@@ -107,3 +107,13 @@ Rust 目标：`aarch64-linux-android`、`armv7-linux-androideabi`、
 - Android APK 本版未重新构建：M7 的邻居表 / 快照链路在 Android 已实现并单测，
   尚未真机复测；v1.0.0 的 APK 不含 M7 功能
 - 发布说明：`docs/release-notes-v1.1.0.md`；SHA256 见 Release 附件
+
+## 7. v1.1.1 / v1.1.2 补丁（GUI 布局与滚动，2026-10-14）
+
+| 版本 | 修了什么 | 产物 | 验证 |
+| --- | --- | --- | --- |
+| v1.1.1 | 默认窗口 1240×840、表格 `table-layout: fixed`、启动按显示器收敛尺寸 | TUI + GUI exe + SHA256 | PrintWindow 抓窗口自检（侧栏/矩阵/表格三项） |
+| v1.1.2 | 「表单显示」滚轮失效：补齐 naive-ui Tabs 断掉的高度链 | TUI + GUI exe + SHA256 | 255 行快照 + 注入滚轮消息：修复前 0 像素变化，修复后正常滚动 |
+
+- 两版都未改核心逻辑；Android APK 未重新构建
+- 发布说明：`docs/release-notes-v1.1.1.md`、`docs/release-notes-v1.1.2.md`
