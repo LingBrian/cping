@@ -38,7 +38,10 @@ apps/cping-gui/src-tauri/gen/android/app/build/outputs/apk/universal/
 
 环境变量（用户级，已 `setx`）：`ANDROID_HOME`、`NDK_HOME`。
 **`JAVA_HOME` 有意不改**：系统默认是 JDK 26（Ghidra 需要 21+），
-Android 构建改由 `gen/android/gradle.properties` 的 `org.gradle.java.home` 指定 JDK 17。
+因此 Android 构建需要 JDK 17 —— 由 `scripts\build-all.cmd` 在构建时
+`set JAVA_HOME=D:\Program Files\Android\jdk-17` 表达；
+**不要**把这条路径写进 `gen/android/gradle.properties` 的 `org.gradle.java.home`，
+那是一条机器专属的绝对路径，提交后会让 CI 的 Android 作业直接失败（见 §8.4 第 4 条）。
 
 Rust 目标：`aarch64-linux-android`、`armv7-linux-androideabi`、
 `i686-linux-android`、`x86_64-linux-android` 均已 `rustup target add`。
@@ -50,7 +53,7 @@ Rust 目标：`aarch64-linux-android`、`armv7-linux-androideabi`、
 | `gen/android/gradle/wrapper/gradle-wrapper.properties` | `distributionUrl` → 腾讯镜像 |
 | `gen/android/build.gradle.kts` | 阿里云 maven（google / public / gradle-plugin）优先 |
 | npm | `--registry=https://registry.npmmirror.com`（华为云镜像单包要 ~18s） |
-| cargo | `.cargo/config.toml` 的 `[net] offline = true` + 需要时 `CARGO_NET_OFFLINE=false cargo fetch` |
+| cargo | **按需**临时离线：`cargo build --offline` / `CARGO_NET_OFFLINE=true cargo fetch`。⚠️ 不要写进 `.cargo/config.toml`（见 §8.4 第 1 条） |
 
 ### 2.2 构建参数（已验证可用）
 

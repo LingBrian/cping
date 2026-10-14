@@ -7,6 +7,7 @@
 Rust 核心 · TUI（ratatui）· 桌面 GUI（Tauri 2 + Vue 3）· Android
 
 [![Release](https://img.shields.io/badge/release-v2.0.0-111827)](../../releases)
+[![CI](https://github.com/LingBrian/cping/actions/workflows/ci.yml/badge.svg)](https://github.com/LingBrian/cping/actions/workflows/ci.yml)
 [![Tests](https://img.shields.io/badge/tests-276%20passed-brightgreen)](docs/testing.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20Android-lightgrey)](docs/platform-compatibility.md)
@@ -205,7 +206,8 @@ cping-tui --prefix 192.168.1
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
-| `cargo build` 无输出后被 SIGTERM | 沙箱内 registry 探测挂起 | `.cargo/config.toml` 已设 `[net] offline = true`；加依赖时 `CARGO_NET_OFFLINE=false cargo fetch` |
+| `cargo build` 无输出后被 SIGTERM | 受限/无外网环境下 registry 探测挂起 | **按需**临时离线：`cargo build --offline` 或 `CARGO_NET_OFFLINE=true cargo build`。⚠️ **不要**把 `[net] offline = true` 写进 `.cargo/config.toml` —— cargo 解析依赖图时必须能访问索引，写死会让 CI 与全新克隆全部失败（v2.0.0 发行时真实踩过） |
+| CI 报 `no matching package named ... found`，或 `Value 'D:/...' is invalid` | 把「本机恰好成立」的配置提交进了仓库 | 跑 `bash scripts/check-portability.sh`（已接进 CI）自查：盘符绝对路径 / cargo 离线开关 / vendored 源替换 |
 | `npm install` 报 `spawnSync EBUSY` | esbuild/tauri-cli postinstall 无法 spawn | 加 `--ignore-scripts`（平台二进制仍在） |
 | npm 装得极慢 | 默认源慢 | `--registry=https://registry.npmmirror.com` |
 | GUI 启动显示「localhost 拒绝连接」 | debug 构建找 `devUrl` | 用 `cargo build --release`（资源已内嵌） |
@@ -224,7 +226,8 @@ cping-tui --prefix 192.168.1
 - **ICMPv6 未实装**：后端注册表把它登记为「不可用」并附人话说明，
   选中会得到明确的「不支持」，而不是静默超时。IPv6 的完整可用路径是 **TCP**。
 - **Android 已在 Android 15 模拟器完成真机级验收**（安装/启动/扫描/导出/横竖屏/
-  前后台）；真机上的厂商后台管控与字体缩放仍待验证，release APK 未签名。
+  前后台）；真机上的厂商后台管控与字体缩放仍待验证。release APK 用 **Android Debug
+  密钥**签名，可侧载试用，**不可上架**（同时提供未签名版供自行签名）。
 - TUI 状态栏的本机地址尚未接入网卡枚举，显示「未知」，**不伪造**；
   MAC 与厂商已通过本机邻居表 + 离线 OUI 库接入。
 - 目标范围默认 `.1`–`.255`（对齐原版），`.0` 不参与探测。

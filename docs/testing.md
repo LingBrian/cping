@@ -49,9 +49,10 @@ wsl -d Debian -e bash -c 'export PATH=$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/
   cargo build --release -p cping-cli -p cping-tui --offline'
 ```
 
-> **环境注意**：`cping/.cargo/config.toml` 设了 `[net] offline = true`。
-> 在本沙箱中 cargo 的 registry 探测会挂起，必须离线；需要下载新依赖时用
-> `CARGO_NET_OFFLINE=false cargo fetch`。
+> **环境注意**：在本沙箱中 cargo 的 registry 探测会挂起，因此命令里显式带了
+> `--offline`。**注意不要**把 `[net] offline = true` 写进 `.cargo/config.toml`——
+> 那会让 CI 与全新克隆全部构建失败（v2.0.0 发行时真实踩过，见本文末）。
+> 需要下载新依赖时用 `CARGO_NET_OFFLINE=false cargo fetch`。
 
 ## M1a / M1b：核心（62 个测试）
 
@@ -160,7 +161,7 @@ release 构建即改为内嵌 `frontendDist`。
 | `spawnSync` + 管道 = EBUSY | `npm install` 时 esbuild / tauri-cli 的 postinstall 失败 | 用 `npm install --ignore-scripts`；平台二进制仍在，实测 `vite build` 正常 |
 | npm 默认源慢 | 单包响应约 18 s，卡住 12 min 无进展 | 改用 `--registry=https://registry.npmmirror.com`（79 包 32 s） |
 | 端口监听被拒 | vite dev server `EACCES ::1:1420` | dev 模式不可用；改用 `cargo build --release` 内嵌 `dist` |
-| cargo registry 探测挂起 | `cargo build` 无输出并被 SIGTERM | `.cargo/config.toml` 设 `[net] offline = true`；需要下依赖时用 `CARGO_NET_OFFLINE=false cargo fetch` |
+| cargo registry 探测挂起 | `cargo build` 无输出并被 SIGTERM | 命令里显式带 `--offline`；需要下依赖时用 `CARGO_NET_OFFLINE=false cargo fetch`。**不要**写进 `.cargo/config.toml`（会让 CI 全红） |
 | 批量删除保护 | `rm -rf` 超过 50 个目标被拦截 | 改用 `cargo clean -p`；构建时清理 `target` 需分批 |
 | Gradle 无法 exec `npm.cmd` | `BuildTask.kt` 里 `exec` 报 PATHEXT 解析失败 | 改为经 `cmd.exe /c` 调用 npm |
 | `compileSdk 37` 不存在 | AGP 报 platform 37 未安装 | 降到 36（AGP 会自动装 platform-36 / build-tools 36.0.0） |

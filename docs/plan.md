@@ -15,7 +15,7 @@
 | Android SDK / NDK | **缺失**（`ANDROID_HOME` 空，无 `$LOCALAPPDATA/Android/Sdk`，无 `C:/Android`） | **M4 硬阻塞** |
 | JDK | `26.0.1` | Android Gradle 需 JDK 17–21，**可能不兼容 AGP**，需单独处理 |
 | Git | 原工作区不是仓库；已在 `cping/` 内 `git init` | 已解决 |
-| **cargo 网络** | 沙箱内 `cargo build` 会因 registry 探测卡死被 SIGTERM | **必须在 `cping/.cargo/config.toml` 设 `[net] offline = true`**（已加） |
+| **cargo 网络** | 沙箱内 `cargo build` 会因 registry 探测卡死被 SIGTERM | **按需临时离线**：`cargo build --offline` / `CARGO_NET_OFFLINE=true cargo build`。⚠️ **不要**落盘到 `.cargo/config.toml`（v2.0.0 发行时因此让 CI 全红，详见「路线图扩展」后的 M11 实施记录） |
 | Linux 环境 | 无 WSL2 / 无容器探测到 | Linux GUI/TUI 构建**无法在本机验证** |
 
 **迁移方案结论**：无迁移。当前目录不存在任何既有代码工程（仅 `CPing.exe` + `analysis/` + `tech.md`），
