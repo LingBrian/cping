@@ -24,3 +24,6 @@ release/
 # 编辑器
 .vscode/
 .idea/
+
+# 验证用的临时截图（点开头），避免被 git add -A 误收进仓库
+docs/images/.*.png
