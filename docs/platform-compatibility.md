@@ -146,6 +146,33 @@ ActivityManager: Process com.cping.gui (pid xxx) has died: cch CRE   ← cached�
    `ClipboardService: Denying clipboard access to com.cping.gui` 同样来自
    WebView/Chromium 自身请求，非本应用逻辑。
 
+**对照组（排除「工具链抓不到」的可能）**
+
+仅有「无 tombstone」还不够——必须证明这套工具**本来抓得到**。用 NDK clang 编了一个
+独立小程序（`analysis/forensic_probe.c`，不属于本仓库构建产物）在**同一台模拟器**上跑：
+
+```c
+/* 在已 destroy 的互斥量上 lock —— 复刻 FORTIFY 那条日志的真实触发条件 */
+pthread_mutex_init(&m, NULL);
+pthread_mutex_destroy(&m);
+pthread_mutex_lock(&m);
+```
+
+实测（对照结果，与上面的应用日志形成鲜明差异）：
+
+| 对照组（真触发） | 本应用退后台那次 |
+| --- | --- |
+| `F libc: FORTIFY: pthread_mutex_lock called on a destroyed mutex` | 同 |
+| **紧跟** `F libc: Fatal signal 6 (SIGABRT) ...` | **没有**这一行 |
+| `F DEBUG: Abort message: 'FORTIFY: ...'` + `__fortify_fatal` native 回溯 | **没有** |
+| 生成 `/data/tombstones/tombstone_00` | tombstone 目录为空（mtime 未变） |
+| 进程退出码 **134**（128+SIGABRT） | `EXIT_SELF` / `status=0` |
+
+即：**真实的「锁已销毁互斥量」在 bionic 上必然 abort 并留下墓碑**，工具链是有效的；
+本应用那次三条日志后**没有任何 abort 痕迹**，说明进程不是被 FORTIFY 终结的，
+而是 `exit(0)` 已经启动、系统连同 WebView 一起拆卸时，平台侧线程碰到了
+正在被销毁的互斥量，只留下了日志。结论：**日志真实、退出真实、崩溃不存在**。
+
 **确定性复现步骤**（不再依赖「后台等 1 分钟」这种概率触发）：
 
 ```bash
