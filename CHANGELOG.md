@@ -3,7 +3,7 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [未发布]
+## [1.1.1] - 2026-10-14
 
 ### 修正
 
@@ -15,6 +15,10 @@
   - 启动时把窗口尺寸收敛到当前显示器的可用区域内（只缩小不放大）：
     分辨率不够的机器上不再把窗口顶出屏幕
   - 屏幕高度不足时进一步收紧侧栏间距（`max-height` 媒体查询）兜底
+
+## [未发布]
+
+（暂无）
 
 ## [1.1.0] - 2026-10-14
 
@@ -138,5 +142,6 @@
 - Android 真机验证未做（无设备）；release APK 未签名
 - 本机地址 / MAC 枚举未接入，界面显示「未知」，不伪造
 
+[1.1.1]: https://github.com/LingBrian/cping/releases/tag/v1.1.1
 [1.1.0]: https://github.com/LingBrian/cping/releases/tag/v1.1.0
 [1.0.0]: https://github.com/LingBrian/cping/releases/tag/v1.0.0
