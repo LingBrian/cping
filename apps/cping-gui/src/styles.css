@@ -53,20 +53,21 @@ button {
 /* ---------- 桌面布局 ---------- */
 .desktop {
   display: grid;
-  grid-template-columns: 280px 1fr;
+  grid-template-columns: 272px 1fr;
   /* 关键：必须用 minmax(0, 1fr)。
      裸写 1fr 等价于 minmax(auto, 1fr)，左栏内容会把第一行撑高，
      整页出现滚动条，底部状态栏被挤出可视区。 */
   grid-template-rows: minmax(0, 1fr) auto;
-  gap: 10px;
-  padding: 10px;
+  gap: 8px;
+  padding: 8px;
   height: 100%;
+  overflow: hidden;
 }
 
 .desktop__side {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   /* 让侧栏自己滚动，而不是把整个页面撑高 */
   min-height: 0;
   overflow-y: auto;
@@ -74,8 +75,38 @@ button {
 
 /* 侧栏里的面板统一收紧内边距，保证默认窗口高度下不用滚动就能看全 */
 .desktop__side .cping-panel {
-  padding: 9px 10px;
+  padding: 8px 10px;
   flex-shrink: 0;
+}
+
+/* 滚动条只在窗口被拖到很矮时才出现，做成细条，不遮挡内容也不抢视线 */
+.desktop__side::-webkit-scrollbar {
+  width: 8px;
+}
+
+.desktop__side::-webkit-scrollbar-thumb {
+  background: #c9ced6;
+  border-radius: 4px;
+}
+
+.desktop__side::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 屏幕本身不够高时的兜底：进一步压缩间距，尽量把「要滚动」往后推 */
+@media (max-height: 820px) {
+  .desktop {
+    gap: 6px;
+    padding: 6px;
+  }
+
+  .desktop__side {
+    gap: 5px;
+  }
+
+  .desktop__side .cping-panel {
+    padding: 6px 9px;
+  }
 }
 
 .desktop__main {
@@ -132,7 +163,11 @@ button {
 
 /* ---------- 表格 ---------- */
 .result-table {
+  /* 关键：固定布局 + 100% 宽 = 列宽由表头定义并按容器宽度等比分配。
+     用 auto 布局时，列宽合计（约 1050px）超过主区只会把表格撑宽，
+     结果整张表横向滚动，右边的厂商/主机名列等于看不见。 */
   width: 100%;
+  table-layout: fixed;
   border-collapse: collapse;
   font-size: 12px;
 }
@@ -143,6 +178,9 @@ button {
   padding: 4px 8px;
   text-align: left;
   white-space: nowrap;
+  /* 放不下就就地截断，绝不撑出横向滚动条 */
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .result-table thead th {
@@ -154,8 +192,30 @@ button {
 }
 
 .result-table__scroll {
-  overflow: auto;
+  /* 只有纵向滚动：255 行本来就需要滚，横向不需要 */
+  overflow-x: hidden;
+  overflow-y: auto;
   max-height: 100%;
+}
+
+/* 完整值放 title 里，鼠标悬停可看；行内只显示能放下的部分 */
+.result-table__ellipsis {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 主机名单元格：文字省略 + 右侧「反查」按钮 */
+.result-table__cell-flex {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.result-table__cell-flex .result-table__ellipsis {
+  flex: 1;
 }
 
 .badge {
