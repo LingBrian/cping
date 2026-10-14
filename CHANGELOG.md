@@ -33,7 +33,22 @@
 
 ## [未发布]
 
-（暂无）
+### 修正
+
+- **CI 与全新克隆无法构建：仓库内 `.cargo/config.toml` 硬编码了 `[net] offline = true`**
+  - 现象：`v2.0.0` tag 触发的 `Release` workflow 与 `main` 的 `CI` workflow **全部任务失败**，
+    报错为 `error: no matching package named tokio found` / `no matching package named
+    indexmap found`，并附带 `note: offline mode (via --offline) can sometimes cause
+    surprising resolution failures`
+  - 根因：本 workspace 存在**可选依赖**（`cping-core` 的 `async` feature 引入 tokio、
+    `cping-gui` 的 Tauri 壳引入 indexmap 等）。cargo 在解析依赖图、生成与校验
+    `Cargo.lock` 时**必须访问 registry 索引，即使这些 feature 未启用**。该行写死于
+    M1a 阶段，当时全仓库零第三方依赖所以无害；M11 引入 Tauri 壳、M12 引入异步调度后
+    才成为致命阻塞。本地一直「看起来正常」只是因为依赖缓存是热的
+  - 修复：移除该行，改为在文件内以注释说明「需要离线时按需用 `cargo build --offline` /
+    `CARGO_NET_OFFLINE=true`，不要落盘」，并保留无外网环境的 vendored 快照做法
+  - 验证：改动后本地 `cargo clippy --workspace --all-targets` 无 lint 警告、
+    `cargo test --workspace` 全绿；随后重跑 CI 与 Release 两条 workflow 确认绿
 
 ## [2.0.0] - 2026-10-15
 

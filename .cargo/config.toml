@@ -1,5 +1,23 @@
-# 本项目核心 crate 零第三方依赖，构建全程不需要访问网络。
-# 在受限/离线环境中，cargo 解析 registry 可能长时间挂起，因此默认离线。
-# 将来引入依赖（Tauri 等）时，请临时用 `--offline=false` 或先 `cargo fetch`。
-[net]
-offline = true
+# cping 的 cargo 配置。
+#
+# ⚠️ 请勿在此处写入 `[net] offline = true`。
+#
+# 本 workspace 存在可选依赖（`cping-core` 的 `async` feature 引入 tokio，
+# `cping-gui` 的 Tauri 壳引入 indexmap 等）。cargo 在**解析依赖图**以及
+# 生成/校验 `Cargo.lock` 时，必须能够访问 registry 索引 —— 即使这些
+# feature 并未启用。一旦把离线写死在这里，CI 与任何全新克隆都会以
+# 「no matching package named `tokio` / `indexmap` found」直接失败。
+# （该问题在 M1a 阶段引入时无害，因为当时全仓库零第三方依赖；
+#   M11 引入 Tauri 壳、M12 引入异步调度后才暴露出来。）
+#
+# 需要离线构建时，请在**命令行按需临时开启**，不要落盘到仓库：
+#   cargo build --offline
+#   CARGO_NET_OFFLINE=true cargo build
+#
+# 完全无外网的环境，走 vendored 依赖快照（步骤见 docs/release.md §8.2）：
+#   cargo vendor vendor-offline
+# 之后先在**本地临时**加入下列配置（vendor-offline/ 不入库）：
+#   [source.crates-io]
+#   replace-with = "vendored-sources"
+#   [source.vendored-sources]
+#   directory = "vendor-offline"
