@@ -154,6 +154,35 @@ Get-ChildItem release\v2.0.0 -File -Exclude SHA256SUMS.txt |
   ForEach-Object { "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLower()) *$($_.Name)" }
 ```
 
+#### 对**线上附件**的独立校验（2026-10-15 实测）
+
+不只校验本地产物，还从 Release 重新下载了一份再校验，证明「发布出来的东西」
+本身完整、且与本地逐字节一致：
+
+```bash
+gh release download v2.0.0 --repo LingBrian/cping --dir /tmp/relverify
+cd /tmp/relverify && sha256sum -c SHA256SUMS.txt
+```
+
+结果：**10 个产物全部 `OK`**；下载件与 `release/v2.0.0/` 逐字节比对
+**11/11 一致**。
+
+#### 对**线上 Linux 包**的真实运行实测
+
+把下载到的两个 `linux-x64` 包丢进 WSL Debian 解压后直接运行
+（也就是用户拿到手后的实际动作）：
+
+| 用例 | 命令 | 观察到的结果 |
+| --- | --- | --- |
+| 包内自带说明 | `tar -tzf` + `ls` | `cping-cli` / `cping-tui` / `README.txt` 都在 |
+| CLI 帮助 | `cping-cli --help` | 正常输出（退出码 0） |
+| 后端能力表 | `--list-backends` | `icmp6` 如实标为不可用；退出码 0 |
+| 原生 ICMP | `-t 127.0.0.1 --mode icmp` | 在线 1、0 ms、退出码 0 |
+| IPv6 TCP 开放端口 | `-t ::1 --mode tcp --port 18099` | **`TCP-OPEN`、1 ms、退出码 0** |
+| 同一端口走 IPv4 | `-t 127.0.0.1 --mode tcp --port 18099` | 不可达、退出码 1（服务只绑了 `::1`，**正好证明 v4/v6 没有被混淆**） |
+| IPv4 关闭端口 | `-t 127.0.0.1 --mode tcp --port 18999` | 不可达、0.000 s（内核 RST）、退出码 1 |
+| TUI | `cping-tui --help` | 正常输出（退出码 0） |
+
 ### 8.2 Linux 构建链路（WSL 内无外网）
 
 WSL 里访问不到 crates.io，因此先在 Windows 侧落一份依赖快照，再同步进 WSL：
