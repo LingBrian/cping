@@ -390,11 +390,11 @@ dependencies = [
 
 [[package]]
 name = "cping-core"
-version = "0.1.0"
+version = "1.0.0"
 
 [[package]]
 name = "cping-gui"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "cping-core",
  "indexmap 1.9.3",
