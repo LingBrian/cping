@@ -321,7 +321,23 @@ jobs:
             echo "::warning::缺少 $src，已生成占位发布说明"
           fi
 
-      - name: 创建 GitHub Release
+      - name: 检查 Release 是否已存在
+        # 幂等保护：如果同一 tag 下已经有 Release（例如人工用本机实测过的产物发布过），
+        # 这里就不再动它。否则 `draft: true` 会把一个已经公开的 Release 打回草稿状态，
+        # 让人以为发布失败了。
+        id: rel
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ steps.ver.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::${{ steps.ver.outputs.tag }} 已存在，跳过自动创建（保留其现有状态与附件）"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 创建 GitHub Release（草稿，待人工确认）
+        if: steps.rel.outputs.exists == 'false'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
