@@ -1,0 +1,25 @@
+# 统一换行符策略。
+#
+# 为什么需要它：`scripts/package.sh` 与 `.github/workflows/*.yml` 会在
+# **Linux** 上执行。如果它们被按 Windows 习惯转成 CRLF，Linux 侧会读到
+# `#!/usr/bin/env bash\r` 而报 `bad interpreter`，CI 直接失败。
+# 因此这几个后缀显式钉死为 LF，不依赖各人本地的 core.autocrlf 配置。
+#
+# Windows 专有的脚本（PowerShell / cmd）反过来用 CRLF，符合它们的原生习惯。
+
+* text=auto
+
+*.sh    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+
+*.ps1   text eol=crlf
+*.cmd   text eol=crlf
+*.bat   text eol=crlf
+
+*.png   binary
+*.jpg   binary
+*.ico   binary
+*.exe   binary
+*.so    binary
+*.crate binary
