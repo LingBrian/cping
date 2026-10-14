@@ -3,6 +3,20 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### 文档
+
+- **归因纠正**：Android 退后台出现的
+  `F libc: FORTIFY: pthread_mutex_lock called on a destroyed mutex` 加
+  `has died: cch CRE` 曾被记为「间歇性 native abort」。经取证
+  （`dumpsys activity exit-info` 记为 `EXIT_SELF`/`status=0`、无 tombstone、
+  无 `Fatal signal`，并用独立对照程序证明工具链能捕获真 abort）确认为
+  `tao` 在 Android 上主动 `process::exit(0)` 与 Chromium WebView 拆卸并发
+  产生的日志，**不是本项目缺陷**；同时给出确定性复现步骤（`KEYCODE_BACK`
+  销毁 Activity 即可命中，仅按 HOME 不会）。详见
+  `docs/platform-compatibility.md` §3.5。
+
 ## [1.0.0] - 2026-10-14
 
 首个稳定版本。对 2004 年 Delphi 版「C网群PING工具」的跨平台重写：

@@ -304,7 +304,7 @@ ActivityManager: Process com.cping.gui (pid xxx) has died: cch CRE  ← cached
 - **确定性复现**：`adb shell input keyevent KEYCODE_BACK`（finish MainActivity）
   即可 1 次命中；只按 HOME（`onStop` 而不 `onDestroy`）**不会**触发——这就是当初
   「三次受控重现均未复现」的原因。
-- **对照组**：用 NDK clang 编的独立小程序在**同一台模拟器**上真触发该条件
+- **对照组**：用 NDK clang 编的独立小程序（`tools/android-forensics/`）在**同一台模拟器**上真触发该条件
   （`pthread_mutex_destroy` 后再 lock），结果必然 abort：紧跟 `Fatal signal 6 (SIGABRT)`、
   `DEBUG: Abort message` + `__fortify_fatal` 回溯、生成 `tombstone_00`、退出码 134。
   本应用那次这些痕迹**一个都没有** → 工具链有效，进程不是被 FORTIFY 终结的。

@@ -64,9 +64,10 @@ cping/
 │   ├── probe/scheduler                 ProbeBackend 抽象 + std 线程并发调度
 │   └── native.rs                       Windows/Linux/Android 原生 ICMP
 ├── apps/cping-tui/           ratatui + crossterm 交互式终端界面
-└── apps/cping-gui/           Tauri 2 + Vue 3 + TypeScript
-    ├── src/                  桌面布局 + 移动布局（自动切换）
-    └── src-tauri/            Tauri 容器（9 个 Command，唯一前后端通道）
+├── apps/cping-gui/           Tauri 2 + Vue 3 + TypeScript
+│   ├── src/                  桌面布局 + 移动布局（自动切换）
+│   └── src-tauri/            Tauri 容器（9 个 Command，唯一前后端通道）
+└── tools/android-forensics/  Android 平台行为取证对照程序（不参与构建）
 ```
 
 **逻辑只有一份**：GUI 经 Tauri Commands、TUI 直接调用，都走同一个 `cping-core`。

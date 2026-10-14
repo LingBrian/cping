@@ -149,7 +149,8 @@ ActivityManager: Process com.cping.gui (pid xxx) has died: cch CRE   ← cached�
 **对照组（排除「工具链抓不到」的可能）**
 
 仅有「无 tombstone」还不够——必须证明这套工具**本来抓得到**。用 NDK clang 编了一个
-独立小程序（`analysis/forensic_probe.c`，不属于本仓库构建产物）在**同一台模拟器**上跑：
+独立小程序（`tools/android-forensics/`，不参与 cargo 构建，仅手工编译运行）
+在**同一台模拟器**上跑：
 
 ```c
 /* 在已 destroy 的互斥量上 lock —— 复刻 FORTIFY 那条日志的真实触发条件 */
