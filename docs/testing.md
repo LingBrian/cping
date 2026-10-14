@@ -501,13 +501,30 @@ Windows 上同一个用例（连确定关闭的端口）表现为超时，用 Py
    回归验证：合成目录树跑通四种场景——原生优先 / 三元组回落 / 显式 BIN_DIR 覆盖 /
    全都没有时以非 0 退出，并确认产出的 `SHA256SUMS.txt` 可 `sha256sum -c` 通过。
 
-### 这三个缺陷是怎么被发现的
+8. **Release workflow 的 Android 作业组装 APK 失败**（Rust 侧四个 ABI 都编过了）：
+   Gradle 报 `Value 'D:/Program Files/Android/jdk-17' given for org.gradle.java.home
+   Gradle property is invalid (Java home supplied is invalid)`。
+   根因是 `apps/cping-gui/src-tauri/gen/android/gradle.properties` 里提交了
+   **本机专属的绝对路径**（本机默认 JDK 26、AGP 不支持，所以当初写死了 JDK 17 的路径），
+   而这条属性会覆盖 `setup-java` 设好的 `JAVA_HOME`。
+   修法：移除该属性，改用 `JAVA_HOME` 表达；CI 由 `actions/setup-java` 提供，
+   本地由 `scripts/build-all.cmd` 提供。
+9. **机制性收口**：上面第 5、6、7、8 条里，第 5、6、8 条实质是**同一类**缺陷——
+   把「本机环境耦合配置」提交进了仓库，于是本地全绿、CI 全红。已新增
+   `scripts/check-portability.sh` 静态拦住（盘符绝对路径 / cargo 离线开关 /
+   vendored 源替换），并接进 CI 的独立 job 与 `release.yml` 的 publish 阶段。
+   已用负向测试确认两类注入都能被拦下。
+
+### 这几个缺陷是怎么被发现的
 
 本地全绿、四平台产物也都出得来，但 `main` 与 `v2.0.0` 的 workflow 是红的。
-顺着日志读下去才挖出上面三条——**都是「只在别处复现」的类型**：
-一条依赖「冷缓存」，一条依赖「换行符转换」，一条依赖「CI 里的 `--target` 落点」。
-第三条尤其典型：**同一个脚本被两个 job 用不同方式调用**，契约不一致就会在
-「构建成功、打包失败」这种最反直觉的地方炸出来。修复后在 CRLF 条件下重跑了完整
+顺着日志读下去才挖出上面几条——**都是「只在别处复现」的类型**：
+一条依赖「冷缓存」，一条依赖「换行符转换」，一条依赖「CI 里的 `--target` 落点」，
+一条依赖「CI 是 Linux 而本机是 Windows」。
+第 7 条尤其典型：**同一个脚本被两个 job 用不同方式调用**，
+契约不一致就会在「构建成功、打包失败」这种最反直觉的地方炸出来。
+它们共同的形状是：**配置写成了「本机恰好成立」，而不是「任何机器都成立」**——
+这也是为什么要加第 9 条那个静态守卫，靠人记不住。修复后在 CRLF 条件下重跑了完整
 `cping-core` 套件（236 passed / 0 failed）复现验证，再还原为 LF 并逐字节比对备份。
 
 ## 尚未完成的验证

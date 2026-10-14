@@ -75,6 +75,26 @@
   - 验证：合成目录树跑通四种场景（原生优先 / 三元组回落 / 显式覆盖 /
     全部缺失时非 0 退出），产出清单可 `sha256sum -c` 通过
 
+- **Release workflow 的 Android 作业组装 APK 失败**：Rust 侧四个 ABI 都编过了，
+  Gradle 报 `Value 'D:/Program Files/Android/jdk-17' given for org.gradle.java.home
+  Gradle property is invalid (Java home supplied is invalid)`
+  - 根因：`apps/cping-gui/src-tauri/gen/android/gradle.properties` 里提交了
+    **本机专属的绝对路径** `org.gradle.java.home=D:/Program Files/Android/jdk-17`
+    （本机系统默认 JDK 26、AGP 不支持，所以当初写死了 JDK 17 的路径）。
+    CI 是 Linux，该路径不存在，而这条属性会**覆盖** `setup-java` 设好的 `JAVA_HOME`
+  - 修法：移除该属性，改用 `JAVA_HOME` 表达（CI 由 `actions/setup-java` 自动设置；
+    本地由 `scripts/build-all.cmd` 设置），原位置留注释说明「不要提交绝对路径」
+
+### 新增
+
+- **可移植性守卫 `scripts/check-portability.sh`**：静态检查构建相关文件里
+  有没有「本机环境耦合配置」，并接入 CI 的独立 job 与 `release.yml` 的 publish 阶段。
+  拦住三类：`Cargo.toml` / `*.toml` / workflow / `package.sh|ps1` / `gradle.properties` /
+  `build.gradle.kts` / `tauri.conf.json` 里的 **Windows 盘符绝对路径**、
+  `.cargo/config.toml` 里的 **`offline = true`** 与 **`replace-with = "vendored-sources"`**。
+  动因：v2.0.0 发布期间连踩三次同一类缺陷（本地全绿、CI 全红），
+  光靠人工检查挡不住。已用负向测试确认两类注入都会被拦下。
+
 ## [2.0.0] - 2026-10-15
 
 主版本。把 v1.1.2 之后的五个阶段（M8–M12）一次交付：持续监控、探测扩展、

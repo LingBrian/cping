@@ -278,6 +278,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: 可移植性守卫
+        # ci.yml 只在分支 push 时触发，tag 推送不经过它；发布这一步单独跑一遍，
+        # 保证不会把「本机环境耦合配置」连同正式 Release 一起发出去。
+        run: bash scripts/check-portability.sh
+
       - name: 解析版本号
         id: ver
         run: |

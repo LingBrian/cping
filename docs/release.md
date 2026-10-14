@@ -216,6 +216,21 @@ apksigner sign --ks ~/.android/debug.keystore \
 2. **OUI 数据表 CRLF** → Windows 全新克隆下厂商名带尾随 `\r`，5 条测试挂掉。
    修法：`find()` 出口剥掉 `\r` + `.gitattributes` 把
    `cping-core/src/data/*.txt` 钉死为 LF。
+3. **`scripts/package.sh` 只找 `target/release/`** → Linux 作业用
+   `--target x86_64-unknown-linux-gnu` 构建，产物在 `target/<triple>/release/`，
+   于是「构建成功、打包报缺二进制」。修法：脚本支持 `BIN_DIR` 覆盖 + 自动回落，
+   workflow 显式传入。
+4. **`gradle.properties` 里提交了 `org.gradle.java.home=D:/Program Files/Android/jdk-17`**
+   → CI 是 Linux，该路径不存在，且这条属性会**覆盖** `setup-java` 设好的 `JAVA_HOME`，
+   Android 作业在 Gradle 组装阶段失败。修法：移除该属性，改用 `JAVA_HOME`
+   （CI 由 `actions/setup-java` 提供，本地由 `scripts/build-all.cmd` 提供）。
+
+这四条里第 1、2、4 条同属一类：**把「本机恰好成立」的配置当成了「任何机器都成立」**。
+为此新增了静态守卫，发布前会自动跑：
+
+```bash
+bash scripts/check-portability.sh     # 也接进了 CI 与 release.yml 的 publish 阶段
+```
 
 修完后 CI 五个任务（core / gui frontend / gui shell / windows / android）**首次全绿**，
 测试数 276。发布前请确认这条：
