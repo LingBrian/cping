@@ -344,12 +344,11 @@ fn slow_backend_respects_timeout_budget() {
 
 #[test]
 fn stats_from_results_with_total_accounts_pending() {
-    let results = vec![cping_core::ProbeResult {
-        index: 0,
-        ip: Ipv4Addr::new(10, 0, 0, 1),
-        mac: None,
-        status: ProbeStatus::Online { rtt_ms: 5 },
-    }];
+    let results = vec![cping_core::ProbeResult::new(
+        0,
+        Ipv4Addr::new(10, 0, 0, 1),
+        ProbeStatus::Online { rtt_ms: 5 },
+    )];
     let stats = ScanStats::from_results_with_total(&results, 10);
     assert_eq!(stats.total, 10);
     assert_eq!(stats.completed, 1);

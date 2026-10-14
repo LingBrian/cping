@@ -82,6 +82,8 @@ pub enum CoreError {
     InvalidConfig(String),
     /// 导出失败。
     Export(String),
+    /// 扫描快照读写/解析失败。
+    Snapshot(String),
     /// 能力缺失。
     Unsupported(String),
 }
@@ -95,6 +97,7 @@ impl fmt::Display for CoreError {
             }
             CoreError::InvalidConfig(msg) => write!(f, "配置无效：{msg}"),
             CoreError::Export(msg) => write!(f, "导出失败：{msg}"),
+            CoreError::Snapshot(msg) => write!(f, "快照不可用：{msg}"),
             CoreError::Unsupported(msg) => write!(f, "不支持的操作：{msg}"),
         }
     }

@@ -2,7 +2,8 @@
 
 use cping_core::classify::Thresholds;
 use cping_core::export::{
-    csv_escape, display_width, export, export_csv, export_txt, ExportFormat, ExportMeta,
+    csv_escape, display_width, export, export_csv, export_txt, truncate_display, ExportFormat,
+    ExportMeta,
 };
 use cping_core::result::{ProbeResult, ProbeStatus, ScanStats};
 use cping_core::{CoreError, Ipv4Prefix};
@@ -19,30 +20,23 @@ fn meta() -> ExportMeta {
 fn sample() -> Vec<ProbeResult> {
     vec![
         // 故意乱序，验证按 IP 数值排序
-        ProbeResult {
-            index: 2,
-            ip: Ipv4Addr::new(192, 168, 1, 3),
-            mac: Some("AA-BB-CC-DD-EE-FF".into()),
-            status: ProbeStatus::Online { rtt_ms: 250 },
-        },
-        ProbeResult {
-            index: 0,
-            ip: Ipv4Addr::new(192, 168, 1, 1),
-            mac: None,
-            status: ProbeStatus::Online { rtt_ms: 12 },
-        },
-        ProbeResult {
-            index: 1,
-            ip: Ipv4Addr::new(192, 168, 1, 2),
-            mac: None,
-            status: ProbeStatus::Timeout,
-        },
-        ProbeResult {
-            index: 3,
-            ip: Ipv4Addr::new(192, 168, 1, 10),
-            mac: None,
-            status: ProbeStatus::PermissionDenied,
-        },
+        ProbeResult::new(
+            2,
+            Ipv4Addr::new(192, 168, 1, 3),
+            ProbeStatus::Online { rtt_ms: 250 },
+        )
+        .with_target_info(Some("AA-BB-CC-DD-EE-FF".into()), None, None),
+        ProbeResult::new(
+            0,
+            Ipv4Addr::new(192, 168, 1, 1),
+            ProbeStatus::Online { rtt_ms: 12 },
+        ),
+        ProbeResult::new(1, Ipv4Addr::new(192, 168, 1, 2), ProbeStatus::Timeout),
+        ProbeResult::new(
+            3,
+            Ipv4Addr::new(192, 168, 1, 10),
+            ProbeStatus::PermissionDenied,
+        ),
     ]
 }
 
@@ -77,7 +71,13 @@ fn csv_header_is_exact() {
     let bytes = export_csv(&sample(), &meta()).unwrap();
     let text = String::from_utf8(bytes[3..].to_vec()).unwrap();
     let header = text.split("\r\n").next().unwrap();
-    assert_eq!(header, "扫描时间,IP地址,状态,RTT(ms),MAC地址,备注");
+    assert_eq!(
+        header, "扫描时间,IP地址,状态,RTT(ms),MAC地址,备注,厂商,主机名",
+        "M7 新列只能追加在末尾"
+    );
+    // 前 6 列必须与 M7 之前逐字节一致（旧脚本按列号解析仍然可用）
+    let legacy = header.split(',').take(6).collect::<Vec<_>>().join(",");
+    assert_eq!(legacy, "扫描时间,IP地址,状态,RTT(ms),MAC地址,备注");
 }
 
 #[test]
@@ -125,12 +125,12 @@ fn csv_records_error_status_text() {
 
 #[test]
 fn csv_escapes_mac_with_quotes_if_needed() {
-    let results = vec![ProbeResult {
-        index: 0,
-        ip: Ipv4Addr::new(10, 0, 0, 1),
-        mac: Some("AA,BB".into()),
-        status: ProbeStatus::Online { rtt_ms: 5 },
-    }];
+    let results = vec![ProbeResult::new(
+        0,
+        Ipv4Addr::new(10, 0, 0, 1),
+        ProbeStatus::Online { rtt_ms: 5 },
+    )
+    .with_target_info(Some("AA,BB".into()), None, None)];
     let bytes = export_csv(&results, &meta()).unwrap();
     let text = String::from_utf8(bytes[3..].to_vec()).unwrap();
     assert!(
@@ -217,11 +217,130 @@ fn stats_are_consistent_with_results() {
 fn empty_export_is_still_valid() {
     let bytes = export_csv(&[], &meta()).unwrap();
     let text = String::from_utf8(bytes[3..].to_vec()).unwrap();
-    assert_eq!(text, "扫描时间,IP地址,状态,RTT(ms),MAC地址,备注\r\n");
+    assert_eq!(
+        text,
+        "扫描时间,IP地址,状态,RTT(ms),MAC地址,备注,厂商,主机名\r\n"
+    );
 
     let txt = export_txt(&[], &meta(), &Thresholds::default()).unwrap();
     let t = String::from_utf8(txt).unwrap();
     assert!(t.contains("目标总数 : 0"));
+}
+
+/// M7 向后兼容：没有新信息时，前 6 列的内容与 M7 之前必须逐字节一致。
+#[test]
+fn legacy_columns_are_byte_identical_when_no_new_info() {
+    let bytes = export_csv(&sample(), &meta()).unwrap();
+    let text = String::from_utf8(bytes[3..].to_vec()).unwrap();
+    let mut lines = text.split("\r\n").filter(|l| !l.is_empty());
+    lines.next(); // 表头已单独校验
+    let mut checked = 0;
+    for line in lines {
+        let cols: Vec<&str> = line.split(',').collect();
+        assert_eq!(cols.len(), 8, "新列必须存在（可为空），不能缺列: {line}");
+        assert_eq!(cols[0], "2026-10-13 21:40:00");
+        // 后两列在本样例里没有任何信息 → 必须是空串而不是占位文本
+        assert_eq!(cols[6], "", "无厂商信息时必须留空: {line}");
+        assert_eq!(cols[7], "", "无主机名信息时必须留空: {line}");
+        checked += 1;
+    }
+    assert_eq!(checked, 4);
+}
+
+/// M7 新列：有信息时正常写出，且遵守 RFC 4180 转义。
+#[test]
+fn new_columns_are_written_and_escaped() {
+    let results = vec![
+        ProbeResult::new(
+            0,
+            Ipv4Addr::new(10, 0, 0, 1),
+            ProbeStatus::Online { rtt_ms: 4 },
+        )
+        .with_target_info(
+            Some("00:00:0C:11:22:33".into()),
+            Some("Cisco Systems, Inc".into()),
+            Some("router.example.com".into()),
+        ),
+        // 厂商名里带逗号 → 必须加引号，否则列会错位
+        ProbeResult::new(
+            1,
+            Ipv4Addr::new(10, 0, 0, 2),
+            ProbeStatus::Online { rtt_ms: 9 },
+        )
+        .with_target_info(None, Some("Acme, Inc.".into()), None),
+    ];
+    let bytes = export_csv(&results, &meta()).unwrap();
+    let text = String::from_utf8(bytes[3..].to_vec()).unwrap();
+    let rows: Vec<&str> = text.split("\r\n").filter(|l| !l.is_empty()).collect();
+
+    assert!(
+        rows[1].ends_with("\"Cisco Systems, Inc\",router.example.com"),
+        "含逗号的厂商名会被加引号，主机名紧随其后: {}",
+        rows[1]
+    );
+    assert!(
+        rows[2].ends_with(",\"Acme, Inc.\","),
+        "含逗号的厂商名必须被引号包裹: {}",
+        rows[2]
+    );
+}
+
+/// TXT 是定宽表：超长厂商名必须按显示宽度截断，否则后续列全部错位。
+#[test]
+fn txt_truncates_overlong_columns_and_keeps_alignment() {
+    let long_vendor = "Some Extremely Long Vendor Name That Cannot Fit At All";
+    let results = vec![
+        ProbeResult::new(
+            0,
+            Ipv4Addr::new(10, 0, 0, 1),
+            ProbeStatus::Online { rtt_ms: 4 },
+        )
+        .with_target_info(
+            Some("00:00:0C:11:22:33".into()),
+            Some(long_vendor.into()),
+            None,
+        ),
+        ProbeResult::new(
+            1,
+            Ipv4Addr::new(10, 0, 0, 2),
+            ProbeStatus::Online { rtt_ms: 9 },
+        ),
+    ];
+    let txt = export_txt(&results, &meta(), &Thresholds::default()).unwrap();
+    let text = String::from_utf8(txt).unwrap();
+
+    assert!(!text.contains(long_vendor), "超长厂商名应被截断");
+    assert!(
+        text.contains("Some Extremely Long V…"),
+        "截断结果应是「按显示宽度取满 21 列 + 省略号」: {text}"
+    );
+
+    // 定宽表的判据：所有数据行的显示宽度必须完全一致。
+    // （不能用「最后一个空格」来定位列——厂商名自身就含空格。）
+    let rows: Vec<&str> = text.lines().filter(|l| l.starts_with("10.0.0.")).collect();
+    assert_eq!(rows.len(), 2);
+    let widths: Vec<usize> = rows.iter().map(|r| display_width(r)).collect();
+    assert_eq!(
+        widths[0], widths[1],
+        "截断后两行的显示宽度必须一致，否则列会错位"
+    );
+    // 超长厂商名那行不得比正常行更长
+    assert!(widths[0] <= widths[1], "截断必须保证不超宽");
+}
+
+#[test]
+fn truncate_display_respects_width() {
+    assert_eq!(truncate_display("ABCDEF", 6), "ABCDEF");
+    assert_eq!(truncate_display("ABCDEF", 10), "ABCDEF");
+    assert_eq!(truncate_display("ABCDEF", 3), "AB…");
+    assert_eq!(display_width(&truncate_display("ABCDEF", 3)), 3);
+    // CJK 记 2 列
+    assert_eq!(truncate_display("中文中文", 5), "中文…");
+    assert_eq!(display_width(&truncate_display("中文中文", 5)), 5);
+    // 边界
+    assert_eq!(truncate_display("ABC", 0), "");
+    assert_eq!(truncate_display("", 5), "");
+    assert_eq!(truncate_display("AB", 3), "AB");
 }
 
 #[test]
@@ -234,12 +353,11 @@ fn display_width_counts_cjk_as_two() {
 #[test]
 fn prefix_display_roundtrip_in_export() {
     let p = Ipv4Prefix::new(192, 168, 1);
-    let results = vec![ProbeResult {
-        index: 0,
-        ip: p.with_host(1),
-        mac: None,
-        status: ProbeStatus::Online { rtt_ms: 3 },
-    }];
+    let results = vec![ProbeResult::new(
+        0,
+        p.with_host(1),
+        ProbeStatus::Online { rtt_ms: 3 },
+    )];
     let csv = export_csv(&results, &meta()).unwrap();
     let text = String::from_utf8(csv[3..].to_vec()).unwrap();
     assert!(text.contains(&p.with_host(1).to_string()));

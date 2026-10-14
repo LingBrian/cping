@@ -186,6 +186,39 @@ impl Default for WindowsIcmpBackend {
     }
 }
 
+/// 初始化 WinSock（幂等）。
+///
+/// Windows 上任何 socket / `getnameinfo` 调用之前都必须先 `WSAStartup`，
+/// 因此把这件事集中在这里，ICMP 后端与主机名反查共用同一份状态与锁。
+#[cfg(windows)]
+pub fn ensure_winsock() -> Result<(), ProbeError> {
+    use std::sync::atomic::{AtomicI32, Ordering as O};
+    use std::sync::Mutex;
+    static STATE: AtomicI32 = AtomicI32::new(0); // 0=未初始化 1=成功 -1=失败
+    static LOCK: Mutex<()> = Mutex::new(());
+
+    match STATE.load(O::SeqCst) {
+        1 => return Ok(()),
+        -1 => return Err(ProbeError::internal("WSAStartup 此前已失败")),
+        _ => {}
+    }
+    let _guard = LOCK.lock().expect("wsa lock");
+    match STATE.load(O::SeqCst) {
+        1 => return Ok(()),
+        -1 => return Err(ProbeError::internal("WSAStartup 此前已失败")),
+        _ => {}
+    }
+    let mut data = [0u8; 512]; // WSADATA 约 400 字节
+    let rc = unsafe { win_ffi::WSAStartup(0x0202, data.as_mut_ptr()) };
+    if rc == 0 {
+        STATE.store(1, O::SeqCst);
+        Ok(())
+    } else {
+        STATE.store(-1, O::SeqCst);
+        Err(ProbeError::internal(format!("WSAStartup 返回 {rc}")))
+    }
+}
+
 #[cfg(windows)]
 impl WindowsIcmpBackend {
     pub fn new() -> Self {
@@ -198,31 +231,7 @@ impl WindowsIcmpBackend {
     }
 
     fn ensure_wsa() -> Result<(), ProbeError> {
-        use std::sync::atomic::{AtomicI32, Ordering as O};
-        use std::sync::Mutex;
-        static STATE: AtomicI32 = AtomicI32::new(0); // 0=未初始化 1=成功 -1=失败
-        static LOCK: Mutex<()> = Mutex::new(());
-
-        match STATE.load(O::SeqCst) {
-            1 => return Ok(()),
-            -1 => return Err(ProbeError::internal("WSAStartup 此前已失败")),
-            _ => {}
-        }
-        let _guard = LOCK.lock().expect("wsa lock");
-        match STATE.load(O::SeqCst) {
-            1 => return Ok(()),
-            -1 => return Err(ProbeError::internal("WSAStartup 此前已失败")),
-            _ => {}
-        }
-        let mut data = [0u8; 512]; // WSADATA 约 400 字节
-        let rc = unsafe { win_ffi::WSAStartup(0x0202, data.as_mut_ptr()) };
-        if rc == 0 {
-            STATE.store(1, O::SeqCst);
-            Ok(())
-        } else {
-            STATE.store(-1, O::SeqCst);
-            Err(ProbeError::internal(format!("WSAStartup 返回 {rc}")))
-        }
+        ensure_winsock()
     }
 
     /// 用给定套接字类型做一次探测；失败时返回可区分的错误。

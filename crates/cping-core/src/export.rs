@@ -2,9 +2,16 @@
 //!
 //! 格式约定（新项目定义，非原版复刻）：
 //! - CSV：`UTF-8 with BOM` + `CRLF` + RFC 4180 转义
-//! - 字段：`扫描时间, IP地址, 状态, RTT(ms), MAC地址, 备注`
+//! - 字段：`扫描时间, IP地址, 状态, RTT(ms), MAC地址, 备注, 厂商, 主机名`
 //! - 排序：按 IPv4 数值升序
 //! - 空字段写空串（不回填 `N/A` 之外的占位）
+//!
+//! ## 向后兼容规则（M7 起）
+//!
+//! 新增的 `厂商`、`主机名` **只能追加在末尾**，已有列的顺序与内容不得改动。
+//! 这样按固定列号解析旧版 CSV 的脚本仍然可用；而 TXT 是定宽表，新列若超宽
+//! 会破坏对齐，因此 TXT 侧对超长内容做**显示宽度截断**（见 [`truncate_display`]），
+//! CSV 侧则完整保留原文。
 
 use crate::classify::{classify_status, Thresholds};
 use crate::error::{CoreError, CoreResult};
@@ -12,7 +19,16 @@ use crate::result::{ProbeResult, ScanStats};
 use std::net::Ipv4Addr;
 
 pub const CSV_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
-pub const CSV_HEADER: [&str; 6] = ["扫描时间", "IP地址", "状态", "RTT(ms)", "MAC地址", "备注"];
+pub const CSV_HEADER: [&str; 8] = [
+    "扫描时间",
+    "IP地址",
+    "状态",
+    "RTT(ms)",
+    "MAC地址",
+    "备注",
+    "厂商",
+    "主机名",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportFormat {
@@ -107,6 +123,9 @@ pub fn export_csv(results: &[ProbeResult], meta: &ExportMeta) -> CoreResult<Vec<
             rtt,
             mac,
             note,
+            // M7 追加列：必须留在末尾
+            r.vendor.clone().unwrap_or_default(),
+            r.hostname.clone().unwrap_or_default(),
         ];
         let line: Vec<String> = fields.iter().map(|f| csv_escape(f)).collect();
         text.push_str(&line.join(","));
@@ -147,15 +166,23 @@ pub fn export_txt(
     const W_STATUS: usize = 12;
     const W_RTT: usize = 9;
     const W_MAC: usize = 19;
+    const W_VENDOR: usize = 22;
+    const W_HOST: usize = 18;
+    /// 尾部「类别」列宽度（最长为「无回应」= 6 列）。
+    const W_CLASS: usize = 8;
+    const TOTAL_W: usize = W_IP + W_STATUS + W_RTT + W_MAC + W_VENDOR + W_HOST + W_CLASS;
 
     out.push_str(&format!(
-        "{}{}{}{}类别\n",
+        "{}{}{}{}{}{}{}\n",
         pad("IP地址", W_IP),
         pad("状态", W_STATUS),
         pad("RTT(ms)", W_RTT),
         pad("MAC地址", W_MAC),
+        pad("厂商", W_VENDOR),
+        pad("主机名", W_HOST),
+        "类别",
     ));
-    out.push_str(&"-".repeat(70));
+    out.push_str(&"-".repeat(TOTAL_W));
     out.push('\n');
 
     for r in &sorted {
@@ -165,11 +192,14 @@ pub fn export_txt(
             .map(|c| c.label_zh())
             .unwrap_or("-");
         out.push_str(&format!(
-            "{}{}{}{}{}\n",
+            "{}{}{}{}{}{}{}\n",
             pad(&r.ip.to_string(), W_IP),
             pad(r.status.label_zh(), W_STATUS),
             pad(&rtt, W_RTT),
             pad(&mac, W_MAC),
+            // 定宽表里超长内容必须截断，否则整张表的列会错位
+            pad(&truncate_display(r.vendor_or_empty(), W_VENDOR), W_VENDOR),
+            pad(&truncate_display(r.hostname_or_empty(), W_HOST), W_HOST),
             class,
         ));
     }
@@ -208,24 +238,51 @@ pub fn export_to_path(
 // ---------------------------------------------------------------------------
 
 pub fn display_width(s: &str) -> usize {
-    s.chars()
-        .map(|c| {
-            let cp = c as u32;
-            // 粗略覆盖 CJK / 全角区间
-            if (0x1100..=0x115F).contains(&cp)
-                || (0x2E80..=0xA4CF).contains(&cp)
-                || (0xAC00..=0xD7A3).contains(&cp)
-                || (0xF900..=0xFAFF).contains(&cp)
-                || (0xFE30..=0xFE6F).contains(&cp)
-                || (0xFF00..=0xFF60).contains(&cp)
-                || (0xFFE0..=0xFFE6).contains(&cp)
-            {
-                2
-            } else {
-                1
-            }
-        })
-        .sum()
+    s.chars().map(char_width).sum()
+}
+
+/// 单个字符的显示宽度（CJK / 全角记 2 列）。
+pub fn char_width(c: char) -> usize {
+    let cp = c as u32;
+    // 粗略覆盖 CJK / 全角区间
+    if (0x1100..=0x115F).contains(&cp)
+        || (0x2E80..=0xA4CF).contains(&cp)
+        || (0xAC00..=0xD7A3).contains(&cp)
+        || (0xF900..=0xFAFF).contains(&cp)
+        || (0xFE30..=0xFE6F).contains(&cp)
+        || (0xFF00..=0xFF60).contains(&cp)
+        || (0xFFE0..=0xFFE6).contains(&cp)
+    {
+        2
+    } else {
+        1
+    }
+}
+
+/// 按显示宽度截断，超宽时以 `…` 结尾，保证结果宽度 **不超过** `width`。
+///
+/// 定宽文本表（TXT 导出）必须用它：厂商名最长可达 60+ 字符，直接写入会把
+/// 后面所有列挤走，整张表就失去可读性了。
+pub fn truncate_display(s: &str, width: usize) -> String {
+    if display_width(s) <= width {
+        return s.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let budget = width - 1; // 留一列给省略号
+    let mut out = String::with_capacity(s.len());
+    let mut used = 0usize;
+    for ch in s.chars() {
+        let w = char_width(ch);
+        if used + w > budget {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out.push('…');
+    out
 }
 
 pub fn pad(s: &str, width: usize) -> String {

@@ -84,6 +84,10 @@ impl ProbeStatus {
 }
 
 /// 单个目标的探测结果。
+///
+/// M7 起携带三项**目标信息**（全部可选）：`mac` / `vendor` / `hostname`。
+/// 三者的取值规则统一为「拿不到就 `None`」——**任何一项都不得用占位文本顶替**，
+/// 因为界面无法区分「真的叫 unknown」和「没查到」。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeResult {
     /// 目标在任务内的下标（0 基）。
@@ -91,6 +95,10 @@ pub struct ProbeResult {
     pub ip: Ipv4Addr,
     /// MAC 地址；取不到时为 `None` —— **不得伪造**。
     pub mac: Option<String>,
+    /// 由 MAC 前缀查到的厂商名（IEEE 注册表）；本地管理地址或未注册前缀为 `None`。
+    pub vendor: Option<String>,
+    /// DNS 反查得到的主机名；只在用户按需触发时才有值。
+    pub hostname: Option<String>,
     pub status: ProbeStatus,
 }
 
@@ -100,8 +108,38 @@ impl ProbeResult {
             index,
             ip,
             mac: None,
+            vendor: None,
+            hostname: None,
             status,
         }
+    }
+
+    /// 一次性设置三项目标信息（避免调用方逐个改字段时漏项）。
+    pub fn with_target_info(
+        mut self,
+        mac: Option<String>,
+        vendor: Option<String>,
+        hostname: Option<String>,
+    ) -> Self {
+        self.mac = mac;
+        self.vendor = vendor;
+        self.hostname = hostname;
+        self
+    }
+
+    /// 展示用 MAC（空串表示没有，而不是 `None` 字面量）。
+    pub fn mac_or_empty(&self) -> &str {
+        self.mac.as_deref().unwrap_or("")
+    }
+
+    /// 展示用厂商名。
+    pub fn vendor_or_empty(&self) -> &str {
+        self.vendor.as_deref().unwrap_or("")
+    }
+
+    /// 展示用主机名。
+    pub fn hostname_or_empty(&self) -> &str {
+        self.hostname.as_deref().unwrap_or("")
     }
 }
 

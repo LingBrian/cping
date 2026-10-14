@@ -218,12 +218,10 @@ fn worker_loop(backend: Arc<dyn ProbeBackend>, shared: Arc<Shared>) {
             Err(err) => (status_from_error(err), None),
         };
 
-        let result = ProbeResult {
-            index,
-            ip,
-            mac,
-            status,
-        };
+        // 用构造函数 + 赋值而不是结构体字面量：M7 之后 ProbeResult 会继续长字段，
+        // 这样新增字段时这里无需跟着改。
+        let mut result = ProbeResult::new(index, ip, status);
+        result.mac = mac;
 
         {
             let mut slots = shared.results.lock().expect("results poisoned");

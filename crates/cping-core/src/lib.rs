@@ -11,13 +11,18 @@
 
 pub mod classify;
 pub mod config;
+pub mod enrich;
 pub mod error;
 pub mod export;
+pub mod hostname;
 pub mod local_ip;
 pub mod native;
+pub mod neighbor;
+pub mod oui;
 pub mod probe;
 pub mod result;
 pub mod scheduler;
+pub mod snapshot;
 pub mod target;
 
 pub use classify::{classify_rtt, classify_status, LatencyClass, ResultClass, Thresholds};
@@ -25,11 +30,20 @@ pub use config::{
     AppConfig, ColorConfig, ProbeConfig, ViewMode, DEFAULT_CONCURRENCY, DEFAULT_TIMEOUT_MS,
     MAX_CONCURRENCY, MAX_TIMEOUT_MS,
 };
+pub use enrich::{
+    apply_neighbors, enrich_with_mac_and_vendor, fill_vendors_from_mac, lookup_hostname,
+    EnrichReport,
+};
 pub use error::{CoreError, CoreResult, ProbeError};
 pub use export::{
     csv_escape, export, export_csv, export_to_path, export_txt, ExportFormat, ExportMeta,
 };
+pub use hostname::{
+    normalize_ptr_name, reverse_lookup, reverse_lookup_default, DEFAULT_TIMEOUT as HOSTNAME_TIMEOUT,
+};
 pub use local_ip::{LocalAddress, LocalAddressProvider};
+#[cfg(windows)]
+pub use native::ensure_winsock;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub use native::PosixIcmpBackend;
 #[cfg(windows)]
@@ -39,12 +53,18 @@ pub use native::{
     platform_icmp_backend, verify_checksum, TcpConnectBackend, DEFAULT_PAYLOAD_LEN,
     ICMP_HEADER_LEN,
 };
+pub use neighbor::{mac_for, neighbor_table, parse_proc_net_arp, NeighborEntry};
+pub use oui::{entry_counts, mac_to_string, parse_mac, vendor_of, DATA_SOURCE};
 pub use probe::{
     MockBackend, MockPolicy, MockResponse, ProbeBackend, ProbeOutcome, RecordingBackend,
 };
 pub use result::{ProbeEvent, ProbeResult, ProbeStatus, ScanStats, TaskId};
 pub use scheduler::{
     next_task_id, status_from_error, CancelToken, ProbeScheduler, RunOutcome, SchedulerHandle,
+};
+pub use snapshot::{
+    load_from_path, save_to_path, Snapshot, FORMAT_VERSION as SNAPSHOT_VERSION,
+    SIGNATURE as SNAPSHOT_SIGNATURE,
 };
 pub use target::{
     build_targets, cell_index, cell_of_host, cell_of_ip, cell_position, matrix_slots, parse_prefix,
