@@ -60,12 +60,12 @@ const canStop = computed(() => store.running)
       {{ prefixError }}
     </div>
 
-    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px">
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px">
       <NButton type="primary" :disabled="!canStart" @click="onStart">开始探测</NButton>
       <NButton :disabled="!canStop" @click="onStop">停止</NButton>
     </div>
 
-    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px">
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px">
       <div>
         <label class="cping-label">超时 (ms)</label>
         <NInputNumber v-model:value="store.timeoutMs" :min="50" :max="60000" size="small" />

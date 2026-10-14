@@ -225,6 +225,41 @@ Kotlin 增量编译用 `File.relativeTo()` 算相对路径，跨盘符直接抛�
 每个 Kotlin module 都要回退到「无 daemon 编译」，又慢又刷屏。
 修复：`gradle.properties` 加 `kotlin.incremental=false`。
 
+## 布局修复：桌面版左栏过高、底部状态栏被挤出（用户反馈）
+
+**现象**（`analysis/gui_before.png`）：窗口右侧出现**整页滚动条**，
+左栏底部的「保存结果（CSV / TXT）」按钮和最下方的状态栏都要往下滚才看得到。
+
+**两个真实根因，都在 CSS：**
+
+1. **Grid 的 `1fr` 陷阱**：`grid-template-rows: 1fr auto` 里的 `1fr`
+   实际等价于 `minmax(auto, 1fr)` —— 第一行的**最小高度是内容高度**，
+   左栏内容一多就把行撑高，整页超过视口。
+   修复：`grid-template-rows: minmax(0, 1fr) auto` + `.desktop__side { min-height: 0 }`。
+2. **高度链断裂**：`#app` 与 `.desktop` 之间隔着 naive-ui 的
+   `n-config-provider` / `n-message-provider` 两层 div，它们没有高度，
+   `.desktop` 的 `height: 100%` 因此解析为 `auto`（父容器高度未定义）。
+   修复：给两层 provider 都加 `class="app-shell"`，CSS 里 `height: 100%`。
+
+**同时把左栏压矮**（否则内容本身仍超过可用高度）：
+
+| 位置 | 改动 |
+| --- | --- |
+| `.desktop` | 内边距 12→10，列宽 288→280，行距 12→10 |
+| `.desktop__side` | 间距 10→8；`.desktop__side .cping-panel` 内边距 12→`9px 10px` |
+| `ColorSettings.vue` | 色块 42×26→34×20，行距 6→4，提示语压成一行 |
+| `PrefixForm.vue` / `ProgressSummary.vue` | 各处 margin 12/10/6 → 8/8/4 |
+| `DesktopLayout.vue` | 导出按钮 margin 10→8；「上次导出」改单行省略号 |
+
+**验证**（`analysis/gui_final_680.png`、`analysis/gui_final_560.png`）：
+
+- 1016×680（默认）：左栏五个面板 + 保存按钮 + 底部状态栏**全部可见，零滚动**。
+- 1016×560（人为压矮）：左栏出现**自己的**内部滚动条，
+  状态栏仍然固定在底部完整可见 —— 降级行为正确。
+
+> 顺带说明：截图最底边那条模糊文字是 DWM 不可见边框外的**背后窗口**透出来，
+> 不是应用内容（GetWindowRect 含 ~7px 不可见边距）。
+
 ### 仍未验证（M6 明确未覆盖）
 
 - **Android 真机全流程**：安装、启动、触控、停止、前后台切换、文件保存、网络变化、竖横屏

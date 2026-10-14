@@ -51,10 +51,18 @@ async function onExport() {
           <span style="font-size: 13px">仅显示在线</span>
           <NSwitch v-model:value="store.hideOffline" size="small" />
         </div>
-        <NButton style="width: 100%; margin-top: 10px" @click="onExport">保存结果（CSV / TXT）</NButton>
+        <NButton style="width: 100%; margin-top: 8px" @click="onExport">保存结果（CSV / TXT）</NButton>
         <div
           v-if="store.lastExport"
-          style="font-size: 11px; color: #6b7280; margin-top: 6px; word-break: break-all"
+          style="
+            font-size: 11px;
+            color: #6b7280;
+            margin-top: 4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+          "
+          :title="store.lastExport"
         >
           上次导出：{{ store.lastExport }}
         </div>

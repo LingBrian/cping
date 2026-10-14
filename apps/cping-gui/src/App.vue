@@ -36,8 +36,15 @@ onMounted(async () => {
 </script>
 
 <template>
-  <n-config-provider :locale="zhCN" :date-locale="dateZhCN" :theme-overrides="themeOverrides">
-    <n-message-provider>
+  <!-- 两层 provider 都要撑满高度，否则 .desktop 的 height:100% 解析为 auto，
+       窗口一矮整页就会滚动、底部状态栏被挤出可视区 -->
+  <n-config-provider
+    class="app-shell"
+    :locale="zhCN"
+    :date-locale="dateZhCN"
+    :theme-overrides="themeOverrides"
+  >
+    <n-message-provider class="app-shell">
       <MobileLayout v-if="isMobile" />
       <DesktopLayout v-else />
     </n-message-provider>

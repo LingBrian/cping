@@ -22,6 +22,12 @@ body,
   -webkit-text-size-adjust: 100%;
 }
 
+/* 高度链不能断：#app 与 .desktop 之间隔着 naive-ui 的两层 provider div，
+   不撑满的话 .desktop 的 height:100% 会解析成 auto，整页随内容增高而滚动。 */
+.app-shell {
+  height: 100%;
+}
+
 button {
   font: inherit;
 }
@@ -47,18 +53,29 @@ button {
 /* ---------- 桌面布局 ---------- */
 .desktop {
   display: grid;
-  grid-template-columns: 288px 1fr;
-  grid-template-rows: 1fr auto;
-  gap: 12px;
-  padding: 12px;
+  grid-template-columns: 280px 1fr;
+  /* 关键：必须用 minmax(0, 1fr)。
+     裸写 1fr 等价于 minmax(auto, 1fr)，左栏内容会把第一行撑高，
+     整页出现滚动条，底部状态栏被挤出可视区。 */
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 10px;
+  padding: 10px;
   height: 100%;
 }
 
 .desktop__side {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
+  /* 让侧栏自己滚动，而不是把整个页面撑高 */
+  min-height: 0;
   overflow-y: auto;
+}
+
+/* 侧栏里的面板统一收紧内边距，保证默认窗口高度下不用滚动就能看全 */
+.desktop__side .cping-panel {
+  padding: 9px 10px;
+  flex-shrink: 0;
 }
 
 .desktop__main {
