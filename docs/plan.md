@@ -482,7 +482,20 @@ CLI 模式不初始化终端 UI。
   Android 交叉编译检查，并断言核心依赖树只有一行）与
   `.github/workflows/release.yml`（打 tag 自动构建 Windows x64+x86 / Linux / Android 产物，
   合并校验和后创建 Release）。
-- 验收：打包脚本产出可解压可运行的包并实测冒烟；Windows x86 产物在 x64 系统上运行正常。
+- **实现时收敛的一处（v2.0.0 发布时才真正跑通）**：CI 与打包链路此前**从未绿过**，
+  被三个「本地看不出、CI 才炸」的缺陷挡住，全部在 `v2.0.0` 发行过程中定位并修掉：
+  1. 仓库内 `.cargo/config.toml` 硬编码 `[net] offline = true`（M1a 时期零依赖所以无害，
+     M11 引入 Tauri 壳、M12 引入异步调度后致命）；
+  2. `scripts/package.sh` 只看 `target/release/`，而 Linux 作业用 `--target <triple>`
+     构建、产物在 `target/<triple>/release/`——**同一个脚本被两个 job 用不同方式调用，
+     契约不一致**；
+  3. `gen/android/gradle.properties` 提交了本机专属的 JDK 绝对路径，
+     覆盖了 `setup-java` 设好的 `JAVA_HOME`。
+  为此新增 `scripts/check-portability.sh`（静态拦住盘符绝对路径 / cargo 离线开关 /
+  vendored 源替换），接进 CI 独立 job 与 release 的 publish 阶段。
+  详见 `docs/testing.md`「本轮抓出并修掉的真实缺陷」与 `docs/release.md` §8.4。
+- 验收：打包脚本产出可解压可运行的包并实测冒烟；Windows x86 产物在 x64 系统上运行正常；
+  CI 全部任务绿（2026-10-15 达成，含新增的 portability job）。
 
 ### M12 — v2.0.0 架构升级（主版本）
 
