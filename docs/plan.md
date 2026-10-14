@@ -30,12 +30,12 @@
 | **M0** | 现状检查、三份清单、环境体检 | `docs/reverse-findings.md`、`docs/plan.md` | ✅ 完成 |
 | **M0.5** | 动态复核 V1–V6 | `docs/reverse-findings.md` §5 + `analysis/m05*` | ✅ 完成（V1/V2/V3/V6 确证；V4/V5 未能确证） |
 | **M1a** | `cping-core` 纯离线部分 | `crates/cping-core` + 47 个测试 | ✅ 完成（fmt/clippy 零警告，47/47 通过） |
-| **M1b** | `cping-core` 调度：`ProbeBackend` + `MockBackend` + 并发/超时/取消/事件 | `probe.rs`、`scheduler.rs` | ⏳ 进行中 |
+| **M1b** | `cping-core` 调度：`ProbeBackend` + `MockBackend` + 并发/超时/取消/事件 | `probe.rs`、`scheduler.rs` | ✅ 完成（62 测试） |
 | **M2** | TUI（ratatui + crossterm），先接 MockBackend | `apps/cping-tui` | ✅ 完成（72 测试 + 真实控制台截图） |
 | **M3** | 桌面 GUI（Tauri 2 + Vue 3），先接 MockBackend | `apps/cping-gui` | ✅ 完成（构建 + 运行截图） |
-| **M4** | Android GUI（`MobileLayout.vue` + 平台保存 + 真机验证） | 同上 | **受 SDK/NDK 阻塞** |
-| **M5** | 真实 ICMP 后端分平台接入 | `probe` 后端实现 | 计划中 |
-| **M6** | 打包与发布文档 | `docs/platform-compatibility.md`、`docs/testing.md` | 计划中 |
+| **M4** | Android GUI（`MobileLayout.vue` + 平台保存 + 真机验证） | 同上 | ⚠️ 构建链路打通、APK 产出；**真机验证未做**（无设备） |
+| **M5** | 真实 ICMP 后端分平台接入 | `probe` 后端实现 | ✅ 完成（Windows 实测 255/255；Linux/Android 未实测） |
+| **M6** | 打包与发布文档 | `docs/platform-compatibility.md`、`docs/testing.md`、`docs/release.md` | ✅ 完成（APK ×2 + 文档；真机/签名/Linux 列为已知限制） |
 
 > M0.5 与 M1a 可并行；M1a 不依赖任何网络或平台能力，风险最低，故作为**第一阶段编码任务**。
 

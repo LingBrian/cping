@@ -73,9 +73,22 @@ cd apps/cping-gui && npm run tauri:android:build
 | M1b 调度 + 模拟后端 | ✅ 62 测试 |
 | M2 TUI | ✅ 72 测试 + 真实控制台截图验证 |
 | M3 桌面 GUI | ✅ 类型检查 + 构建 + **端到端点击验证**（255/255，在线 158） |
-| M4 Android GUI | 未开始（本机缺 Android SDK/NDK） |
-| M5 真实 ICMP | 未开始 |
-| M6 打包发布 | 未开始 |
+| M4 Android GUI | ⚠️ **APK 构建成功**（debug 已签名 / release 未签名，均通过 aapt2 校验）；**真机验证未做**（本机无设备） |
+| M5 真实 ICMP | ✅ Windows 实测通过（TUI 与 GUI 双端 255/255）；Linux/Android 未实测 |
+| M6 打包发布 | ✅ `docs/release.md`；产物见 `release/android/` |
+
+**测试总数：84**（`cargo test --workspace`，0 失败）。
+
+## 产物
+
+| 产物 | 路径 |
+| --- | --- |
+| Windows TUI | `target/release/cping-tui.exe` |
+| Windows GUI | `apps/cping-gui/src-tauri/target/release/cping-gui.exe` |
+| Android debug APK（可安装） | `release/android/app-arm64-v8a-debug.apk` |
+| Android release APK（未签名） | `release/android/app-arm64-v8a-release-unsigned.apk` |
+
+安装到设备：`adb install -r release/android/app-arm64-v8a-debug.apk`
 
 ## 构建环境注意事项（否则会踩坑）
 
@@ -86,10 +99,16 @@ cd apps/cping-gui && npm run tauri:android:build
 | npm 装得极慢/卡住 | 默认源响应慢 | 换 `--registry=https://registry.npmmirror.com` |
 | GUI 启动后显示「localhost 拒绝连接」 | debug 构建会去找 `devUrl` | 用 `cargo build --release`（已移除 `devUrl`，资源内嵌） |
 | `schemars` 编译失败（`E0107`） | `indexmap 1.x` 的 `std` feature 默认关闭 | 已在 `[dependencies]` 与 `[build-dependencies]` **两处**声明 `indexmap/std` |
+| Android：`.so` 校验报 *missing runtime symbols* | `lib.rs` 的 `run()` 缺 `#[cfg_attr(mobile, tauri::mobile_entry_point)]` | 已补上（见 `docs/testing.md` M6） |
+| Android：Kotlin 报 *different roots* | tauri-plugin 源码在 C 盘 registry、工程在 D 盘 | `gradle.properties` 设 `kotlin.incremental=false` |
+| Android：`compileSdk 37` 找不到 | 本机只装到 android-36 | `app/build.gradle.kts` 用 36 |
 
 ## 已知限制
 
-- **探测后端目前是 `MockBackend`**（模拟数据），真实 ICMP 在 M5 接入。
+- **Windows 已接真实 ICMP**（`windows-icmp`，普通权限可用）；
+  **Linux / Android 的真实探测能力未实测**，拿不到权限时按 `PermissionDenied` 如实上报，
+  不会把 TCP 连通性伪装成 ICMP 成功。
+- **Android 未真机验证**：本机 `adb devices` 为空，安装/启动/触控/前后台/保存都还没跑过。
 - 本机地址与 MAC 尚未接入平台枚举，界面显示「未知」，**不伪造**。
 - 目标范围默认 `.1`–`.255`（对齐原版）；`.0` 不参与。
 - 仅可用于你拥有或获授权管理的网络；并发与目标数均有上限。

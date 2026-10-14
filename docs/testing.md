@@ -12,6 +12,8 @@
 | M1b 调度 | ✅ | ✅ +15 = 62 | — |
 | M2 TUI | ✅ | ✅ +10 = 72 | ✅ 真实控制台截图验证 |
 | M3 桌面 GUI | ✅ | ✅ 类型检查 + 2701 模块构建 | ✅ 窗口创建 + 界面渲染 |
+| M4/M5 真实探测 | ✅ | ✅ +12 = 84 | ✅ **Windows 真实 ICMP**（TUI 与 GUI 双端 255/255） |
+| M6 Android 打包 | ✅ APK ×2 | ✅ 84（回归） | ⚠️ **静态校验通过，真机未验证**（无设备） |
 
 ## 统一检查命令
 
@@ -31,6 +33,12 @@ npm run build          # vite build
 # GUI 外壳
 cd apps/cping-gui/src-tauri
 cargo build
+
+# Android APK（需要 ANDROID_HOME / NDK_HOME / JDK17，见 docs/release.md §2）
+cd cping/apps/cping-gui
+set ANDROID_HOME=D:\Program Files\Android
+set NDK_HOME=D:\Program Files\Android\ndk\26.1.10909125
+npx tauri android build --apk --debug --target aarch64
 ```
 
 > **环境注意**：`cping/.cargo/config.toml` 设了 `[net] offline = true`。
@@ -146,12 +154,88 @@ release 构建即改为内嵌 `frontendDist`。
 | 端口监听被拒 | vite dev server `EACCES ::1:1420` | dev 模式不可用；改用 `cargo build --release` 内嵌 `dist` |
 | cargo registry 探测挂起 | `cargo build` 无输出并被 SIGTERM | `.cargo/config.toml` 设 `[net] offline = true`；需要下依赖时用 `CARGO_NET_OFFLINE=false cargo fetch` |
 | 批量删除保护 | `rm -rf` 超过 50 个目标被拦截 | 改用 `cargo clean -p`；构建时清理 `target` 需分批 |
+| Gradle 无法 exec `npm.cmd` | `BuildTask.kt` 里 `exec` 报 PATHEXT 解析失败 | 改为经 `cmd.exe /c` 调用 npm |
+| `compileSdk 37` 不存在 | AGP 报 platform 37 未安装 | 降到 36（AGP 会自动装 platform-36 / build-tools 36.0.0） |
+| Kotlin 增量缓存跨盘符 | `IllegalArgumentException: different roots` | `gradle.properties` 设 `kotlin.incremental=false` |
+| Rust 交叉编译增量目录锁 | `error deleting lock file ... os error 5`（非致命） | 忽略；只影响 `.rmeta` 复用，不影响产物 |
+
+## M4 / M5：真实 ICMP 后端（84 个测试）
+
+| 检查 | 命令 | 结果 |
+| --- | --- | --- |
+| 核心 + TUI 测试 | `cargo test --workspace` | ✅ **84 passed / 0 failed**（含 `native_icmp.rs` 12 项报文构造与校验测试） |
+| Windows 真实探测 | `cargo test -p cping-core --test native_icmp_real -- --ignored --nocapture` | ✅ `127.0.0.1` → 在线 rtt=0ms；`192.0.2.123` → Timeout 816ms |
+| TUI 真机全量扫描 | `cping-tui.exe` + 回环 `127.0.0.0/24` | ✅ **255/255 在线，0.03 s**（`analysis/tui_real_icmp.png`） |
+| GUI 真机全量扫描 | `cping-gui.exe` + 回环 | ✅ **255/255 在线**（`analysis/gui_real_after.png`） |
+| TCP 模式隔离 | `TcpConnectBackend::name()` | ✅ 返回 `tcp-connect`，与 `windows-icmp` 完全分离，不会冒充 ICMP 成功 |
+
+> **M5 的真实故障（值得记住）**：GUI 里 255 个 `ProbeEvent` 在 31 ms 内全部到达，
+> 前端的「立即 `refreshSnapshot()`」把它们**互相覆盖**，界面只剩最后一条。
+> 修复：在 `finished` / `cancelled` 事件到达时再 `resyncFromBackend()` 做一次全量对齐。
+
+## M6：Android 打包
+
+### 构建结果
+
+| 检查 | 命令 / 工具 | 结果 |
+| --- | --- | --- |
+| debug APK | `npx tauri android build --apk --debug --target aarch64` | ✅ 2 分 50 秒，产出 142 MB APK |
+| release APK | `npx tauri android build --apk --target aarch64` | ✅ 8 分 4 秒，12.7 MB（**未签名**） |
+| 元信息 | `aapt2 dump badging` | ✅ `com.cping.gui` / v0.1.0 / minSdk 24 / targetSdk 36 / `native-code: 'arm64-v8a'` |
+| 原生库 | `unzip -l` | ✅ `lib/arm64-v8a/libcping_gui_lib.so` |
+| 前端资源 | `unzip -l` | ✅ `assets/tauri.conf.json`（`dist` 已内嵌） |
+| 签名 | `apksigner verify --print-certs` | ✅ debug 变体：`CN=Android Debug`，SHA-256 `793d68…bfea` |
+| 设备安装 | `adb install` | ❌ **未执行**：`adb devices` 为空 |
+
+### M6 根因分析：APK 为什么一开始「根本出不来」
+
+第一次构建在 `:app:rustBuildArm64Debug` 失败，报：
+
+```
+failed to validate library: Library from .../libcping_gui_lib.so
+does not include required runtime symbols.
+This means you are likely missing the tauri::mobile_entry_point macro usage
+```
+
+**根因**（不是环境问题，是代码问题）：`src-tauri/src/lib.rs` 里 `run()` 虽然存在，
+但**没有加移动端入口标注**。Tauri CLI 在把 `.so` 交给 Gradle 之前会校验
+`Java_<包名>_..._run` 这类 JNI 符号是否存在，桌面构建不查、Android 必查。
+
+**修复**（一行）：
+
+```rust
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() { /* ... */ }
+```
+
+`mobile` cfg 由 `tauri-build` 仅在 android/ios 目标下发出，
+因此桌面端行为不变（`main.rs` 照旧直接调 `run()`）。
+
+### M6 的第二个坑：Kotlin 增量缓存跨盘符
+
+```
+Suppressed: java.lang.IllegalArgumentException:
+  this and base files have different roots:
+  C:\Users\...\.cargo\registry\...\DialogPlugin.kt  and
+  D:\Workspace\...\gen\android.
+```
+
+tauri-plugin 的 Kotlin 源码来自 **cargo registry（C 盘）**，而工程在 **D 盘**；
+Kotlin 增量编译用 `File.relativeTo()` 算相对路径，跨盘符直接抛异常 →
+每个 Kotlin module 都要回退到「无 daemon 编译」，又慢又刷屏。
+修复：`gradle.properties` 加 `kotlin.incremental=false`。
+
+### 仍未验证（M6 明确未覆盖）
+
+- **Android 真机全流程**：安装、启动、触控、停止、前后台切换、文件保存、网络变化、竖横屏
+- **Android ICMP 能力**：普通应用能否拿到 `SOCK_RAW`（需真机看 errno）
+- 释放版本未签名（`release` APK 需 keystore 才能安装）
 
 ## 尚未完成的验证
 
-- **Android 真机**：安装、启动、触控、停止、前后台切换、文件保存、网络变化、竖横屏与字体缩放
-- **真实 ICMP**：Windows / Linux / Android 三平台的真实能力与权限（当前仍是 `MockBackend`）
+- **Android 真机**：见上（本机无设备，`adb devices` 为空）
+- **Linux 平台**：`linux-icmp` 后端仅有代码级审查，未编译未实测（本机无 Linux/WSL）
 - GUI 交互实测：点击开始/停止、视图切换、离线过滤、颜色设置持久化、导出落盘
-  （界面已渲染，但自动化的鼠标点击验证尚未做）
+  （界面已渲染并跑通端到端探测，但**自动化鼠标点击**验证尚未做）
 - 终端 resize 的动态验证（`Resize` 事件路径已实现并有字符提示）
 - Ctrl+C 与退出时的终端恢复（已在 `main.rs` 用 panic hook + 正常路径双重处理，待人工确认）

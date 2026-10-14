@@ -15,6 +15,12 @@ dist/
 *.log
 *.tmp
 
+# Kotlin/Gradle 会话临时文件（构建产生，不应入库）
+**/.kotlin/
+
+# 归集好的发布产物（体积大，不入库；由构建脚本生成）
+release/
+
 # 编辑器
 .vscode/
 .idea/

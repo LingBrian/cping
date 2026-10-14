@@ -7,6 +7,10 @@ mod commands;
 
 use commands::AppState;
 
+// 桌面端由 `main.rs` 直接调用 `run()`；
+// Android/iOS 下必须由该宏生成 JNI 入口符号（`Java_..._run`），
+// 否则 Tauri CLI 会在校验 .so 时报「does not include required runtime symbols」。
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
