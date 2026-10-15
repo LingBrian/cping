@@ -421,12 +421,20 @@ jobs:
         # 而下面的 find -maxdepth 1 与 files: dist/* 都只看顶层，产物会
         # **静默缺席且不报错**（v2.7.0 第一次发布时 deb / AppImage 就这么
         # 消失在 deb/、appimage/ 子目录里）。这里把它们移到顶层；
-        # 重名直接失败，绝不悄悄覆盖。
+        # 重名直接失败，绝不悄悄覆盖——唯一的例外是各 job 自带的局部
+        # SHA256SUMS.txt，它在下一步会被删除并统一重算，直接丢弃。
         run: |
           set -euo pipefail
           cd dist
           while IFS= read -r -d '' f; do
             base="$(basename "$f")"
+            # 各 job 自带的局部校验清单不算冲突：下一步会删除并统一重算全局
+            # SHA256SUMS.txt，这里直接丢弃嵌套的那份。
+            if [[ "$base" == "SHA256SUMS.txt" ]]; then
+              rm -f "$f"
+              echo "丢弃局部校验清单：$f"
+              continue
+            fi
             if [[ -e "$base" ]]; then
               echo "::error::产物重名：$f 与顶层已有的 $base 冲突" >&2
               exit 1
