@@ -5,7 +5,7 @@ use cping_core::config::ProbeConfig;
 use cping_core::probe::{MockBackend, MockPolicy, MockResponse, RecordingBackend};
 use cping_core::result::{ProbeEvent, ProbeStatus, ScanStats};
 use cping_core::scheduler::{next_task_id, status_from_error, ProbeScheduler};
-use cping_core::target::{build_targets, parse_prefix, TargetRange};
+use cping_core::target::{build_targets, parse_prefix, TargetRange, MAX_TARGETS};
 use cping_core::{CoreError, ProbeError};
 use std::collections::HashSet;
 use std::net::IpAddr;
@@ -465,4 +465,179 @@ fn result_events_are_complete_but_progress_is_neither_ordered_nor_complete() {
             "第 {trial} 轮：进度事件条数不得多于目标数"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// M19 第二步：事件通道背压与进度合并
+// ---------------------------------------------------------------------------
+
+/// 造 `n` 个目标地址（不经过网段解析——这些测试要的是**规模**，不是地址语义）。
+fn many_targets(n: usize) -> Vec<IpAddr> {
+    (0..n)
+        .map(|i| {
+            IpAddr::V4(Ipv4Addr::new(
+                10,
+                ((i / 65_536) % 256) as u8,
+                ((i / 256) % 256) as u8,
+                (i % 256) as u8,
+            ))
+        })
+        .collect()
+}
+
+/// 把策略放宽到硬天花板。这些测试量的是**通道**行为，
+/// 不能被 M17 的默认限速（500 pps）盖过去——65536 目标按默认限速要跑 131 秒。
+fn unthrottled(sched: &mut ProbeScheduler) {
+    sched
+        .set_policy(cping_core::ScanPolicy {
+            max_pps: cping_core::policy::MAX_PPS_LIMIT,
+            ..cping_core::ScanPolicy::default()
+        })
+        .expect("策略校验失败");
+}
+
+/// M19 第二步：进度事件必须被**合并**，而不是每条结果发一条。
+///
+/// 之前是「每条结果一条进度」，基准实测合并比 **1.0×**——一个合并比为 1 的
+/// 「合并」等于没合并，而且让通道流量翻倍。
+#[test]
+fn progress_events_are_merged_instead_of_one_per_result() {
+    // 让扫描持续 300 ms 以上（255 目标 / 8 并发 × 10 ms 延迟 ≈ 320 ms），
+    // 这样 200 ms 的节流间隔一定会被跨过。
+    let backend = MockBackend::new(MockPolicy::AllOnline {
+        base_rtt_ms: 1,
+        span_ms: 5,
+    })
+    .with_delay_ms(10);
+    let mut sched = ProbeScheduler::new(backend);
+    unthrottled(&mut sched);
+
+    let handle = sched.start(&cfg(8), many_targets(255)).expect("启动失败");
+
+    let mut results = 0usize;
+    let mut progress = 0usize;
+    while let Some(ev) = handle.recv() {
+        match ev {
+            ProbeEvent::Result { .. } => results += 1,
+            ProbeEvent::Progress { .. } => progress += 1,
+            ProbeEvent::Finished { .. } | ProbeEvent::Cancelled { .. } => break,
+            ProbeEvent::Started { .. } => {}
+        }
+    }
+    let events = handle.event_stats();
+
+    assert_eq!(results, 255, "结果事件一条不少");
+    assert_eq!(
+        events.progress_sent, progress,
+        "句柄上的统计必须与实际收到的一致"
+    );
+    assert!(
+        progress <= 8,
+        "255 目标 / 约 320 ms 的扫描不该发出 {progress} 条进度事件（节流间隔 200 ms）"
+    );
+    assert!(
+        events.progress_merged >= 100,
+        "绝大多数进度事件应当被合并掉，实测只合并了 {} 条",
+        events.progress_merged
+    );
+    let ratio = events.merge_ratio(results);
+    assert!(ratio >= 20.0, "合并比应当显著大于 1，实测只有 {ratio:.1}×");
+}
+
+/// M19 第二步：慢消费者下**结果一条不能丢**，且内存有界（生产者被背压挡住）。
+///
+/// 结果数（65536）远大于通道容量，所以生产者一定会因为队列满而阻塞，
+/// 直到消费者把队列抽走——这就是背压。丢结果比慢一点糟得多。
+#[test]
+fn a_slow_consumer_never_loses_results_and_stays_bounded() {
+    let backend = MockBackend::new(MockPolicy::AllOnline {
+        base_rtt_ms: 1,
+        span_ms: 5,
+    });
+    let mut sched = ProbeScheduler::new(backend);
+    unthrottled(&mut sched);
+
+    let handle = sched
+        .start(&cfg(32), many_targets(MAX_TARGETS))
+        .expect("启动失败");
+
+    let mut results = 0usize;
+    let mut rounds = 0usize;
+    let mut saw_terminal = false;
+    for _ in 0..20_000 {
+        // 故意慢：每轮先睡 1 ms，生产端只能等着。
+        thread::sleep(Duration::from_millis(1));
+        rounds += 1;
+        let mut terminal = false;
+        for ev in handle.drain() {
+            match ev {
+                ProbeEvent::Result { .. } => results += 1,
+                ProbeEvent::Finished { .. } | ProbeEvent::Cancelled { .. } => terminal = true,
+                _ => {}
+            }
+        }
+        if terminal {
+            saw_terminal = true;
+            break;
+        }
+    }
+
+    assert!(saw_terminal, "慢消费者下没有等到终态（可能卡住了）");
+    assert_eq!(results, MAX_TARGETS, "慢消费者下结果仍然必须一条不少");
+    assert!(
+        rounds > 1,
+        "这轮测试应当真的发生了多轮抽取（否则没测到背压）"
+    );
+}
+
+/// **M19 第二步最容易出人命的路径**：有界通道满时 worker 阻塞在 `send` 上，
+/// 此时若直接 join 协调线程就会**死锁**——没人在取事件，而 `Receiver`
+/// 还活着不会让 `send` 返回 `Err`。所以 `Drop` 必须**先丢掉接收端**再 join。
+///
+/// 这里用带超时的看门狗：真死锁会报错，而不是把整个测试套件挂住。
+#[test]
+fn dropping_a_handle_mid_scan_does_not_deadlock() {
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    thread::spawn(move || {
+        let backend = MockBackend::new(MockPolicy::AllOnline {
+            base_rtt_ms: 1,
+            span_ms: 5,
+        });
+        let mut sched = ProbeScheduler::new(backend);
+        unthrottled(&mut sched);
+        let handle = sched
+            .start(&cfg(32), many_targets(MAX_TARGETS))
+            .expect("启动失败");
+        // **刻意不消费**：等队列填满、worker 全部阻塞在 `send` 上。
+        thread::sleep(Duration::from_millis(100));
+        drop(handle); // 必须能返回
+        let _ = tx.send(());
+    });
+
+    assert!(
+        rx.recv_timeout(Duration::from_secs(15)).is_ok(),
+        "句柄在扫描中途被丢弃时死锁了（有界通道 + join 顺序错）"
+    );
+}
+
+/// 有界通道确实是**有界**的：容量与节流间隔之间的关系在**编译期**就定死，
+/// 而不是「应该不会太大」这种运行期期望。
+#[test]
+fn event_queue_capacity_is_a_real_bound() {
+    assert_eq!(
+        cping_core::EVENT_QUEUE_CAPACITY,
+        4096,
+        "改容量要同时改这条断言与文档里的内存估算"
+    );
+
+    // 编译期断言：队列上限 ≤ 1 MiB（相对 7.5 MiB 的结果表是小头），
+    // 且节流间隔不至于短到让「合并」失去意义。
+    const _: () = assert!(
+        cping_core::EVENT_QUEUE_CAPACITY * std::mem::size_of::<ProbeEvent>() <= 1024 * 1024,
+        "事件队列容量超过 1 MiB，超出了「相对结果表是小头」的前提"
+    );
+    const _: () = assert!(
+        cping_core::PROGRESS_MIN_INTERVAL_MS >= 100,
+        "节流间隔太短会让「合并」失去意义"
+    );
 }

@@ -17,6 +17,24 @@
     可比对回归；CI 新增 `perf` job（只跑机器无关的结构性断言，见下）
   - 新增回归基线：**1 万目标 / 32 并发 / 1 s 超时**，以及 65536 目标的取消延迟
 
+- **规模化性能（M19 第二步：事件通道背压与 `Progress` 降级为心跳）**
+  - 事件通道由**无界**改**有界**（`mpsc::sync_channel`，容量
+    `EVENT_QUEUE_CAPACITY = 4096`）。无界通道在「界面慢、生产者快」时会一路上涨
+    到 OOM——那是生产环境里最难查的一类崩溃。上限的峰值占用 **576 KiB**
+    （4096 × 144 B），相对 65536 目标的整表 7.50 MiB 是小头
+  - 满时策略**分层**：先丢进度，**结果与终态永不丢**；结果也满时阻塞在发送侧
+    （真背压）——丢结果比卡住更糟
+  - `Progress` 从「每条结果一报」改为**按时间节流**（`PROGRESS_MIN_INTERVAL_MS
+    = 200` ms，多个 worker 同时判定时用 CAS 抢名额）。它携带的 `completed`
+    在 `Result` 事件里都有，所以它只是「长时间没有结果、但确实在推进」时的心跳。
+    实测 10000 目标：不限速时进度事件 **10000 → 0 条**，默认限速时
+    **10000 → 94 条**（合并比 **106×**）
+  - 新增 `EventStats { progress_sent, progress_merged, progress_dropped }`
+    （`SchedulerHandle::event_stats()` / 新增的 `RunOutcome.events`）——
+    **静默丢弃比丢弃本身更糟**，「丢了」必须是能看见的、能断言的数
+  - 前端不再靠进度事件推进完成数：`ping.ts` 的 `Result` 分支自己 +1，
+    `Progress` 分支只做兜底校正（取较大值并夹到 `total`）
+
 ### 修复
 
 - **三端统计是 O(n²)，万级目标下界面会被统计本身拖死**
@@ -28,6 +46,15 @@
   - 落盘与报表仍走批量口径，两条路必须对得上——否则会出现「界面显示完成 500、
     导出的报表里 498」这种没人知道哪个对的局面
 
+- **有界事件通道 + `SchedulerHandle::Drop` 的 `join` 顺序会导致真实死锁**
+  - 通道改有界后，worker 可能正阻塞在 `send(Result)` 上等队列腾位置；此时若直接
+    `join` 协调线程，就没人在取事件，而 `Receiver` 还活着**不会**让 `send` 返回
+    `Err` —— 死锁。修法：句柄的 `events` 字段包成 `Option`，`Drop` 里
+    **先 `drop(events.take())` 再 join**，让阻塞中的 `send` 立刻拿到 `Disconnected`
+  - 这条**做过负向验证**：故意注释掉那行后，`dropping_a_handle_mid_scan_does_not_
+    deadlock` 在 15 s 看门狗上超时报「句柄在扫描中途被丢弃时死锁了」。同步版与
+    异步版各有一条测试守着
+
 ### 文档
 
 - **两条实测出来的事件契约**（写进 `docs/plan.md` 与测试注释，供后续阶段依据）：
@@ -37,6 +64,11 @@
      通道按块缓冲，尾部未填满的块要等填满或发送端析构才可见，而终态由**另一个**
      发送者发出，所以最后收到的 `Progress` 可能明显小于目标数（实测 232/255）。
      因此「进度」的权威来源只能是 `Result`，`Progress` 在 M19 第二步会降级成粗粒度心跳。
+
+- **CI 补上 `async` feature 的编译与测试**：`async` 默认关闭，此前从未在 CI 上
+  编译过。M19 第二步同时改了同步与异步两套实现，在 `core` job 里补上
+  `cargo clippy -p cping-core --all-targets --features async -- -D warnings` 与
+  `cargo test -p cping-core --features async`，避免「改了异步版却没人编译」。
 
 ## [2.6.0] - 2026-10-15
 

@@ -45,11 +45,14 @@ use crate::error::{CoreError, CoreResult, ProbeError};
 use crate::probe::ProbeBackend;
 use crate::result::{ProbeEvent, ProbeResult, ProbeStatus, ScanStats, TaskId};
 use crate::scheduler::RunOutcome;
-use crate::scheduler::{next_task_id, status_from_error, CancelToken};
+use crate::scheduler::{
+    next_task_id, status_from_error, CancelToken, EventStats, EVENT_QUEUE_CAPACITY,
+    PROGRESS_MIN_INTERVAL_MS,
+};
 use crate::target::MAX_TARGETS;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -106,7 +109,7 @@ impl AsyncScheduler {
         let total = targets.len();
         let concurrency = config.concurrency.min(total).max(1);
         let timeout = Duration::from_millis(config.timeout_ms);
-        let (tx, rx) = mpsc::channel::<ProbeEvent>();
+        let (tx, rx) = mpsc::sync_channel::<ProbeEvent>(EVENT_QUEUE_CAPACITY);
 
         let shared = Arc::new(AsyncShared {
             results: Mutex::new(vec![None; total]),
@@ -116,6 +119,11 @@ impl AsyncScheduler {
             tx: tx.clone(),
             task_id: task_id.clone(),
             total,
+            started: Instant::now(),
+            progress_last_ms: AtomicU64::new(0),
+            progress_sent: AtomicUsize::new(0),
+            progress_merged: AtomicUsize::new(0),
+            progress_dropped: AtomicUsize::new(0),
         });
 
         let _ = tx.send(ProbeEvent::Started {
@@ -208,7 +216,7 @@ impl AsyncScheduler {
             task_id,
             total,
             shared,
-            events: rx,
+            events: Some(rx),
             coordinator: Some(coordinator),
         })
     }
@@ -219,9 +227,46 @@ struct AsyncShared {
     cancel: Arc<AtomicBool>,
     completed: AtomicUsize,
     active: Arc<AtomicBool>,
-    tx: mpsc::Sender<ProbeEvent>,
+    /// M19 第二步：与同步版一致，改成**有界**通道（`EVENT_QUEUE_CAPACITY`）。
+    /// 两套实现必须保持同一套语义，否则「可在两者之间切换」这句话就不成立了。
+    tx: SyncSender<ProbeEvent>,
     task_id: TaskId,
     total: usize,
+    /// M19：进度节流（字段与语义同同步版的 `Shared`）。
+    started: Instant,
+    progress_last_ms: AtomicU64,
+    progress_sent: AtomicUsize,
+    progress_merged: AtomicUsize,
+    progress_dropped: AtomicUsize,
+}
+
+impl AsyncShared {
+    /// M19：这一次要不要发进度事件？语义与同步版 [`crate::scheduler::Shared`] 相同。
+    fn claim_progress_slot(&self) -> bool {
+        let now = self.started.elapsed().as_millis() as u64;
+        let last = self.progress_last_ms.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < PROGRESS_MIN_INTERVAL_MS {
+            self.progress_merged.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        if self
+            .progress_last_ms
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            self.progress_merged.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        true
+    }
+
+    fn event_stats(&self) -> EventStats {
+        EventStats {
+            progress_sent: self.progress_sent.load(Ordering::Relaxed),
+            progress_merged: self.progress_merged.load(Ordering::Relaxed),
+            progress_dropped: self.progress_dropped.load(Ordering::Relaxed),
+        }
+    }
 }
 
 /// 并发度由信号量封顶；每个探测走 `spawn_blocking`。
@@ -276,15 +321,39 @@ async fn run_all(
             }
 
             let done = shared.completed.fetch_add(1, Ordering::SeqCst) + 1;
-            let _ = shared.tx.send(ProbeEvent::Result {
-                task_id: shared.task_id.clone(),
-                result,
-            });
-            let _ = shared.tx.send(ProbeEvent::Progress {
-                task_id: shared.task_id.clone(),
-                completed: done,
-                total: shared.total,
-            });
+
+            // 结果永不丢：队列满时阻塞在发送侧（真背压）。这段跑在
+            // `spawn_blocking` 的阻塞线程上，所以阻塞发送不会卡住 async 事件循环。
+            if shared
+                .tx
+                .send(ProbeEvent::Result {
+                    task_id: shared.task_id.clone(),
+                    result,
+                })
+                .is_err()
+            {
+                drop(permit);
+                return;
+            }
+
+            if shared.claim_progress_slot() {
+                match shared.tx.try_send(ProbeEvent::Progress {
+                    task_id: shared.task_id.clone(),
+                    completed: done,
+                    total: shared.total,
+                }) {
+                    Ok(()) => {
+                        shared.progress_sent.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(TrySendError::Full(_)) => {
+                        shared.progress_dropped.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(TrySendError::Disconnected(_)) => {
+                        drop(permit);
+                        return;
+                    }
+                }
+            }
             drop(permit);
         }));
     }
@@ -300,7 +369,8 @@ pub struct AsyncHandle {
     pub task_id: TaskId,
     pub total: usize,
     shared: Arc<AsyncShared>,
-    events: Receiver<ProbeEvent>,
+    /// 用 `Option` 包一层，好在 [`Drop`] 里**先丢掉接收端**再 join（同同步版）。
+    events: Option<Receiver<ProbeEvent>>,
     coordinator: Option<JoinHandle<()>>,
 }
 
@@ -324,6 +394,18 @@ impl AsyncHandle {
         !self.shared.cancel.swap(true, Ordering::SeqCst)
     }
 
+    /// 事件接收端。不变式同同步版：只有 [`Drop`] 会把它取走。
+    fn events(&self) -> &Receiver<ProbeEvent> {
+        self.events
+            .as_ref()
+            .expect("事件接收端只在句柄析构时被取走，此处不应为 None")
+    }
+
+    /// M19：事件通道的观测数据（发出 / 合并 / 丢弃的进度事件数）。
+    pub fn event_stats(&self) -> EventStats {
+        self.shared.event_stats()
+    }
+
     pub fn is_cancelled(&self) -> bool {
         self.shared.cancel.load(Ordering::SeqCst)
     }
@@ -334,20 +416,20 @@ impl AsyncHandle {
     }
 
     pub fn recv(&self) -> Option<ProbeEvent> {
-        self.events.recv().ok()
+        self.events().recv().ok()
     }
 
     pub fn recv_timeout(&self, timeout: Duration) -> Result<ProbeEvent, RecvTimeoutError> {
-        self.events.recv_timeout(timeout)
+        self.events().recv_timeout(timeout)
     }
 
     pub fn try_recv(&self) -> Result<ProbeEvent, TryRecvError> {
-        self.events.try_recv()
+        self.events().try_recv()
     }
 
     pub fn drain(&self) -> Vec<ProbeEvent> {
         let mut out = Vec::new();
-        while let Ok(ev) = self.events.try_recv() {
+        while let Ok(ev) = self.events().try_recv() {
             out.push(ev);
         }
         out
@@ -364,7 +446,7 @@ impl AsyncHandle {
         let mut cancelled = false;
         let mut stats = ScanStats::from_results_with_total(&[], self.total);
         let mut elapsed_ms = 0;
-        while let Ok(event) = self.events.recv() {
+        while let Ok(event) = self.events().recv() {
             match event {
                 ProbeEvent::Finished {
                     stats: s,
@@ -389,6 +471,7 @@ impl AsyncHandle {
             }
         }
         let results = self.snapshot();
+        let events = self.event_stats();
         if let Some(handle) = self.coordinator.take() {
             let _ = handle.join();
         }
@@ -398,6 +481,7 @@ impl AsyncHandle {
             stats,
             elapsed_ms,
             results,
+            events,
         }
     }
 
@@ -411,6 +495,9 @@ impl AsyncHandle {
 impl Drop for AsyncHandle {
     fn drop(&mut self) {
         self.shared.cancel.store(true, Ordering::SeqCst);
+        // 与同步版同理且**顺序同样关键**：先丢掉接收端，让可能正阻塞在
+        // 有界通道 `send` 上的 worker 立刻拿到 `Disconnected`，否则 join 会死锁。
+        drop(self.events.take());
         if let Some(handle) = self.coordinator.take() {
             let _ = handle.join();
         }
@@ -561,5 +648,38 @@ mod tests {
         };
         assert!(sched.start(&bad, vec![v4(1)]).is_err());
         assert!(!sched.is_busy(), "校验失败不得占用 active 标志");
+    }
+
+    /// M19 第二步：有界通道下丢弃句柄**不能死锁**——与同步版是同一条不变式、
+    /// 同一个坑（`Drop` 必须先丢掉接收端再 join）。两套实现要能互换，
+    /// 这类生命周期契约就必须一起守。
+    #[test]
+    fn dropping_an_async_handle_mid_scan_does_not_deadlock() {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let sched = AsyncScheduler::new(MockBackend::new(MockPolicy::AllOnline {
+                base_rtt_ms: 1,
+                span_ms: 5,
+            }));
+            let targets: Vec<IpAddr> = (0..MAX_TARGETS)
+                .map(|i| {
+                    IpAddr::V4(std::net::Ipv4Addr::new(
+                        10,
+                        ((i / 65_536) % 256) as u8,
+                        ((i / 256) % 256) as u8,
+                        (i % 256) as u8,
+                    ))
+                })
+                .collect();
+            let handle = sched.start(&cfg(32), targets).expect("启动失败");
+            // **刻意不消费**：等队列填满、发送侧阻塞住。
+            std::thread::sleep(Duration::from_millis(100));
+            drop(handle); // 必须能返回
+            let _ = tx.send(());
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_secs(15)).is_ok(),
+            "异步句柄在扫描中途被丢弃时死锁了（有界通道 + join 顺序错）"
+        );
     }
 }

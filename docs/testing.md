@@ -679,6 +679,70 @@ TUI 2 条（增量统计与「拍平整表再全量统计」逐字段对账，�
 - **测试模块里的 `debug_assert` 会真的把测试打红**——这轮正是它立了功
   （发现了 `Progress` 超前），但也说明**写进测试路径的断言必须先自己验证过**。
 
+## M19：规模化性能（第二步：事件通道背压与进度节流，559 → 563 个测试）
+
+### 测试结果（2026-10-15，Windows 本机）
+
+| 套件 | 结果 |
+| --- | --- |
+| `cargo test --workspace` | **563 passed / 0 failed**（第一步 559，+4） |
+| `cargo test -p cping-core --features async` | **全绿**（lib tests 327 / 默认 320） |
+| GUI（`apps/cping-gui/src-tauri`） | **30 passed** |
+| 合计 | **593** |
+| `cargo bench -p cping-core --bench scan` | 全绿（含新增的结构性断言） |
+| `cargo bench ... -- --check` | 退出码 0（20 项，计数类指标不再被跳过） |
+| `cargo fmt --all -- --check` | 干净 |
+| `cargo clippy --workspace --all-targets -- -D warnings` | 干净 |
+| `cargo clippy -p cping-core --all-targets --features async -- -D warnings` | 干净 |
+| GUI clippy（`src-tauri` 单独跑） | 干净（只剩 tauri **构建脚本**自身的一条告警） |
+| `vue-tsc --noEmit` / `check-i18n` / `check-symbols` / `check-portability` | 全部通过 |
+
+新增的 4 条核心测试：`progress_events_are_merged_instead_of_one_per_result`、
+`a_slow_consumer_never_loses_results_and_stays_bounded`、
+`dropping_a_handle_mid_scan_does_not_deadlock`、
+`event_queue_capacity_is_a_real_bound`（用 `const _: () = assert!(...)` 做编译期
+断言）；异步版另有 `dropping_an_async_handle_mid_scan_does_not_deadlock`。
+
+### 实测收益（Windows 本机，bench profile）
+
+| 场景 | 第二步之前 | 第二步之后 |
+| --- | --- | --- |
+| 10000 目标不限速（5.7–6.6 ms） | 10000 条进度事件（合并比 1.0×） | **0 条**（合并比 ∞） |
+| 10000 目标默认限速（19.0 s） | 10000 条 | **94 条**（合并比 **106×**） |
+| 事件队列上限 | 无上限 | **4096 条 × 144 B = 576 KiB**（整表 7.50 MiB） |
+
+不限速那栏的 0 条不是「漏了」：整个扫描（5.7–6.6 ms）比 200 ms 的节流窗口还短，
+一条进度都没到该发的时间点——而完成数完全由 `Result` 事件承担，界面不会瞎。
+
+### 这轮踩到的坑：有界通道 + `join` 顺序 = 真实死锁
+
+通道改有界之后，worker 可能正阻塞在 `send(Result)` 上等队列腾位。此时若句柄的
+`Drop` 直接 `join` 协调线程，就没人在取事件，而 `Receiver` 还活着**不会**让
+`send` 返回 `Err` —— **死锁**。修法是先把 `events` 取走丢掉、再 join。
+
+这条**做过负向验证**：写完
+`dropping_a_handle_mid_scan_does_not_deadlock`（15 s 看门狗）之后，
+故意把那行 `drop(self.events.take())` 注释掉，测试如期超时并报
+「句柄在扫描中途被丢弃时死锁了」；改回来才过。所以这不是「为了整洁多写一行」，
+是修掉一个真会挂住的路径。
+
+### 另外两个坑
+
+- **`--check` 的跳过规则一开始写太宽**：原本「两边都 < 1.0 就跳过」会把
+  `progress_sent`（10000 → 0）这种**最重要的计数类指标**一起跳过，
+  等于把本步最该看见的收益藏起来。改成**只跳过以 `_ms` 结尾的时长**。
+- **基线为 0 的「越小越好」指标算不出倍率**：`progress_sent` 的理想值就是 0，
+  如实打印「跳过（基线为 0，算不出倍率）」，判定交给结构性断言
+  （`progress_sent <= 10`、`merge_ratio > 100`）。
+- **`assert!(CONST >= 100)` 会被 `clippy::assertions_on_constants` 拦下**：
+  常量断言要用 `const _: () = assert!(...)` 做成编译期断言。
+
+### 明确未覆盖
+
+- `progress_dropped` 在全部实测里**始终为 0**——限速把生产速度压得足够慢，
+  背压没被真正触发过。它由单测覆盖，但没在真机上丢过一条。
+- 进度节流的**真机观感**（TUI / GUI 万级目标）未确认；本机无桌面会话。
+
 ## 尚未完成的验证
 
 - **M17**：gpg **成功**签名路径（Git Bash 下 `GNUPGHOME` 解释不一致，

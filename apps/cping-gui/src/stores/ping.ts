@@ -278,11 +278,21 @@ export const usePingStore = defineStore('ping', () => {
           if (event.result.index < results.value.length) {
             results.value[event.result.index] = event.result
           }
+          // M19 第二步：进度事件改成**节流心跳**（约 200 ms 一条，10000 目标实测
+          // 只发 0～94 条而不是 10000 条）。所以完成数**不能再靠它推进**，
+          // 否则进度条会一跳一跳。结果事件每条都到，用它累计最准；
+          // `progress` 只当作兜底校正（下面取较大值）。
+          if (stats.value.completed < stats.value.total) {
+            stats.value.completed += 1
+            stats.value.pending = Math.max(0, stats.value.total - stats.value.completed)
+          }
           break
         case 'progress':
+          // 兜底：进度事件只保证「不落后太多」，不保证顺序与完整
+          //（实测它会领先于自己的 result，尾部也可能整批不到）。
           if (stats.value.completed < event.completed) {
-            stats.value.completed = event.completed
-            stats.value.pending = Math.max(0, stats.value.total - event.completed)
+            stats.value.completed = Math.min(event.completed, stats.value.total)
+            stats.value.pending = Math.max(0, stats.value.total - stats.value.completed)
           }
           break
         case 'finished':

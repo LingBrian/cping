@@ -69,6 +69,15 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
+      # 异步调度（`async` feature）**默认关闭**，所以上面那两条覆盖不到它。
+      # 它此前从未在 CI 上编译过——M19 第二步同时改了同步与异步两套实现，
+      # 这里补上，避免「改了异步版却没人编译」。
+      - name: cargo clippy（async feature）
+        run: cargo clippy -p cping-core --all-targets --features async -- -D warnings
+
+      - name: cargo test（async feature）
+        run: cargo test -p cping-core --features async
+
       - name: 验证默认构建不引入第三方运行时依赖
         # M12 的硬约束：async feature 默认关闭时，cping-core 的依赖树里
         # 不应出现任何外部 crate。这里用「本地路径依赖计数」来守这条线。

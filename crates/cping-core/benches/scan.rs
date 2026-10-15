@@ -13,7 +13,7 @@
 //! 2. **调度器吞吐**：10000 目标 / 32 并发 / 1s 超时（M19 的回归基线），
 //!    用 `MockBackend` 离线跑，量事件数与墙钟时间。
 //! 3. **内存峰值**：装一个计数用全局分配器，量扫描期间的真实堆峰值。
-//! 4. **事件流**：进度合并比（发出了多少条进度事件）、通道上限。
+//! 4. **事件流**：进度事件的合并比与丢弃数（M19 第二步）、通道上限带来的内存上界。
 //!
 //! ## 「实测」与「外推」严格分开
 //!
@@ -82,8 +82,8 @@ static ALLOCATOR: Counting = Counting;
 
 use cping_core::classify::Thresholds;
 use cping_core::policy::{DEFAULT_MAX_PPS, MAX_PPS_LIMIT};
-use cping_core::result::{ProbeResult, ProbeStatus, ScanStats};
-use cping_core::scheduler::ProbeScheduler;
+use cping_core::result::{ProbeEvent, ProbeResult, ProbeStatus, ScanStats};
+use cping_core::scheduler::{EventStats, ProbeScheduler};
 use cping_core::{MockBackend, MockPolicy, ProbeConfig};
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant;
@@ -227,13 +227,27 @@ fn check_against_baseline(report: &Report) -> bool {
         let Some(now) = report.value(key) else {
             continue;
         };
-        // **亚毫秒指标不比对**：这类数字（增量累加的微秒级耗时）在共享机器上
-        // 噪声大于信号——实测同一台机器连续两次跑出 0.064 ms 与 0.375 ms，
-        // 按容差会误报「回归 5.8×」。它们仍然写进基线当**证据**，但判定交给
-        // 代码里那条机器无关的**结构性断言**（批量必须比增量慢 100× 以上）。
-        if *base < 1.0 && now < 1.0 {
+        // **亚毫秒的「耗时」类指标不比对**：这类数字在共享机器上噪声大于信号
+        // ——实测同一台机器连续两次跑出 0.064 ms 与 0.375 ms，按容差会误报
+        // 「回归 5.8×」。它们仍然写进基线当**证据**，但判定交给代码里那条
+        // 机器无关的**结构性断言**（批量必须比增量慢 100× 以上）。
+        //
+        // 只跳过**时长**（键名以 `_ms` 结尾）。计数类指标（事件条数、字节数）
+        // 不受噪声影响，照常比对——否则会把「进度事件从 10000 条降到 0 条」
+        // 这种最重要的指标漏掉（实测踩过这个坑）。
+        if key.ends_with("_ms") && *base < 1.0 && now < 1.0 {
             println!(
-                "  {key:44} 基线 {:>14}  本次 {:>14}  跳过（亚毫秒，噪声大于信号）",
+                "  {key:44} 基线 {:>14}  本次 {:>14}  跳过（亚毫秒耗时，噪声大于信号）",
+                fmt_num(*base),
+                fmt_num(now)
+            );
+            continue;
+        }
+        // 基线为 0 的「越小越好」指标算不出倍率（除零）。这类指标的理想值就是 0，
+        // 由代码里的结构性断言守着，这里如实说明而不是假装通过。
+        if !key.ends_with(".per_sec") && *base <= 0.0 {
+            println!(
+                "  {key:44} 基线 {:>14}  本次 {:>14}  跳过（基线为 0，算不出倍率）",
                 fmt_num(*base),
                 fmt_num(now)
             );
@@ -431,9 +445,11 @@ fn bench_scheduler(report: &mut Report) {
     );
     println!("       结果事件         {} 条", run.results);
     println!(
-        "       进度事件         {} 条（合并比 {:.1}×）",
-        run.progress,
-        TARGETS as f64 / run.progress.max(1) as f64
+        "       进度事件         {} 条发出 / {} 条被合并 / {} 条被丢弃（合并比 {:.0}×）",
+        run.events.progress_sent,
+        run.events.progress_merged,
+        run.events.progress_dropped,
+        run.events.merge_ratio(run.results),
     );
     println!(
         "       Started/终态      {} / {}",
@@ -443,6 +459,23 @@ fn bench_scheduler(report: &mut Report) {
     assert_eq!(run.results, TARGETS, "结果事件不得丢");
     assert_eq!(run.started, 1, "Started 只应有一条");
     assert_eq!(run.terminal, 1, "终态只应有一条");
+    assert_eq!(
+        run.events.progress_sent, run.progress,
+        "句柄上的进度统计必须与实际收到的条数一致"
+    );
+    // M19 第二步的**结构性断言**（机器无关，可进 CI）：
+    // 进度事件必须被**合并**。这一步之前是「每条结果一条进度」——同样一次
+    // 10000 目标的扫描会发出 10000 条进度事件，合并比恒为 1.0×，
+    // 等于把通道流量白白翻了一倍。
+    assert!(
+        run.events.progress_sent <= 10,
+        "10000 目标的进度事件不该有 {} 条（M19 第二步之前是 10000 条）",
+        run.events.progress_sent
+    );
+    assert!(
+        run.events.merge_ratio(run.results) > 100.0,
+        "进度合并比必须显著大于 1（M19 第二步之前恒为 1.0×）"
+    );
 
     report.record("scheduler.10000.free.elapsed_ms", run.elapsed_s * 1000.0);
     report.record(
@@ -450,7 +483,14 @@ fn bench_scheduler(report: &mut Report) {
         TARGETS as f64 / run.elapsed_s.max(0.000_001),
     );
     report.record("scheduler.10000.free.result_events", run.results as f64);
-    report.record("scheduler.10000.free.progress_events", run.progress as f64);
+    report.record(
+        "scheduler.10000.free.progress_sent",
+        run.events.progress_sent as f64,
+    );
+    report.record(
+        "scheduler.10000.free.progress_merged",
+        run.events.progress_merged as f64,
+    );
     report.record("scheduler.10000.free.peak_bytes", run.peak_bytes as f64);
     report.record(
         "scheduler.10000.free.retained_bytes",
@@ -475,12 +515,22 @@ fn bench_scheduler(report: &mut Report) {
         run.elapsed_s / expected_s
     );
     println!("       结果事件         {} 条", run.results);
+    println!(
+        "       进度事件         {} 条发出 / {} 条被合并（合并比 {:.0}×）",
+        run.events.progress_sent,
+        run.events.progress_merged,
+        run.events.merge_ratio(run.results),
+    );
     assert_eq!(run.results, TARGETS);
     println!("       （这 19 秒是**限速**的时长，不是调度器的能力）");
 
     report.record(
         "scheduler.10000.throttled.elapsed_ms",
         run.elapsed_s * 1000.0,
+    );
+    report.record(
+        "scheduler.10000.throttled.progress_sent",
+        run.events.progress_sent as f64,
     );
 
     // ---- 2c. 限速期间取消：取消延迟 ----
@@ -497,6 +547,10 @@ fn bench_scheduler(report: &mut Report) {
         cancel_run.cancel_latency_ms
     );
     println!("       取消前完成       {} 条", cancel_run.results);
+    println!(
+        "       进度事件         {} 条发出 / {} 条被合并",
+        cancel_run.events.progress_sent, cancel_run.events.progress_merged
+    );
     println!(
         "       终态             {}",
         if cancel_run.cancelled {
@@ -542,6 +596,8 @@ struct ScanRun {
     cancelled: bool,
     peak_bytes: usize,
     retained_bytes: usize,
+    /// M19 第二步：事件通道的观测数据（发出 / 合并 / 丢弃的进度事件数）。
+    events: EventStats,
 }
 
 /// 跑一次扫描并消费掉全部事件。
@@ -583,14 +639,14 @@ fn run_scan(
 
     while let Some(event) = handle.recv() {
         match event {
-            cping_core::ProbeEvent::Started { .. } => started += 1,
-            cping_core::ProbeEvent::Result { .. } => results += 1,
-            cping_core::ProbeEvent::Progress { .. } => progress += 1,
-            cping_core::ProbeEvent::Finished { .. } => {
+            ProbeEvent::Started { .. } => started += 1,
+            ProbeEvent::Result { .. } => results += 1,
+            ProbeEvent::Progress { .. } => progress += 1,
+            ProbeEvent::Finished { .. } => {
                 terminal += 1;
                 break;
             }
-            cping_core::ProbeEvent::Cancelled { .. } => {
+            ProbeEvent::Cancelled { .. } => {
                 terminal += 1;
                 cancelled = true;
                 break;
@@ -602,6 +658,7 @@ fn run_scan(
     // 内存读数要在 `handle`（结果表还在它手里）存活时取
     let peak_bytes = PEAK.load(Ordering::SeqCst);
     let retained_bytes = CUR.load(Ordering::SeqCst).max(0) as usize;
+    let events = handle.event_stats();
     drop(handle);
 
     if let Some(t) = cancel_at {
@@ -621,6 +678,7 @@ fn run_scan(
         cancelled,
         peak_bytes,
         retained_bytes,
+        events,
     }
 }
 
@@ -630,15 +688,30 @@ fn bench_memory(report: &mut Report) {
     let one = std::mem::size_of::<ProbeResult>();
     let opt = std::mem::size_of::<Option<ProbeResult>>();
     let event = std::mem::size_of::<cping_core::ProbeEvent>();
+    let queue = cping_core::EVENT_QUEUE_CAPACITY * event;
 
     println!("   sizeof(ProbeResult)          {one} B");
     println!("   sizeof(Option<ProbeResult>)  {opt} B");
     println!("   sizeof(ProbeEvent)           {event} B");
     println!("   整表（65536，无上限）         {}", human(opt * 65_536));
+    println!(
+        "   事件队列上限（{} 条）      {}",
+        cping_core::EVENT_QUEUE_CAPACITY,
+        human(queue)
+    );
 
     report.record("memory.size_of_probe_result", one as f64);
     report.record("memory.size_of_probe_event", event as f64);
     report.record("memory.full_table_65536_bytes", (opt * 65_536) as f64);
+    report.record("memory.event_queue_bound_bytes", queue as f64);
+
+    // 结构性断言（机器无关）：队列上限必须**远小于**整表，否则「有界」就失去
+    // 意义——上限比结果本身还大，等于没有上限。
+    assert!(
+        queue < opt * 65_536,
+        "事件队列上限（{queue} B）不该比结果整表（{} B）还大",
+        opt * 65_536
+    );
 }
 
 fn main() {

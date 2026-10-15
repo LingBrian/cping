@@ -8,7 +8,7 @@ Rust 核心 · TUI（ratatui）· 桌面 GUI（Tauri 2 + Vue 3）· Android
 
 [![Release](https://img.shields.io/badge/release-v2.6.0-111827)](../../releases)
 [![CI](https://github.com/LingBrian/cping/actions/workflows/ci.yml/badge.svg)](https://github.com/LingBrian/cping/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-589%20passed-brightgreen)](docs/testing.md)
+[![Tests](https://img.shields.io/badge/tests-593%20passed-brightgreen)](docs/testing.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20Android-lightgrey)](docs/platform-compatibility.md)
 
@@ -126,8 +126,10 @@ cd apps/cping-gui && npm run tauri:android:build
 ```
 
 > 基准的回归判定分两层：**结构性断言**（结果事件一条不少、批量必须比增量慢 100× 以上、
-> 取消延迟 < 500 ms）是机器无关的，已接进 CI；`--check` 的绝对值比对依赖机器，
-> 只作本地工具。数字与口径见 [`docs/perf-baseline.txt`](docs/perf-baseline.txt)。
+> 取消延迟 < 500 ms、进度事件必须被合并而不是每条结果一条、事件队列上限必须远小于
+> 结果整表）是机器无关的，已接进 CI；`--check` 的绝对值比对依赖机器，
+> 只作本地工具（只跳过亚毫秒的**时长**，计数类指标照常比对）。
+> 数字与口径见 [`docs/perf-baseline.txt`](docs/perf-baseline.txt)。
 
 > 常见构建坑（cargo 离线沙箱、npm postinstall、Android 符号校验等）的排查表
 > 见 [README 附表](#构建环境注意事项) 与 [`docs/testing.md`](docs/testing.md)。

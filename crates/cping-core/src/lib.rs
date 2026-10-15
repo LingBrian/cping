@@ -136,7 +136,8 @@ pub use registry::{
 };
 pub use result::{ProbeEvent, ProbeResult, ProbeStatus, ScanStats, TaskId};
 pub use scheduler::{
-    next_task_id, status_from_error, CancelToken, ProbeScheduler, RunOutcome, SchedulerHandle,
+    next_task_id, status_from_error, CancelToken, EventStats, ProbeScheduler, RunOutcome,
+    SchedulerHandle, EVENT_QUEUE_CAPACITY, PROGRESS_MIN_INTERVAL_MS,
 };
 pub use snapshot::{
     load_from_path, save_to_path, Snapshot, FORMAT_VERSION as SNAPSHOT_VERSION,

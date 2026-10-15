@@ -1647,3 +1647,92 @@ M16 模板选择器与 M17 策略面板接入 TUI；GUI 命令层语言贯通；
   但没有在真终端里以万级目标看过观感
 - GUI 的增量路径没有真机点击验证（本机无桌面会话）
 - 65536 目标下的端到端内存峰值与界面响应属于**第三步**，本步只做到 10000 目标
+
+### M19 — v2.7.0 规模化性能（第二步实施记录，2026-10-15）
+
+第二步的起点是第一步实测出来的那条契约：**`Progress` 既不保序也不完整**。
+既然它既不保序（会领先于自己的 `Result`）、尾部又会丢，那它就不能再承担
+「让界面知道完成数」这个职责——**完成数的权威来源只能是 `Result`**。
+想通这一点之后，第二步要做的就不是「让进度更准」，而是「让进度更便宜」。
+
+#### 做法
+
+- **`Progress` 降级为心跳**：按时间节流（距上次发出 ≥
+  `PROGRESS_MIN_INTERVAL_MS = 200` ms 才发一条），中间态直接合并掉只留最新值。
+  200 ms 的依据是比人眼能分辨的进度条跳动（约 100 ms）略慢一点，
+  于是「看起来在动」不受影响，而事件数从**上万条降到个位数**。
+  多个 worker 同时判定「该发了」时用 **CAS 抢名额**——否则并发一高就会冒出
+  好几条同刻的进度事件，节流等于没做。
+- **通道改有界**：`mpsc::sync_channel(EVENT_QUEUE_CAPACITY = 4096)`。
+  分层丢弃策略：**先丢进度，结果与终态永不丢**；结果也满时**阻塞在发送侧**
+  （真背压）——丢结果比卡住更糟。放弃无界通道的理由很直接：无界通道在
+  「UI 慢、生产者快」时会一路上涨到 OOM，那是生产环境里最难查的一类崩溃。
+- **丢弃可观测**：新增 `EventStats { progress_sent, progress_merged,
+  progress_dropped }` + `merge_ratio()`，挂在 `SchedulerHandle::event_stats()`
+  与 `RunOutcome.events` 上。**静默丢弃比丢弃本身更糟**——「丢了」必须是能看见的。
+  （`run_to_completion` 会消费掉句柄，所以摘要里也放一份。）
+- **`Drop` 顺序修正（这条是真死锁，不是洁癖）**：通道改有界之后，worker 可能
+  正阻塞在 `send(Result)` 上等队列腾位。此时若直接 `join`，就没人在取事件，
+  而 `Receiver` 还活着**不会**让 `send` 返回 `Err`——直接死锁。所以句柄的
+  `events` 字段包成 `Option`，`Drop` 里**先 `drop(events.take())` 再 join**。
+- **先紧后松地同步改 `asynchronous.rs`**：两套实现共用同一组常量与同名的
+  `claim_progress_slot()` / `event_stats()`，避免「只优化了同步版」。
+- **前端不再靠进度事件推进**：`ping.ts` 的 `Result` 分支自己把 `completed` +1
+  （它本来就知道每条结果的归属），`Progress` 分支只做**兜底校正**
+  （取较大值并夹到 `total`）。
+
+#### 实测（Windows 本机，bench profile）
+
+| 场景 | 第二步之前 | 第二步之后 |
+| --- | --- | --- |
+| 10000 目标不限速（5.7–6.6 ms） | 10000 条进度事件（合并比 1.0×） | **0 条**（合并比 ∞——整个扫描比 200 ms 节流窗口还短） |
+| 10000 目标默认限速（19.0 s） | 10000 条 | **94 条**（合并比 **106×**） |
+| 事件队列上限 | 无上限 | **4096 条 × 144 B = 576 KiB** |
+
+队列上限 576 KiB 相对 65536 目标的整表 7.50 MiB 是小头——这条由
+代码里的结构性断言守着（队列上限必须远小于整表，否则「有界」等于没有上限）。
+
+#### 踩坑
+
+- **有界通道 + `join` 顺序 = 真实死锁**。这不是推演出来的：写完
+  `dropping_a_handle_mid_scan_does_not_deadlock` 后**故意把
+  `drop(self.events.take())` 注释掉**做负向验证，测试在 15 s 看门狗上超时并
+  报「句柄在扫描中途被丢弃时死锁了」。改回来才过——证明修复是必要的、
+  测试是有牙的（不是「加了行代码也没坏」那种摆设测试）。
+- **`--check` 的跳过规则一开始写太宽**：原本是「两边都 < 1.0 就跳过」，
+  结果把 `progress_sent`（10000 → 0）这种**最重要的计数类指标**也一起跳过了，
+  等于把本步最该看见的收益藏起来。改成**只跳过以 `_ms` 结尾的时长**，
+  计数类（事件条数、字节数）照常比对。
+- **基线为 0 的「越小越好」指标算不出倍率**（除零）。`progress_sent` 的理想值
+  就是 0，如实打印「跳过（基线为 0，算不出倍率）」而不是假装通过；
+  真正的判定交给结构性断言（`progress_sent <= 10`、`merge_ratio > 100`）。
+- **`assert!(PROGRESS_MIN_INTERVAL_MS >= 100)` 触发 `clippy::assertions_on_constants`**：
+  常量断言要用 `const _: () = assert!(...)` 做成**编译期**断言，运行期的
+  `assert!` 在 clippy 眼里是恒真的死代码。
+- **CI 此前从未编译过 `async` feature**（它默认关闭）。第二步两套实现都改了，
+  顺带在 `core` job 里补上 `--features async` 的 clippy + test——
+  否则会出现「改了异步版却没人编译」。
+
+#### 测试与实测
+
+- 工作区 **559 → 563 passed**（+4）；核心 lib tests 320（默认）/ **327（async）**；
+  GUI 仍 **30 passed**，合计 **593**
+- 新增 4 条核心测试：
+  - `progress_events_are_merged_instead_of_one_per_result`（合并比 ≥ 20×）
+  - `a_slow_consumer_never_loses_results_and_stays_bounded`（慢消费者下
+    65536 个结果**一条不少**，且队列有界）
+  - `dropping_a_handle_mid_scan_does_not_deadlock`（15 s 看门狗，已负向验证）
+  - `event_queue_capacity_is_a_real_bound`（`const _: () = assert!(...)` 编译期断言）
+  - 异步版另加 `dropping_an_async_handle_mid_scan_does_not_deadlock`
+- 基准：`cargo bench -p cping-core --bench scan` 全绿（含新的结构性断言）；
+  `--write-baseline` 重生成基线；`--check` 退出码 0（20 项）
+- `cargo fmt --all -- --check`、工作区 clippy、**async clippy**、GUI clippy、
+  `vue-tsc --noEmit`、`check-i18n`、`check-symbols`、`check-portability` 全干净
+
+#### 未实测（如实登记）
+
+- 进度节流在**真实万级扫描**下的观感（本步只有 bench 的墙钟口径与模拟后端）
+- TUI / GUI 的进度推进改造**没有真机观感确认**（本机无桌面会话、无万级真机扫描）
+- `progress_dropped` 在实测里**始终为 0**（背压没被真正触发过——限速把生产
+  速度压得足够慢）。它由单测覆盖，但没有在真机上丢过一条
+- 65536 目标的端到端内存峰值属于**第三步**
