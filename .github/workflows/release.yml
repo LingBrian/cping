@@ -86,6 +86,82 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
+  # Windows GUI：桌面版可执行文件（x64）
+  #
+  # 补漏：这条链路此前**从来没有** Windows 桌面版——`windows` job 只构建
+  # TUI + CLI，于是自动发出来的 Release 比 v2.0.0 少一个桌面版产物。
+  # 构建方式与 docs/release.md §1 一致：先在 apps/cping-gui 构建前端产物
+  # （tauri 编译期要读 frontendDist），再在 src-tauri 内 cargo build --release。
+  # ---------------------------------------------------------------------------
+  windows-gui:
+    name: windows gui (x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/cping-gui/src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 解析版本号
+        id: ver
+        shell: pwsh
+        run: |
+          $v = if ('${{ github.event.inputs.tag }}') { '${{ github.event.inputs.tag }}' } else { '${{ github.ref_name }}' }
+          $v = $v.TrimStart('v')
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "版本：$v"
+
+      - name: 构建前端产物（tauri 编译期需要 dist/）
+        working-directory: apps/cping-gui
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: 构建桌面版（release）
+        working-directory: apps/cping-gui/src-tauri
+        run: cargo build --release --locked
+
+      - name: 制品签名（M17）
+        # 有证书（Secrets）就做 Authenticode 签名，没有就打印 SHA-256 并说明
+        # **未签名**——绝不用自签证书冒充正式签名。
+        # 顺序刻意放在「打包」之前：签名要落在被复制进产物的那个二进制上，
+        # 先复制再签名只会签到一个没人下载的中间产物。
+        shell: pwsh
+        env:
+          CPING_SIGN_CERT_PFX_BASE64: ${{ secrets.CPING_SIGN_CERT_PFX_BASE64 }}
+          CPING_SIGN_CERT_PASSWORD: ${{ secrets.CPING_SIGN_CERT_PASSWORD }}
+        run: pwsh -File scripts/sign-windows.ps1 -Path 'apps/cping-gui/src-tauri/target/release'
+
+      - name: 打包 + SHA256SUMS
+        shell: pwsh
+        run: |
+          $v = '${{ steps.ver.outputs.version }}'
+          $out = "release/$v"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          Copy-Item 'apps/cping-gui/src-tauri/target/release/cping-gui.exe' `
+            "$out/cping-gui-$v-windows-x64.exe"
+          $h = (Get-FileHash "$out/cping-gui-$v-windows-x64.exe" -Algorithm SHA256).Hash.ToLower()
+          "$h *cping-gui-$v-windows-x64.exe" |
+            Out-File -FilePath "$out/SHA256SUMS.txt" -Encoding ascii
+          Get-ChildItem $out | Format-Table Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-windows-gui-x64
+          path: release/${{ steps.ver.outputs.version }}/*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
   # Linux：TUI + CLI（原生 x86_64）
   # ---------------------------------------------------------------------------
   linux:
@@ -298,7 +374,12 @@ jobs:
   publish:
     name: publish release
     runs-on: ubuntu-22.04
-    needs: [windows, linux, android]
+    # 依赖必须覆盖**每一个**产出 artifact 的 job —— 「下载全部产物」才名副其实。
+    #  · `linux-gui` 从被加入的那天起就漏在这里：上一次恰好它先跑完才没出事，
+    #    但这是**竞态**（最慢的是 android），一旦它后跑完，deb / AppImage 就会
+    #    静默缺席，而且没有任何报错。
+    #  · `windows-gui` 是本版新增的 Windows 桌面版产物。
+    needs: [windows, windows-gui, linux, linux-gui, android]
     if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.tag != ''
     steps:
       - uses: actions/checkout@v4

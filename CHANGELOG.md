@@ -106,6 +106,24 @@
   所以不补齐）。于是目标表是 1.06 MiB 而不是 1.00 MiB。这正是把类型宽度写成
   **可断言的登记值**的价值：算错会红，不会悄悄低报。
 
+### 构建与发布
+
+- **发布链路补上 Windows 桌面版产物**：`release.yml` 的 `windows` job 只构建
+  TUI + CLI，于是自动化发出来的 Release **从来没有** Windows 桌面版——
+  v2.0.0 那个 `cping-gui-2.0.0-windows-x64.exe` 是本机人工构建后上传的，
+  自动链路里根本没有对应步骤。新增 `windows-gui` job（x64）构建 `cping-gui.exe`
+  并上传为 `cping-gui-<版本>-windows-x64.exe`；签名步骤刻意排在**打包之前**
+  （先复制再签名只会签到一个没人下载的中间产物）。
+- **`publish` 的 `needs` 漏掉了 `linux-gui`**：从该 job 被加入（v2.0.0）的那天起
+  就没写进去。上次没出事只是因为它恰好跑得比 android 快——**这是竞态**，
+  一旦顺序反过来，deb / AppImage 会**静默缺席且不报错**。现改为覆盖
+  **每一个**产出 artifact 的 job。
+- **`apps/cping-gui/src-tauri/Cargo.lock` 在升版本号时被漏掉**：`Cargo.toml` 已是
+  2.7.0 而锁文件还写着 2.6.0，于是 `cargo build --locked` / `cargo check --locked`
+  直接报 `cannot update the lock file ... because --locked was passed`——
+  CI 的 `gui-shell` job 与发布链路的 `linux-gui` job 都会红。此前每个版本都会
+  同步更新它，这一步是 M19 第三步升版本号时的疏漏，**发布前预检才抓到**。
+
 ## [2.6.0] - 2026-10-15
 
 ### 新增
