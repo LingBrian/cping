@@ -6,6 +6,8 @@ import {
   DEFAULT_COLORS,
   MATRIX_CELLS,
   MONITOR_INTERVALS,
+  type AlertDto,
+  type AlertEventDto,
   type AppConfigDto,
   type BackendCapsDto,
   type ChangeDto,
@@ -127,6 +129,7 @@ export const usePingStore = defineStore('ping', () => {
   const countdown = ref<number | null>(null)
 
   let unlisten: UnlistenFn | null = null
+  let unlistenAlerts: UnlistenFn | null = null
   let highlightTimer: ReturnType<typeof setTimeout> | null = null
   let monitorTimer: ReturnType<typeof setInterval> | null = null
   /** 下一轮的计划发起时刻（毫秒）。0 表示尚未排期。 */
@@ -229,6 +232,16 @@ export const usePingStore = defineStore('ping', () => {
   }
 
   async function attachEvents() {
+    if (!unlistenAlerts) {
+      // M15：告警走一条独立事件。这里只负责「让界面知道有新告警」——
+      // 判定、冷却、静音全在后端算好，前端不做二次解释。
+      unlistenAlerts = await svc.onAlertEvent((events) => {
+        if (events.length === 0) return
+        // 这里只负责「有新告警」这一层信号；面板数据统一由 `resyncFromBackend`
+        // 拉一次权威快照，避免同一轮里两条路径各写一份状态。
+        alertFeed.value = events
+      })
+    }
     if (unlisten) return
     unlisten = await svc.onProbeEvent((event) => {
       if (taskId.value && 'taskId' in event && event.taskId !== taskId.value) {
@@ -322,6 +335,8 @@ export const usePingStore = defineStore('ping', () => {
       // M14：本轮也已并入后端时序。只有「趋势已经被看过」时才顺手刷新，
       // 免得从没打开过趋势页的用户每轮都白白多一次 IPC。
       if (trend.value !== null) await loadTrend()
+      // M15：同上——只有「告警页已经被看过」时才顺手刷新。
+      if (alerts.value !== null) await loadAlerts()
       if (withInfo) {
         const n = recognized.value
         const base = cancelled.value
@@ -550,6 +565,94 @@ export const usePingStore = defineStore('ping', () => {
 
   /** 趋势页里出现过的在线主机数（角标用）。 */
   const trendHostCount = computed(() => trend.value?.rows.length ?? 0)
+
+  // -------------------------------------------------------------------------
+  // M15：告警
+  // -------------------------------------------------------------------------
+
+  /**
+   * 告警状态。与趋势一样**不做轮询**：切到「告警」页签时拉一次，
+   * 每轮扫描结束后（若已经看过告警页）再拉一次。真正的求值在后端。
+   */
+  const alerts = ref<AlertDto | null>(null)
+  const alertsBusy = ref(false)
+  /** 最近一批推送过来的告警（供布局层就地提示）；空数组表示还没有。 */
+  const alertFeed = ref<AlertEventDto[]>([])
+
+  async function loadAlerts(): Promise<void> {
+    alertsBusy.value = true
+    try {
+      alerts.value = await svc.alertState()
+    } catch (e) {
+      status.value = `告警状态读取失败：${String(e)}`
+    } finally {
+      alertsBusy.value = false
+    }
+  }
+
+  /**
+   * 开/关告警。
+   *
+   * 首次打开时后端**不重建引擎**：规则、冷却记录都在，所以「关掉再打开」
+   * 不会把基线丢掉，也不会在下一轮把整段在线主机当成「新增」重报一遍。
+   */
+  async function setAlertsEnabled(enabled: boolean): Promise<void> {
+    try {
+      alerts.value = await svc.setAlertsEnabled(enabled)
+      status.value = enabled
+        ? '告警已启用（默认规则：新增主机 / 离线 / 延迟>200ms / 可用率<90%）'
+        : '告警已关闭（规则不再求值；已积累的冷却记录与基线保留）'
+    } catch (e) {
+      status.value = `切换告警失败：${String(e)}`
+    }
+  }
+
+  /** 静音开关。静音不改判定，因此解除静音不会补报积压告警。 */
+  async function setAlertMuted(muted: boolean): Promise<void> {
+    try {
+      alerts.value = await svc.setAlertMuted(muted)
+      status.value = muted ? '告警已静音：规则照常求值，只是不通知' : '告警已解除静音'
+    } catch (e) {
+      status.value = `切换静音失败：${String(e)}`
+    }
+  }
+
+  /** 改阈值 / 冷却 / 启用哪几类。后端会校验并给出原因。 */
+  async function updateAlertRules(patch: {
+    latencyMs?: number
+    uptimePct?: number
+    cooldownSecs?: number
+    kinds?: string[]
+  }): Promise<boolean> {
+    try {
+      alerts.value = await svc.updateAlertRules(patch)
+      status.value = '告警规则已更新'
+      return true
+    } catch (e) {
+      // 后端给的是可直接展示的中文原因，不要再包一层
+      status.value = String(e)
+      return false
+    }
+  }
+
+  /** 清空记录（只丢事件，不动基线与冷却）。 */
+  async function dropAlerts(): Promise<void> {
+    try {
+      alerts.value = await svc.clearAlerts()
+      status.value = '已清空告警记录（基线与冷却记录保留）'
+    } catch (e) {
+      status.value = `清空告警失败：${String(e)}`
+    }
+  }
+
+  /** 未读视角的告警摘要：给状态栏/角标用；没有告警时为空串（不写「0 条」这种噪音）。 */
+  const alertNote = computed(() => {
+    const a = alerts.value
+    if (!a || a.total === 0) return ''
+    return `告警 ${a.total} 条${a.muted ? '（已静音）' : ''}`
+  })
+
+  const alertCount = computed(() => alerts.value?.total ?? 0)
 
   function setTcpPort(port: number) {
     if (!Number.isFinite(port) || port <= 0 || port > 65535) return
@@ -944,6 +1047,17 @@ export const usePingStore = defineStore('ping', () => {
     loadTrend,
     dropTrend,
     exportTrend,
+    // M15
+    alerts,
+    alertsBusy,
+    alertFeed,
+    alertNote,
+    alertCount,
+    loadAlerts,
+    setAlertsEnabled,
+    setAlertMuted,
+    updateAlertRules,
+    dropAlerts,
     // M8
     round,
     changes,

@@ -53,6 +53,10 @@ pub enum Action {
     Fingerprint,
     /// M14：查看历史与可用率趋势
     ShowTrend,
+    /// M15：查看告警面板（首次打开会启用告警）
+    ShowAlerts,
+    /// M15：切换告警静音（规则照常求值，只是不通知）
+    ToggleAlertMute,
     Char(char),
     Backspace,
 }
@@ -98,6 +102,9 @@ pub fn map_key(key: KeyEvent) -> Action {
         KeyCode::Char('F') => Action::Fingerprint,
         // M14 历史与趋势：U 看可用率（uptime）
         KeyCode::Char('U') => Action::ShowTrend,
+        // M15 告警：A 看告警面板，! 切静音
+        KeyCode::Char('A') => Action::ShowAlerts,
+        KeyCode::Char('!') => Action::ToggleAlertMute,
         // 确认框用：y 恢复、N 不恢复（小写 n 在确认框里也当「不恢复」，
         // 由 app 层按当前状态解释，见 App::on_key）
         KeyCode::Char('y') | KeyCode::Char('Y') => Action::PromptYes,
@@ -146,6 +153,16 @@ mod tests {
         assert_eq!(press('U'), Action::ShowTrend);
         // 回归：小写 u 没被占用，仍落到「普通字符」分支（不进任何功能）
         assert_eq!(press('u'), Action::Char('u'));
+    }
+
+    #[test]
+    fn m15_shortcuts_do_not_take_over_existing_keys() {
+        assert_eq!(press('A'), Action::ShowAlerts);
+        assert_eq!(press('!'), Action::ToggleAlertMute);
+        // 回归：小写 a 没被占用，仍落到「普通字符」分支
+        assert_eq!(press('a'), Action::Char('a'));
+        // 回归：U 仍是趋势，A 不得抢走它
+        assert_eq!(press('U'), Action::ShowTrend);
     }
 
     #[test]

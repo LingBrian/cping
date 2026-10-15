@@ -6,7 +6,7 @@
 
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -593,6 +593,10 @@ struct Shared {
     /// M14：本轮扫描的起始时刻（Unix 毫秒）——时序点用它打时间戳，
     /// 而不是「扫描结束的现在」，免得一轮跑几秒就把时间轴拉长。
     round_at_ms: u64,
+    /// M15：告警引擎（规则求值 + 冷却去重 + 静音 + 事件缓冲）。
+    alerts: cping_core::AlertEngine,
+    /// M15：告警是否启用。默认**关闭**——不问就发通知比不装告警还糟。
+    alerts_enabled: bool,
 }
 
 pub struct AppState {
@@ -639,6 +643,8 @@ impl AppState {
                 fingerprint_banner: true,
                 series: cping_core::TimeSeries::new(),
                 round_at_ms: 0,
+                alerts: cping_core::AlertEngine::new(cping_core::AlertConfig::default()),
+                alerts_enabled: false,
             })),
         }
     }
@@ -1010,6 +1016,8 @@ pub fn start_scan(
             }
 
             let terminal = event.is_terminal();
+            // M15：本轮触发的告警。声明在 `terminal` 块外，好在锁释放后 emit 出去。
+            let mut fired: Vec<cping_core::AlertEvent> = Vec::new();
             if terminal {
                 // 扫描一结束就补一次 MAC/厂商：ARP 表此刻最新鲜（见 core::enrich 的说明）。
                 // 必须在 emit 之前做完，这样前端收到终端事件后立刻拉取的 snapshot 已带上新字段。
@@ -1038,6 +1046,21 @@ pub fn start_scan(
                     sh.round_at_ms
                 };
                 sh.series.append_results(at, &current);
+                // M15：告警求值放在时序追加**之后**——可用率规则要用含本轮在内的
+                // 累计观测数，先追加再求值才自洽（与 CLI / TUI 同一处顺序）。
+                if sh.alerts_enabled {
+                    let uptime = if sh.series.is_empty() {
+                        Default::default()
+                    } else {
+                        sh.series.uptime_map()
+                    };
+                    let round = sh.monitor.round();
+                    // 先把阈值复制出来：下面 `alerts` 是可变借用，再借 `sh.thresholds` 会冲突
+                    let thresholds_now = sh.thresholds;
+                    fired =
+                        sh.alerts
+                            .evaluate(at, round, &[], &current, &thresholds_now, &uptime);
+                }
                 // 进程随时可能被系统回收（Android 上销毁 Activity 即退出进程），
                 // 所以结果一落地就顺手写盘，不依赖退出钩子。
                 let _ = autosave(&app, &sh);
@@ -1045,6 +1068,11 @@ pub fn start_scan(
 
             let dto = to_event_dto(&event, &thresholds, mode);
             let _ = app.emit("probe-event", dto);
+            // 告警单独走一条事件：前端可以据此弹提示，而不必轮询。
+            if !fired.is_empty() {
+                let fired: Vec<AlertEventDto> = fired.iter().map(alert_event_dto).collect();
+                let _ = app.emit("alert-event", fired);
+            }
             if terminal {
                 break;
             }
@@ -1319,6 +1347,234 @@ pub fn export_uptime_report(
         report.len(),
         sh.series.total_rounds()
     ))
+}
+
+// ---------------------------------------------------------------------------
+// M15：告警
+// ---------------------------------------------------------------------------
+
+/// 一条规则的对外形态。`label` / `usesThreshold` 都来自核心，前端不再自己判断。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlertRuleDto {
+    pub kind: String,
+    pub label: String,
+    pub enabled: bool,
+    /// 只有延迟/可用率两类用得到阈值；边沿类规则这里恒为 false。
+    pub uses_threshold: bool,
+    pub threshold: u32,
+    pub cooldown_secs: u64,
+}
+
+/// 一条告警事件。`time` 已按 UTC 格式化——前端不做时区换算，免得两端口径不一。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlertEventDto {
+    pub kind: String,
+    pub kind_label: String,
+    pub severity: String,
+    pub severity_label: String,
+    pub ip: String,
+    pub at_ms: u64,
+    pub time: String,
+    pub round: u64,
+    /// 触发时的实际值（延迟 ms / 可用率百分数）；边沿类规则为 null。
+    pub value: Option<f64>,
+    pub threshold: Option<u32>,
+    pub message: String,
+}
+
+/// 告警页的整体状态。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlertDto {
+    pub enabled: bool,
+    pub muted: bool,
+    /// 是否已建立基线（第一轮之后为 true）。
+    pub primed: bool,
+    pub active_rules: usize,
+    /// 累计告警条数（「清空」会一并归零）。
+    pub total: u64,
+    /// 当前缓冲里保留的条数。
+    pub kept: usize,
+    pub suppressed_by_cooldown: u64,
+    pub suppressed_by_mute: u64,
+    pub rules: Vec<AlertRuleDto>,
+    pub events: Vec<AlertEventDto>,
+    /// 延迟阈值（ms）/ 可用率阈值（%）/ 冷却（秒）——便捷项，供前端表单回填。
+    pub latency_threshold_ms: u32,
+    pub uptime_threshold_pct: u32,
+    pub cooldown_secs: u64,
+    /// 空状态时给一句人话；有数据时为 null。
+    pub empty_hint: Option<String>,
+}
+
+fn alert_event_dto(e: &cping_core::AlertEvent) -> AlertEventDto {
+    AlertEventDto {
+        kind: e.kind.key().to_string(),
+        kind_label: e.kind.label_zh().to_string(),
+        severity: e.severity.key().to_string(),
+        severity_label: e.severity.label_zh().to_string(),
+        ip: e.ip.to_string(),
+        at_ms: e.at_ms,
+        time: cping_core::format_unix_local(e.at_ms / 1000),
+        round: e.round,
+        value: e.value,
+        threshold: e.threshold,
+        message: e.message.clone(),
+    }
+}
+
+/// 把引擎状态折成 DTO。`limit` 限制返回的事件条数（最新的在前）。
+fn alert_dto(sh: &Shared, limit: usize) -> AlertDto {
+    let engine = &sh.alerts;
+    let rules: Vec<AlertRuleDto> = engine
+        .config()
+        .rules
+        .iter()
+        .map(|r| AlertRuleDto {
+            kind: r.kind.key().to_string(),
+            label: r.kind.label_zh().to_string(),
+            enabled: r.enabled,
+            uses_threshold: r.kind.uses_threshold(),
+            threshold: r.threshold,
+            cooldown_secs: r.cooldown_secs,
+        })
+        .collect();
+    let events: Vec<AlertEventDto> = engine
+        .log()
+        .iter_recent_first()
+        .take(limit)
+        .map(alert_event_dto)
+        .collect();
+    let threshold_of = |k: cping_core::AlertKind| {
+        engine
+            .config()
+            .rule(k)
+            .map(|r| r.threshold)
+            .unwrap_or_default()
+    };
+    let cooldown = engine
+        .config()
+        .rules
+        .first()
+        .map(|r| r.cooldown_secs)
+        .unwrap_or_default();
+    AlertDto {
+        enabled: sh.alerts_enabled,
+        muted: engine.is_muted(),
+        primed: engine.is_primed(),
+        active_rules: rules.iter().filter(|r| r.enabled).count(),
+        total: engine.log().total_seen(),
+        kept: events.len(),
+        suppressed_by_cooldown: engine.suppressed_by_cooldown(),
+        suppressed_by_mute: engine.suppressed_by_mute(),
+        latency_threshold_ms: threshold_of(cping_core::AlertKind::LatencyAbove),
+        uptime_threshold_pct: threshold_of(cping_core::AlertKind::UptimeBelow),
+        cooldown_secs: cooldown,
+        rules,
+        empty_hint: if events.is_empty() {
+            Some(if sh.alerts_enabled {
+                "还没有告警。第一轮只建立基线：新增主机规则从第二轮起才生效（否则扫个 /24 会一次刷出 255 条）。".into()
+            } else {
+                "告警尚未启用。打开后按默认规则（新增主机 / 离线 / 延迟>200ms / 可用率<90%）监测。".into()
+            })
+        } else {
+            None
+        },
+        events,
+    }
+}
+
+/// 告警页数据。`limit` 默认 200。
+#[tauri::command]
+pub fn alert_state(state: State<'_, AppState>, limit: Option<u32>) -> Result<AlertDto, String> {
+    let sh = state.shared.lock().expect("state poisoned");
+    Ok(alert_dto(&sh, limit.unwrap_or(200).clamp(1, 2000) as usize))
+}
+
+/// 开/关告警。**不重置任何状态**：关掉再打开不该丢掉冷却记录与基线。
+#[tauri::command]
+pub fn set_alerts_enabled(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<AlertDto, String> {
+    let mut sh = state.shared.lock().expect("state poisoned");
+    sh.alerts_enabled = enabled;
+    Ok(alert_dto(&sh, 200))
+}
+
+/// 静音开关。规则照常求值、冷却照常推进，只是不产生事件——
+/// 所以解除静音**不会**补报一堆积压告警（核心有对应回归测试）。
+#[tauri::command]
+pub fn set_alert_muted(state: State<'_, AppState>, muted: bool) -> Result<AlertDto, String> {
+    let mut sh = state.shared.lock().expect("state poisoned");
+    sh.alerts.set_muted(muted);
+    Ok(alert_dto(&sh, 200))
+}
+
+/// 改阈值 / 冷却 / 启用哪几类。
+///
+/// 只覆盖**显式给过**的字段；`apply_config` 会保留冷却记录与基线，
+/// 所以改一次阈值不会把「某台主机刚报过」的记录清掉，也就不会立刻重复上报。
+/// 返回 `Result` + 正确文本：界面能直接展示后端给的原因，而不是自己编一句。
+#[tauri::command]
+pub fn update_alert_rules(
+    state: State<'_, AppState>,
+    latency_ms: Option<u32>,
+    uptime_pct: Option<u32>,
+    cooldown_secs: Option<u64>,
+    kinds: Option<Vec<String>>,
+) -> Result<AlertDto, String> {
+    let mut sh = state.shared.lock().expect("state poisoned");
+    if let Some(pct) = uptime_pct {
+        if pct > 100 {
+            return Err(format!("可用率阈值必须在 0-100 之间，得到 {pct}"));
+        }
+    }
+    let mut cfg = sh.alerts.config().clone();
+    if let Some(v) = latency_ms {
+        if let Some(rule) = cfg.rule_mut(cping_core::AlertKind::LatencyAbove) {
+            rule.threshold = v;
+        }
+    }
+    if let Some(v) = uptime_pct {
+        if let Some(rule) = cfg.rule_mut(cping_core::AlertKind::UptimeBelow) {
+            rule.threshold = v;
+        }
+    }
+    if let Some(v) = cooldown_secs {
+        for rule in &mut cfg.rules {
+            rule.cooldown_secs = v;
+        }
+    }
+    if let Some(names) = kinds {
+        let parsed: Vec<cping_core::AlertKind> = names
+            .iter()
+            .filter_map(|n| cping_core::AlertKind::parse_key(n))
+            .collect();
+        if parsed.len() != names.len() {
+            let known = cping_core::all_kinds()
+                .iter()
+                .map(|k| k.key())
+                .collect::<Vec<_>>()
+                .join("/");
+            return Err(format!("告警类别只支持 {known}，得到 {names:?}"));
+        }
+        // 空列表 = 关掉全部规则。这是用户的明确意图，照做。
+        cfg.with_kinds(&parsed);
+    }
+    sh.alerts.apply_config(cfg);
+    Ok(alert_dto(&sh, 200))
+}
+
+/// 清空告警记录。**只丢事件**：`seen` 基线与冷却记录照旧保留，
+/// 否则下一轮会把整段在线主机当成「新增」重新刷一遍。
+#[tauri::command]
+pub fn clear_alerts(state: State<'_, AppState>) -> Result<AlertDto, String> {
+    let mut sh = state.shared.lock().expect("state poisoned");
+    sh.alerts.log_mut().clear();
+    Ok(alert_dto(&sh, 200))
 }
 
 /// Android 等无桌面文件对话框的场景：写到平台提供的可写目录并回报完整路径。
@@ -1781,30 +2037,17 @@ fn file_stamp() -> String {
 }
 
 fn unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    cping_core::unix_secs_now()
 }
 
 /// M14：当前 Unix 毫秒（时序点时间戳）。取不到硬故障时返回 0，
 /// 由核心按「时间未知」处理，而不是伪造一个看似合理的数值。
 fn unix_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    cping_core::unix_millis_now()
 }
 
+/// Howard Hinnant 的 civil_from_days。M15 起下沉到 `cping_core::timefmt`
+/// （此前 CLI/TUI/GUI 各一份拷贝），此处只做转发。
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
+    cping_core::civil_from_days(z)
 }

@@ -4,6 +4,8 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import type {
+  AlertDto,
+  AlertEventDto,
   AppConfigDto,
   BackendCapsDto,
   ChangeDto,
@@ -219,4 +221,48 @@ export async function clearTrend(): Promise<number> {
 /** 导出可用率报表（.csv / .html，按扩展名决定）。 */
 export async function exportUptimeReport(path: string): Promise<string> {
   return invoke<string>('export_uptime_report', { path })
+}
+
+// ---------------------------------------------------------------------------
+// M15：告警
+// ---------------------------------------------------------------------------
+
+/** 告警页数据。`limit` 为返回的最新事件条数上限（默认 200）。 */
+export async function alertState(limit = 200): Promise<AlertDto> {
+  return invoke<AlertDto>('alert_state', { limit })
+}
+
+/** 开/关告警。不重置任何状态——关掉再打开不会丢掉冷却记录与基线。 */
+export async function setAlertsEnabled(enabled: boolean): Promise<AlertDto> {
+  return invoke<AlertDto>('set_alerts_enabled', { enabled })
+}
+
+/** 静音开关：规则照常求值，只是不产生事件。 */
+export async function setAlertMuted(muted: boolean): Promise<AlertDto> {
+  return invoke<AlertDto>('set_alert_muted', { muted })
+}
+
+/**
+ * 改阈值 / 冷却 / 启用哪几类。
+ *
+ * 只传需要改的字段；后端只覆盖显式给过的项，并保留冷却记录与基线，
+ * 所以调一次阈值不会让「刚报过」的主机立刻重报一遍。
+ */
+export async function updateAlertRules(patch: {
+  latencyMs?: number
+  uptimePct?: number
+  cooldownSecs?: number
+  kinds?: string[]
+}): Promise<AlertDto> {
+  return invoke<AlertDto>('update_alert_rules', patch)
+}
+
+/** 清空告警记录（只丢事件，不动基线与冷却）。 */
+export async function clearAlerts(): Promise<AlertDto> {
+  return invoke<AlertDto>('clear_alerts')
+}
+
+/** 订阅告警事件：一轮扫描里触发的告警会打包成一批推过来。 */
+export function onAlertEvent(cb: (events: AlertEventDto[]) => void): Promise<UnlistenFn> {
+  return listen<AlertEventDto[]>('alert-event', (ev) => cb(ev.payload))
 }

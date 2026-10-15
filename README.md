@@ -6,7 +6,7 @@
 
 Rust 核心 · TUI（ratatui）· 桌面 GUI（Tauri 2 + Vue 3）· Android
 
-[![Release](https://img.shields.io/badge/release-v2.2.0-111827)](../../releases)
+[![Release](https://img.shields.io/badge/release-v2.3.0-111827)](../../releases)
 [![CI](https://github.com/LingBrian/cping/actions/workflows/ci.yml/badge.svg)](https://github.com/LingBrian/cping/actions/workflows/ci.yml)
 [![Tests](https://img.shields.io/badge/tests-336%20passed-brightgreen)](docs/testing.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -74,6 +74,9 @@ cping/
 │   ├── json/html/diff/export           M10：四种导出格式与两次扫描对比
 │   ├── fingerprint                     M13：端口指纹 · 服务横幅 · 设备类型推断（纯数据驱动）
 │   ├── timeseries                      M14：长期时序 · 降采样 · 可用率报表 · 折线与字符曲线
+│   ├── alerts                          M15：告警规则（纯函数匹配）· 冷却去重 · 静音 · 状态落盘
+│   ├── notify                          M15：五通道通知（console/system/webhook/command/smtp）
+│   ├── timefmt                         M15：时间算法（三端共用，同一处实现）
 │   ├── oui/neighbor/hostname/enrich    M7：厂商识别 · ARP 取 MAC · 反查主机名 · 信息补全
 │   ├── snapshot                        结果快照落盘与恢复（严格解析，坏数据宁可报错）
 │   ├── data/                           IEEE OUI 三表（54,190 条，编译期嵌入）
@@ -130,6 +133,12 @@ cping-cli -t 192.168.1 --fingerprint --fp-ports 22,80,443 --no-banner
 # M14：把每轮追加到长期时序（跨会话累积），结束时出可用率报表
 cping-cli -t 192.168.1 --watch 60 --history net.ts --report uptime.html
 cping-cli -t 192.168.1 --watch 300 --history net.ts --keep-days 30 --report uptime.csv
+# M15：告警与通知（阈值 + 新增/离线；五通道，失败一定可见）
+cping-cli -t 192.168.1 --watch 30 --alert --alert-latency 200 --alert-state alerts.txt
+cping-cli -t 192.168.1 --watch 30 --alert --notify console,system
+cping-cli -t 192.168.1 --watch 30 --alert --notify webhook --notify-webhook http://10.0.0.5:9000/cping
+cping-cli -t 192.168.1 --watch 30 --alert --notify-cmd "curl -s -d {json} https://example.com/h"
+cping-cli --notify-list            # 本平台各通知通道的可用性与原因
 ```
 
 退出码：`0` 全部在线 / `1` 存在离线 / `2` 参数错误 / `3` 权限不足或后端不可用。
@@ -145,6 +154,14 @@ cping-cli -t 192.168.1 --watch 300 --history net.ts --keep-days 30 --report upti
 > 落盘，Ctrl+C 也不丢已跑过的轮次。`--report` 的数值可直接对账回原始记录：
 > 降采样只做同类项相加，观测轮数与 RTT 求和在合并前后守恒。
 > **从未在线的主机 RTT 记为「-」而不是 0**——0 会被读成「极快」。
+>
+> `--alert` 的规则匹配是**纯函数**，三条边界写死：**第一轮不发「新增主机」**
+> （否则扫个 /24 会一次刷出 255 条）；阈值用**严格不等号**（恰好等于阈值不告警）；
+> **静音不是暂停**（规则照常求值、冷却照常推进，所以解除静音不会补报积压告警）。
+> 通知**通道失败必须可见**：每通道单独汇报成功/失败与原因，投递在后台线程
+> （队列满丢弃并计数），绝不阻塞扫描。`webhook` 只支持 `http://`——
+> 本构建不含 TLS，`https://` 会被**明确拒绝**而不是静默明文发送；
+> 需要 https 请用 `--notify-cmd` 调 curl 等自带 TLS 的工具。
 
 ### TUI
 
@@ -163,6 +180,7 @@ cping-tui --prefix 192.168.1
 | `T` | 切换 ICMP ↔ TCP | `p` | 轮换常用 TCP 端口 |
 | `F` | 端口指纹（选中主机；无选中则全部在线主机） | `M` | 开/关持续监控 | `e` | 查看变化事件流 |
 | `U` | 历史与趋势（每台主机一条在线率字符柱曲线） | `[` / `]` | 缩短 / 延长重扫间隔 |
+| `A` | 告警记录（**首次按即启用告警**） | `!` | 告警静音开关（不改判定） |
 | `?` / `F1` | 帮助 | `q` | 退出（运行中需再按一次确认） |
 | `Ctrl+C` | 强制退出并恢复终端 | | |
 
@@ -172,6 +190,9 @@ cping-tui --prefix 192.168.1
 趋势面板里的曲线用 8 档字符柱（`▁▂▃▄▅▆▇█`）表示每轮的在线率；`·` 表示该轮
 **没测到**这台主机（不是「离线」）。TUI 的趋势只累积在本进程内——需要跨会话的
 长期历史请用 `cping-cli --history`，两者共用同一套时序核心。
+
+告警默认**关闭**（不问就发通知比不装还糟）。按 `A` 打开面板会**就地启用**
+（不必重启加参数）；`!` 切静音——静音的只是通知，判定与冷却照常推进。
 
 可选 `--snapshot-dir <目录>` 指定快照目录（默认当前目录）。
 
@@ -193,9 +214,15 @@ cping-tui --prefix 192.168.1
 曲线断开处表示该轮**没测到**这台主机，不是「离线」。可导出 CSV / HTML 报表并清空。
 移动端同一页签，但隐藏导出按钮（`plugin-dialog` 的 `save` 在 Android 上无原生实现）。
 
+**告警（M15）**：「告警」页签可开关告警（默认关）、逐条启用/停用规则、改阈值与
+冷却、一键静音、清空记录。事件表按「时间 / 类别 / 主机 / 说明 / 实测值与阈值 / 轮次」
+列出。每轮扫描结束时后端推 `alert-event` 事件，界面据此提示并刷新。
+「清空记录」**只丢事件**，基线与冷却记录保留——否则下一轮会把整段在线主机
+当成「新增」重报一遍。
+
 ### Android
 
-列表优先的触控布局：网段输入（数字键盘）→ 开始探测；列表/矩阵/变化/趋势页签、
+列表优先的触控布局：网段输入（数字键盘）→ 开始探测；列表/矩阵/变化/趋势/告警页签、
 仅在线开关、导出到应用专属外部目录（回报完整路径，Android 10+ 分区存储无需权限）、
 抽屉式设置。
 已在 Android 15 模拟器完成真机级验收：安装/启动/扫描/导出/横竖屏/前后台全部通过；
@@ -212,7 +239,8 @@ cping-tui --prefix 192.168.1
 | **v2.0.0** ✅ | M12 | 架构升级：IPv4+IPv6 统一目标模型、后端注册表、可选 Tokio 异步调度 |
 | v2.1.0 ✅ | M13 | 资产识别：开放端口与服务指纹、设备类型推断 |
 | **v2.2.0** ✅ | M14 | 历史与趋势：跨会话时序（版本化格式 + 降采样）、可用率报表、在线率曲线 |
-| v2.3.0–v2.7.0 | M15–M19 | 告警与通知 · 配置与模板 · 安全与合规 · 国际化与无障碍 · 规模化性能 |
+| **v2.3.0** ✅ | M15 | 告警与通知：四类规则（纯函数匹配）、冷却去重与静音、五通道通知、跨会话状态 |
+| v2.4.0–v2.7.0 | M16–M19 | 配置与模板 · 安全与合规 · 国际化与无障碍 · 规模化性能 |
 | v3.0.0 | M20 | 生态与开放：插件接口、脚本化任务、对外 API（主版本） |
 
 各阶段详细功能与验收条件见 [`docs/plan.md`](docs/plan.md)「路线图」章节。

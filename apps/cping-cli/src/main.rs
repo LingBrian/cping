@@ -52,6 +52,11 @@ fn run(argv: &[String]) -> i32 {
         print_backends();
         return EXIT_OK;
     }
+    // M15：打印通知通道能力后退出。同样不需要目标。
+    if parsed.notify_list {
+        print_notify_channels();
+        return EXIT_OK;
+    }
     if let Err(msg) = parsed.validate() {
         eprintln!("参数错误：{msg}");
         return EXIT_USAGE;
@@ -83,6 +88,10 @@ struct Session {
     last_stats: ScanStats,
     /// M14：跨会话的长期时序（`--history` 载入并回写，`--report` 据此出报表）。
     series: TimeSeries,
+    /// M15：告警引擎（`--alert` 时才有）。
+    alerts: Option<cping_core::AlertEngine>,
+    /// M15：后台通知投递（有通知通道时才有）。
+    sink: Option<cping_core::AlertSink>,
 }
 
 impl Session {
@@ -131,6 +140,54 @@ impl Session {
             None => TimeSeries::new(),
         };
         series.retention_secs = args.keep_days * 86_400;
+
+        // M15：告警引擎。`--alert-state` 指向的文件若已存在就**续用**它的冷却记录
+        // （否则每次重启都会把同一台主机的告警重报一遍）。
+        let alerts = if args.alert {
+            let mut engine = match &args.alert_state {
+                Some(path) if std::path::Path::new(path).exists() => {
+                    match cping_core::AlertEngine::load_from_path(path) {
+                        Ok((e, skipped)) => {
+                            if skipped > 0 {
+                                eprintln!("警告：告警状态 {path} 有 {skipped} 行无法解析，已跳过");
+                            }
+                            if !args.quiet {
+                                eprintln!(
+                                    "已载入告警状态：{} 台主机的冷却记录（{path}）",
+                                    e.seen_hosts()
+                                );
+                            }
+                            e
+                        }
+                        Err(err) => {
+                            eprintln!("告警状态文件无法使用：{err}");
+                            return Err(EXIT_USAGE);
+                        }
+                    }
+                }
+                _ => cping_core::AlertEngine::new(args.alert_config()),
+            };
+            // 阈值与静音一律以**本次命令行**为准：状态文件只负责冷却记录，
+            // 拿旧文件里的设置覆盖用户这次的参数只会让人莫名其妙。
+            engine.apply_config(args.alert_config());
+            Some(engine)
+        } else {
+            None
+        };
+        if let Some(e) = &alerts {
+            if e.is_muted() {
+                eprintln!("提示：告警已静音（--mute-alerts）：规则照常求值，但不会通知");
+            }
+            if args.watch_seconds.is_none() {
+                eprintln!(
+                    "提示：只跑一轮时，「新增主机」规则只建立基线（不发事件）。\
+                     要观察上线下线请加 --watch"
+                );
+            }
+        }
+        // M15：通知在后台线程投递，绝不在扫描主循环里做网络 I/O
+        let sink = cping_core::AlertSink::spawn(args.notify_config());
+
         Ok(Self {
             args: args.clone(),
             spec: spec.clone(),
@@ -142,10 +199,21 @@ impl Session {
             round: 0,
             last_stats: ScanStats::default(),
             series,
+            alerts,
+            sink,
         })
     }
 
     fn execute(&mut self) -> i32 {
+        // 无论中途怎么退出，告警状态与待投递的通知都要收尾——
+        // 「跑完一轮就 Ctrl+C」正是最该把冷却记录留下来的场景。
+        let code = self.run_rounds();
+        self.finish_alerts();
+        code
+    }
+
+    /// 主循环：跑完 `--rounds` 轮（或直到 Ctrl+C），返回退出码。
+    fn run_rounds(&mut self) -> i32 {
         let thresholds = Thresholds::default();
         if self.round == 1 && !self.args.quiet {
             println!(
@@ -185,7 +253,8 @@ impl Session {
 
             // M14：并入长期时序。每轮**立即落盘**——Ctrl+C 或掉电时已经跑过的轮次
             // 不该丢，这是「长期观察」的基本要求。
-            if self.args.history.is_some() || self.args.report.is_some() {
+            // M15 的可用率规则也从这里取数，所以开了告警同样要记。
+            if self.args.history.is_some() || self.args.report.is_some() || self.args.alert {
                 self.series.append_results(now_ms(), &outcome.results);
             }
             if let Some(path) = &self.args.history {
@@ -202,6 +271,9 @@ impl Session {
                     );
                 }
             }
+
+            // M15：告警求值 + 非阻塞投递。顺序放在时序之后：可用率规则要用本轮数据。
+            self.run_alerts(&outcome.results, &thresholds);
 
             self.previous = outcome.results;
             self.changes.extend(outcome.changes);
@@ -359,6 +431,111 @@ impl Session {
         };
         std::fs::write(path, bytes).map_err(|e| format!("写入 {path} 失败：{e}"))
     }
+
+    // ------------------------------------------------------------------
+    // M15：告警与通知
+    // ------------------------------------------------------------------
+
+    /// 求值一轮告警并（非阻塞地）投递。
+    ///
+    /// `previous` 用**上一轮**的结果：`Disappeared` 规则问的是「上一轮在线、
+    /// 本轮离线」，所以必须在 `self.previous` 被覆盖之前调用。
+    fn run_alerts(&mut self, current: &[ProbeResult], thresholds: &Thresholds) {
+        let Some(engine) = self.alerts.as_mut() else {
+            return;
+        };
+        let uptime = if self.series.is_empty() {
+            Default::default()
+        } else {
+            self.series.uptime_map()
+        };
+        let events = engine.evaluate(
+            now_ms(),
+            self.round,
+            &self.previous,
+            current,
+            thresholds,
+            &uptime,
+        );
+
+        if !self.args.quiet {
+            if events.is_empty() {
+                if self.round > 1 {
+                    println!("  告警：无");
+                }
+            } else {
+                println!("  告警 {} 条：", events.len());
+                for e in &events {
+                    println!("    [{}] {}", e.severity.label_zh(), e.message);
+                }
+            }
+            let cd = engine.suppressed_by_cooldown();
+            let mu = engine.suppressed_by_mute();
+            if cd + mu > 0 {
+                println!("     （已按冷却/静音抑制：冷却 {cd} 条 · 静音 {mu} 条）");
+            }
+        }
+
+        if let Some(sink) = &self.sink {
+            sink.post(&events);
+        }
+    }
+
+    /// 收尾：落盘告警状态、等通知投递完、如实汇报每个通道的结果。
+    fn finish_alerts(&mut self) {
+        if let (Some(engine), Some(path)) = (&self.alerts, &self.args.alert_state) {
+            match engine.save_to_path(path) {
+                Ok(()) if !self.args.quiet => {
+                    println!(
+                        "告警状态 → {path}（{} 台主机的冷却记录）",
+                        engine.seen_hosts()
+                    );
+                }
+                Ok(()) => {}
+                Err(e) => eprintln!("告警状态写入失败：{e}"),
+            }
+        }
+
+        let Some(sink) = self.sink.take() else {
+            return;
+        };
+        let posted = sink.posted();
+        let dropped = sink.dropped();
+        let outcomes = sink.finish();
+        if dropped > 0 {
+            eprintln!("警告：通知队列满，有 {dropped} 批未投递（投递速度跟不上告警速度）");
+        }
+        // 通道失败必须可见——哪怕在 --quiet 下
+        let failed = outcomes.iter().filter(|o| !o.ok).count();
+        if !self.args.quiet {
+            if outcomes.is_empty() {
+                println!("通知：{posted} 批已投递（未配置任何通道）");
+            } else {
+                println!("通知：{posted} 批 · 通道结果：");
+                for o in &outcomes {
+                    println!(
+                        "  {} {}：{}",
+                        if o.ok { "✓" } else { "✗" },
+                        o.channel,
+                        o.detail
+                    );
+                }
+            }
+        }
+        for o in outcomes.iter().filter(|o| !o.ok) {
+            eprintln!("通知通道 {} 失败：{}", o.channel, o.detail);
+        }
+        if failed > 0
+            && self
+                .alerts
+                .as_ref()
+                .is_some_and(|e| e.log().total_seen() > 0)
+        {
+            eprintln!(
+                "提示：有 {failed} 个通知通道未能送达（告警本身已记录，见 --notify-list 查能力）"
+            );
+        }
+    }
 }
 
 struct RoundOutcome {
@@ -369,6 +546,27 @@ struct RoundOutcome {
     changes: Vec<Change>,
     /// M13：端口指纹（独立于 results，不参与在线判定）。
     fingerprints: Vec<cping_core::HostFingerprint>,
+}
+
+/// M15：列出本平台的通知通道能力。
+///
+/// 与 `--list-backends` 同一套思路：**不可用的通道也打出来，并写明原因**。
+/// 「webhook 不支持 https」是用户需要知道的事实，藏起来只会让人对着
+/// 一个没反应的通知通道猜半天。
+fn print_notify_channels() {
+    println!(
+        "cping-cli {} · {} · 通知通道",
+        cping_core::VERSION,
+        std::env::consts::OS
+    );
+    println!();
+    println!("{:<10} {:<6} 说明", "通道", "可用");
+    for (key, ok, note) in cping_core::notifications_available() {
+        println!("{:<10} {:<6} {}", key, if ok { "是" } else { "否" }, note);
+    }
+    println!();
+    println!("提示：通道失败一定会被打印出来——告警系统静默失败比不装还糟。");
+    println!("      https 的 webhook 请走 --notify-cmd 调 curl 等自带 TLS 的工具。");
 }
 
 fn print_round(
@@ -503,49 +701,21 @@ fn print_backends() {
 }
 
 fn now_text() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format_unix_local(secs)
+    format_unix_local(cping_core::unix_secs_now())
 }
 
-/// 当前 Unix 毫秒（M14 时序点的时间戳）。取不到时退化为 0，
+/// 当前 Unix 毫秒（M14 时序点 / M15 告警事件的时间戳）。取不到时退化为 0，
 /// 调用端会把它当作「时间未知」——而不是伪造一个看起来合理的数字。
 fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    cping_core::unix_millis_now()
 }
 
-/// 把 Unix 秒转成 `YYYY-MM-DD HH:MM:SS`（本地时区偏移由系统给出）。
+/// 把 Unix 秒转成 `YYYY-MM-DD HH:MM:SS UTC`。
+///
+/// M15 起算法下沉到 `cping_core::timefmt`（此前 CLI/TUI/GUI 各有一份拷贝），
+/// 这里保留同名包装只是为了不动既有调用点与单测。
 fn format_unix_local(unix_secs: u64) -> String {
-    // 计算本地偏移的简易做法：用 libc 之外的路径不可得，这里退化为 UTC，
-    // 并额外打印偏移不可知这一事实——绝不假装是本地时间。
-    let days = unix_secs / 86_400;
-    let rem = unix_secs % 86_400;
-    let (y, m, d) = civil_from_days(days as i64);
-    format!(
-        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02} UTC",
-        rem / 3600,
-        (rem % 3600) / 60,
-        rem % 60
-    )
-}
-
-/// Howard Hinnant 的 `civil_from_days`（1970-01-01 起的天数 → 年月日）。
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
+    cping_core::format_unix_local(unix_secs)
 }
 
 #[cfg(test)]
@@ -555,19 +725,8 @@ mod tests {
     use cping_core::spec::ProbeMode;
     use std::net::{IpAddr, Ipv4Addr};
 
-    #[test]
-    fn civil_from_days_matches_known_dates() {
-        assert_eq!(civil_from_days(0), (1970, 1, 1));
-        assert_eq!(civil_from_days(1), (1970, 1, 2));
-        assert_eq!(civil_from_days(364), (1970, 12, 31));
-        assert_eq!(civil_from_days(365), (1971, 1, 1));
-        // 2026-10-15 = 20741 天（用 python 独立核算，不靠心算）
-        assert_eq!(civil_from_days(20_741), (2026, 10, 15));
-        assert_eq!(civil_from_days(20_740), (2026, 10, 14));
-        // 闰年边界
-        assert_eq!(civil_from_days(11_016), (2000, 2, 29));
-        assert_eq!(civil_from_days(11_017), (2000, 3, 1));
-    }
+    // 日期换算的边界测试已随算法一起下沉到 `cping_core::timefmt`，
+    // 这里只留一条「CLI 的输出口径确实是 UTC 且带后缀」的断言（防止包装被改坏）。
 
     #[test]
     fn timestamp_is_marked_as_utc_not_local() {

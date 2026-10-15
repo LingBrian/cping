@@ -15,6 +15,7 @@ import ChangePanel from '../components/ChangePanel.vue'
 import ColorSettings from '../components/ColorSettings.vue'
 import MobileResultList from '../components/MobileResultList.vue'
 import ResultGrid from '../components/ResultGrid.vue'
+import AlertPanel from '../components/AlertPanel.vue'
 import TrendPanel from '../components/TrendPanel.vue'
 import {
   COMMON_TCP_PORTS,
@@ -27,7 +28,7 @@ import { usePingStore } from '../stores/ping'
 const store = usePingStore()
 const message = useMessage()
 
-const tab = ref<'list' | 'matrix' | 'changes' | 'trend'>('list')
+const tab = ref<'list' | 'matrix' | 'changes' | 'trend' | 'alerts'>('list')
 const showSettings = ref(false)
 const localSpec = ref(store.prefix)
 const specError = ref<string | null>(null)
@@ -112,6 +113,12 @@ function openChanges() {
 function openTrend() {
   tab.value = 'trend'
   void store.loadTrend()
+}
+
+/** M15：切到告警页并拉一次状态（不做轮询）。 */
+function openAlerts() {
+  tab.value = 'alerts'
+  void store.loadAlerts()
 }
 </script>
 
@@ -262,6 +269,14 @@ function openTrend() {
       <button
         type="button"
         class="mobile__tab"
+        :class="{ 'mobile__tab--active': tab === 'alerts' }"
+        @click="openAlerts"
+      >
+        告警 ({{ store.alertCount }})
+      </button>
+      <button
+        type="button"
+        class="mobile__tab"
         :class="{ 'mobile__tab--active': store.hideOffline }"
         @click="store.hideOffline = !store.hideOffline"
       >
@@ -273,6 +288,7 @@ function openTrend() {
       <MobileResultList v-if="tab === 'list'" />
       <ChangePanel v-else-if="tab === 'changes'" />
       <TrendPanel v-else-if="tab === 'trend'" :exportable="false" />
+      <AlertPanel v-else-if="tab === 'alerts'" />
       <div v-else-if="!store.canUseMatrix" class="cping-panel" style="font-size: 12px">
         目标 {{ store.stats.total }} 个，超过矩阵上限 256 个，请用列表查看。
       </div>

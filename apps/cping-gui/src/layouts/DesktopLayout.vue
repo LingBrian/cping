@@ -18,13 +18,14 @@ import ProgressSummary from '../components/ProgressSummary.vue'
 import ResultGrid from '../components/ResultGrid.vue'
 import ResultTable from '../components/ResultTable.vue'
 import StatusBar from '../components/StatusBar.vue'
+import AlertPanel from '../components/AlertPanel.vue'
 import TrendPanel from '../components/TrendPanel.vue'
 import { MONITOR_INTERVALS, type ExportFormatKey } from '../shared/types'
 import { usePingStore } from '../stores/ping'
 
 const store = usePingStore()
 const message = useMessage()
-const tab = ref<'matrix' | 'table' | 'changes' | 'assets' | 'trend'>(
+const tab = ref<'matrix' | 'table' | 'changes' | 'assets' | 'trend' | 'alerts'>(
   store.view === 'table' ? 'table' : 'matrix',
 )
 
@@ -33,6 +34,8 @@ watch(tab, (v) => {
   if (v === 'matrix' || v === 'table') store.view = v
   // M14：切到趋势页时拉一次数据（不做轮询，扫描结束时后端会顺带刷新）
   if (v === 'trend') void store.loadTrend()
+  // M15：告警页同理——一处拉取，不做轮询
+  if (v === 'alerts') void store.loadAlerts()
 })
 
 const monitorOptions = MONITOR_INTERVALS.map((s) => ({ label: `${s} 秒`, value: s }))
@@ -125,6 +128,12 @@ async function onFingerprint() {
 async function onShowTrend() {
   tab.value = 'trend'
   await store.loadTrend()
+}
+
+/** M15：切到告警页并拉一次状态。 */
+async function onShowAlerts() {
+  tab.value = 'alerts'
+  await store.loadAlerts()
 }
 
 /** M7：把当前结果存成快照，下次启动可以直接恢复。 */
@@ -235,6 +244,10 @@ async function onSaveSnapshot() {
         <NButton style="width: 100%; margin-top: 8px" @click="onShowTrend">
           可用率趋势
         </NButton>
+        <!-- M15：告警。文案直接写明「默认关闭」——不问就发通知比不装还糟。 -->
+        <NButton style="width: 100%; margin-top: 8px" @click="onShowAlerts">
+          告警{{ store.alertCount > 0 ? `（${store.alertCount} 条）` : '（默认关闭）' }}
+        </NButton>
         <div style="font-size: 11px; color: #6b7280; margin-top: 6px">
           已识别 MAC {{ store.recognized.mac }} · 厂商 {{ store.recognized.vendor }} · 主机名
           {{ store.recognized.hostname }}
@@ -312,6 +325,16 @@ async function onSaveSnapshot() {
         >
           <div style="height: 100%; padding-top: 8px; min-height: 0">
             <TrendPanel />
+          </div>
+        </NTabPane>
+        <!-- M15：告警。标签带条数——攒下的告警一眼可见。 -->
+        <NTabPane
+          name="alerts"
+          :tab="`告警 (${store.alertCount})`"
+          display-directive="show"
+        >
+          <div style="height: 100%; padding-top: 8px; min-height: 0">
+            <AlertPanel />
           </div>
         </NTabPane>
       </NTabs>

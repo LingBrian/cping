@@ -9,6 +9,7 @@
 //! - 分类与统计**只在这里算一次**，界面不得自行重算。
 //! - 权限不足、超时、不可达、内部错误必须互相区分（见 [`error::ProbeError`]）。
 
+pub mod alerts;
 pub mod classify;
 pub mod config;
 pub mod diff;
@@ -24,6 +25,7 @@ pub mod local_ip;
 pub mod monitor;
 pub mod native;
 pub mod neighbor;
+pub mod notify;
 pub mod oui;
 pub mod probe;
 pub mod registry;
@@ -32,6 +34,7 @@ pub mod scheduler;
 pub mod snapshot;
 pub mod spec;
 pub mod target;
+pub mod timefmt;
 pub mod timeseries;
 
 /// 可选异步调度（M12）。默认**不编译**，因此默认构建仍无第三方运行时依赖。
@@ -42,6 +45,12 @@ pub mod timeseries;
 #[cfg(feature = "async")]
 pub mod asynchronous;
 
+pub use alerts::{
+    all_kinds, default_rules, match_rule, online_map, rule_kinds_in_display_order, AlertConfig,
+    AlertContext, AlertEngine, AlertEvent, AlertKind, AlertLog, AlertRule, Severity,
+    ALERT_STATE_FORMAT_VERSION, ALERT_STATE_SIGNATURE, DEFAULT_ALERT_CAPACITY,
+    DEFAULT_COOLDOWN_SECS, DEFAULT_LATENCY_THRESHOLD_MS, DEFAULT_UPTIME_THRESHOLD_PCT,
+};
 pub use classify::{classify_rtt, classify_status, LatencyClass, ResultClass, Thresholds};
 pub use config::{
     default_monitor_interval_ms, AppConfig, ColorConfig, ProbeConfig, ViewMode,
@@ -88,6 +97,10 @@ pub use native::{
     TcpConnectBackend, DEFAULT_PAYLOAD_LEN, ICMP_HEADER_LEN,
 };
 pub use neighbor::{mac_for, neighbor_table, parse_proc_net_arp, NeighborEntry};
+pub use notify::{
+    deliver, events_to_json, expand_template, notifications_available, AlertSink, ChannelConfig,
+    DeliveryOutcome, NotifyConfig, SmtpAccount, SINK_QUEUE_CAPACITY,
+};
 pub use oui::{entry_counts, mac_to_string, parse_mac, vendor_of, DATA_SOURCE};
 pub use probe::{
     MockBackend, MockPolicy, MockResponse, ProbeBackend, ProbeOutcome, RecordingBackend,
@@ -113,6 +126,7 @@ pub use target::{
     parse_prefix, AsTargetAddr, Ipv4Prefix, TargetRange, MATRIX_CELLS, MATRIX_COLS, MATRIX_ROWS,
     MAX_TARGETS,
 };
+pub use timefmt::{civil_from_days, format_unix_local, unix_millis_now, unix_secs_now};
 pub use timeseries::{
     char_bar_chart, latency_bucket, report_csv, report_html, sparkline_svg, HostAgg, HostReport,
     SeriesPoint, TimeSeries, DEFAULT_MAX_POINTS, DEFAULT_RETENTION_SECS, SERIES_FORMAT_VERSION,

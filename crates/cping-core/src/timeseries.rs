@@ -384,6 +384,35 @@ impl TimeSeries {
             .collect()
     }
 
+    /// 「主机 → 累计可用率（0.0..=1.0）」的一次性映射。
+    ///
+    /// 给 M15 的告警引擎用：`UptimeBelow` 规则要对**每台主机**判一次，
+    /// 若在规则里逐台扫全部时间点就是 O(点数 × 主机数)。这里一次扫完。
+    /// 从没被观测过的主机不会出现在结果里（调用方据此按 `None` 处理，
+    /// 也就是「没有历史数据，不判可用率」——不外推、不臆造）。
+    pub fn uptime_map(&self) -> BTreeMap<IpAddr, f64> {
+        let mut online: BTreeMap<IpAddr, u64> = BTreeMap::new();
+        let mut samples: BTreeMap<IpAddr, u64> = BTreeMap::new();
+        for p in &self.points {
+            for h in &p.hosts {
+                *online.entry(h.ip).or_insert(0) += h.online as u64;
+                *samples.entry(h.ip).or_insert(0) += h.samples as u64;
+            }
+        }
+        online
+            .into_iter()
+            .map(|(ip, on)| {
+                let total = samples.get(&ip).copied().unwrap_or(0);
+                let ratio = if total == 0 {
+                    0.0
+                } else {
+                    on as f64 / total as f64
+                };
+                (ip, ratio)
+            })
+            .collect()
+    }
+
     // ------------------------------------------------------------------
     // 落盘（行式文本，零依赖）
     // ------------------------------------------------------------------

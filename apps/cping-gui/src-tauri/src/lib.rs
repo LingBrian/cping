@@ -54,6 +54,12 @@ pub fn run() {
             commands::trend_state,
             commands::clear_trend,
             commands::export_uptime_report,
+            // M15：告警
+            commands::alert_state,
+            commands::set_alerts_enabled,
+            commands::set_alert_muted,
+            commands::update_alert_rules,
+            commands::clear_alerts,
             commands::async_scheduler_available,
             commands::start_scan,
             commands::cancel_scan,

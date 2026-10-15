@@ -95,6 +95,97 @@
   动因：v2.0.0 发布期间连踩三次同一类缺陷（本地全绿、CI 全红），
   光靠人工检查挡不住。已用负向测试确认两类注入都会被拦下。
 
+## [2.3.0] - 2026-10-15
+
+M15 告警与通知：阈值告警、去重冷却、静音、五通道通知。**核心逻辑全部在
+`cping-core`（`alerts.rs` / `notify.rs` / `timefmt.rs`），CLI / TUI / GUI 三端只做接线。**
+
+### 新增
+
+- **告警规则**（`cping-core::alerts`）四类，全部是**纯函数** `match_rule(rule, ctx) -> Option<AlertEvent>`：
+  - 边沿类：`Appeared`（首次观测到且在线）、`Disappeared`（上一轮在线、本轮离线）
+  - 电平类：`LatencyAbove`（延迟超阈）、`UptimeBelow`（累计可用率低于阈值）
+  - 严重度三档（提示 / 警告 / 严重），事件排序按「严重度 → 主机序号」，
+    不让「哪条更该先看」交给运气
+- **三条定死的边界**（都有回归测试盯着）：
+  1. **第一轮不发 `Appeared`**：第一轮只建立基线。不这么做的话，扫一个 /24
+     会一次刷出 255 条「新增主机」，等于把告警功能做成噪音源
+  2. **阈值用严格不等号**：`>` 与 `<`，**恰好等于阈值不告警**
+  3. **静音不改变判定**：静音时规则照常求值、`last_fired` 照常推进，只是不返回事件。
+     因此**解除静音不会补报一堆积压告警**（这是「静音」与「暂停」的本质区别）
+- **去重与冷却**：同一 `(类型, 主机)` 在冷却窗口（默认 300 秒）内只报一次；
+  冷却记录可按主机、按类型分别生效；`suppressed_by_cooldown` / `suppressed_by_mute`
+  两个计数器把「被挡下多少条」如实记出来，而不是静默吞掉
+- **通知五通道**（`cping-core::notify`），**通道失败必须可见**：
+  - `console`：标准输出（任何平台可用）
+  - `system`：Windows Toast（PowerShell `-EncodedCommand`，UTF-16LE + Base64，
+    避免命令行中文编码炸掉）/ Linux `notify-send`
+  - `webhook`：HTTP POST JSON，**仅 `http://`**——本构建不含 TLS，
+    `https://` 会被**明确拒绝**并提示改用 `--notify-cmd`，绝不静默降级成明文
+  - `command`：执行外部命令，事件 JSON 从 stdin 喂入（接 curl / msmtp 等自带 TLS 的工具）
+  - `smtp`：**明文** SMTP 中继（不支持 TLS 与认证），仅适用于内网
+  - 模板占位符 `{title}` / `{body}` / `{json}` / `{count}`，**整词替换**
+- **非阻塞投递**：`AlertSink` 后台线程 + `sync_channel(64)`。队列满时**丢弃并计数**
+  ——告警投递永远不许拖住扫描主流程，但丢了多少必须说出来
+- **状态落盘**（`AlertEngine::to_text` / `from_text`）：首行 `CPING-ALERTS <版本>`，
+  版本不符显式拒绝；坏行跳过并计数，不让整份状态作废
+- CLI：`--alert` / `--alert-kinds` / `--alert-latency` / `--alert-uptime` /
+  `--alert-cooldown` / `--alert-state` / `--mute-alerts`，
+  以及 `--notify` / `--notify-webhook` / `--notify-cmd` / `--notify-smtp` /
+  `--notify-mail-from` / `--notify-mail-to` / `--notify-list`
+- TUI：`A` 键打开告警面板（**首次按 `A` 就地启用告警**，不必重启加参数），
+  `!` 切静音；状态栏显示告警摘要
+- GUI：新增「告警」页签（桌面端另加侧栏按钮，移动端加入底部页签）：
+  规则开关、阈值/冷却表单、静音开关、事件列表；扫描结束时后端推
+  `alert-event` 事件，前端据此就地提示并刷新
+
+### 变更
+
+- **时间算法下沉到 `cping-core::timefmt`**：`civil_from_days` 此前在 CLI / TUI / GUI
+  各有一份拷贝（三份都可能各自漂移），现在只剩一处，三端改为转发。
+  `format_unix_local` / `unix_secs_now` / `unix_millis_now` 同源
+- `--notify` 与 `--notify-*` 的关系收敛成两条可解释的规则：
+  1. 给了 `--notify` → **就是**这几条通道（多一个不给、少一个不补）
+  2. 没给 `--notify` → `console`，外加任何「给了参数」的通道
+  - 第 2 条的意思是 `--notify-cmd …` 单独出现时**一定**生效。静默忽略用户
+    显式给出的参数是本项目里最不能接受的一类 bug
+- **通道误用一律报错**，不静默降级：点名了通道却没给必填参数（`--notify webhook`
+  缺地址、`--notify command` 缺 `--notify-cmd`）、给了参数却没在 `--notify` 里
+  选上它、SMTP 没写收件人——三类都是退出码 2
+- `AlertLog::clear()` 连 `total_seen` 一起归零：界面上点了「清空」却还写着
+  「累计 5 条」，用户只会以为按钮坏了
+- GUI 的「清空告警记录」**只丢事件**，不动 `seen` 基线与冷却记录——
+  动了基线，下一轮就会把整段在线主机当成「新增」重报一遍
+
+### 修正
+
+- **告警阈值与分类阈值容易被混为一谈**：`AlertEngine::evaluate` 的签名上挂着
+  `Thresholds`（分类用的低/中/高延迟档位）却完全不读，容易被误以为
+  「告警阈值 = 分类阈值」。保留参数以维持与三端调用点的一致，但补上文档写清：
+  告警阈值在 `AlertRule::threshold`，与 `classify::Thresholds` **无关**
+
+### 验证
+
+- 测试：**393 passed**（较 v2.2.0 的 336 增加 57 条：`alerts.rs` 内 27 条 +
+  `notify.rs` 内 22 条 + CLI 参数 5 条 + TUI 3 条）
+- **真实冒烟（本机，非模拟）**：
+  - 目标 `1.1.1.1`（实测 271 ms），`--alert-latency 200` 触发 1 条告警；
+    **不给 `--notify`、只给 `--notify-webhook` 与 `--notify-cmd`**，
+    三条通道同时生效：`console` 打印、`webhook` POST 到本机 HTTP 服务收到 200、
+    `command` 从 stdin 收到 JSON。两处收到的 JSON 逐字段一致：
+    `kind/kindLabel/severity/ip/index/atMs/time/round/value/threshold/message`
+  - `--notify webhook` 但地址写成 `https://` → 通道**明确失败**并报出原因，
+    退出码与提示引导用户改用 `--notify-cmd`
+  - 四类误用全部以退出码 2 拒绝（缺地址 / 缺 `--notify-cmd` / 地址没被 `--notify` 选上 /
+    SMTP 缺收件人）；`--notify telegram` 退出码 2
+  - `--notify-list` 正确列出本平台五通道能力（Windows 上 `system` 可用）
+  - 告警状态跨会话：会话 B 被冷却挡下、会话 C 静音，状态文件内容与计数一致
+- `cargo fmt --check` / `cargo clippy --workspace --all-targets -- -D warnings`
+  两套工作区干净（GUI 是独立工程，另跑一遍同样干净）
+- 前端 `vue-tsc --noEmit` 0 错误、`npm run build` 通过
+- 未实测：TUI 的 `A` / `!` 交互未做人工键盘冒烟（由单元测试直接驱动 `on_key`
+  与告警求值路径覆盖）；GUI 未做真机点击冒烟（仅编译 + 类型检查 + 构建通过）
+
 ## [2.2.0] - 2026-10-15
 
 M14 历史与趋势：长期时序、可用率报表、离线/在线率曲线。**核心逻辑全部在

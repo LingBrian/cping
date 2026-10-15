@@ -48,6 +48,10 @@ pub struct Options {
     /// 快照文件所在目录；`None` 表示当前工作目录（单元测试会改到临时目录，
     /// 避免测试往仓库里写文件）。
     pub snapshot_dir: Option<PathBuf>,
+    /// M15：启动即启用告警（默认关闭，按 A 可在界面里随时打开）。
+    pub alert: bool,
+    /// M15：告警配置（阈值 / 冷却 / 启用哪几类）。
+    pub alert_config: cping_core::AlertConfig,
 }
 
 impl Default for Options {
@@ -62,6 +66,8 @@ impl Default for Options {
             mode: cping_core::platform_default_mode(),
             watch_seconds: None,
             snapshot_dir: None,
+            alert: false,
+            alert_config: cping_core::AlertConfig::default(),
         }
     }
 }
@@ -72,6 +78,12 @@ impl Options {
             no_color: std::env::var_os("NO_COLOR").is_some(),
             ..Options::default()
         };
+        // M15：告警开关先收集，循环结束后一次性折成配置
+        let mut alert_kinds: Vec<cping_core::AlertKind> = Vec::new();
+        let mut alert_latency: Option<u32> = None;
+        let mut alert_uptime: Option<u32> = None;
+        let mut alert_cooldown: Option<u64> = None;
+        let mut mute_alerts = false;
         let mut it = args.peekable();
         while let Some(arg) = it.next() {
             match arg.as_str() {
@@ -127,11 +139,102 @@ impl Options {
                         };
                     }
                 }
+                "--alert" => opts.alert = true,
+                // 下面几个都**同时开启告警**：给了阈值却什么也不做是最难查的一类
+                // 配置问题，宁可当场生效也不静默吞掉。
+                "--alert-kinds" => {
+                    if let Some(v) = it.next() {
+                        alert_kinds = parse_alert_kinds(&v);
+                        opts.alert = true;
+                    }
+                }
+                "--alert-latency" => {
+                    if let Some(v) = it.next() {
+                        if let Ok(ms) = v.parse::<u32>() {
+                            alert_latency = Some(ms);
+                            opts.alert = true;
+                        }
+                    }
+                }
+                "--alert-uptime" => {
+                    if let Some(v) = it.next() {
+                        if let Ok(pct) = v.parse::<u32>() {
+                            if pct <= 100 {
+                                alert_uptime = Some(pct);
+                                opts.alert = true;
+                            }
+                        }
+                    }
+                }
+                "--alert-cooldown" => {
+                    if let Some(v) = it.next() {
+                        if let Ok(secs) = v.parse::<u64>() {
+                            alert_cooldown = Some(secs);
+                            opts.alert = true;
+                        }
+                    }
+                }
+                "--mute-alerts" => {
+                    mute_alerts = true;
+                    opts.alert = true;
+                }
                 _ => {}
             }
         }
+        opts.alert_config = build_alert_config(
+            &alert_kinds,
+            alert_latency,
+            alert_uptime,
+            alert_cooldown,
+            mute_alerts,
+        );
         opts
     }
+}
+
+/// M15：把命令行上的告警开关折成核心的 `AlertConfig`。
+///
+/// 只覆盖**用户显式给过**的字段——没给就留核心默认值，这样 TUI 与 CLI 的
+/// 默认阈值永远是同一份（都在 `cping_core::alerts` 里定义）。
+fn build_alert_config(
+    kinds: &[cping_core::AlertKind],
+    latency_ms: Option<u32>,
+    uptime_pct: Option<u32>,
+    cooldown_secs: Option<u64>,
+    muted: bool,
+) -> cping_core::AlertConfig {
+    let mut cfg = cping_core::AlertConfig::default();
+    for rule in &mut cfg.rules {
+        if let Some(v) = latency_ms {
+            if rule.kind == cping_core::AlertKind::LatencyAbove {
+                rule.threshold = v;
+            }
+        }
+        if let Some(v) = uptime_pct {
+            if rule.kind == cping_core::AlertKind::UptimeBelow {
+                rule.threshold = v;
+            }
+        }
+        if let Some(v) = cooldown_secs {
+            rule.cooldown_secs = v;
+        }
+    }
+    if !kinds.is_empty() {
+        cfg.with_kinds(kinds);
+    }
+    cfg.muted = muted;
+    cfg
+}
+
+/// 解析 `--alert-kinds`。不认识的名字**跳过**（TUI 是交互程序，为一个拼错的
+/// 名字直接退出会把用户正在看的界面弄丢）；但全部都不认识时保持默认全集，
+/// 免得变成「一条告警也不报」。
+fn parse_alert_kinds(text: &str) -> Vec<cping_core::AlertKind> {
+    text.split([',', ' ', ';'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(cping_core::AlertKind::parse_key)
+        .collect()
 }
 
 /// 启动时发现的一份「上次没处理完」的快照，等用户决定是否恢复。
@@ -242,6 +345,15 @@ pub struct App {
     /// 本轮的起始时刻（Unix 毫秒）：时序点用它打时间戳，而不是「扫描结束的现在」。
     round_at_ms: Option<u64>,
 
+    // ---- M15 告警 ----
+    /// 告警引擎；`None` = 未启用（按 `A` 就地用默认规则打开）。
+    ///
+    /// TUI 只在内存里保留告警日志与冷却记录——跨会话的那份状态由
+    /// `cping-cli --alert-state` 落盘，两者共用同一个核心引擎。
+    pub alerts: Option<cping_core::AlertEngine>,
+    /// 是否显示告警面板。
+    pub show_alerts: bool,
+
     handle: Option<SchedulerHandle>,
     scheduler: ProbeScheduler,
 }
@@ -249,6 +361,12 @@ pub struct App {
 impl App {
     pub fn new(options: Options) -> Self {
         let snapshot_dir = options.snapshot_dir.clone();
+        // M15：告警引擎先建好，`options` 里的字段随后会被逐个搬走
+        let alerts = if options.alert {
+            Some(cping_core::AlertEngine::new(options.alert_config.clone()))
+        } else {
+            None
+        };
         let spec = parse_spec(&options.prefix, TargetRange::Standard)
             .unwrap_or_else(|_| TargetSpec::default());
         let monitor = MonitorState::new(MonitorConfig {
@@ -302,6 +420,8 @@ impl App {
             series: cping_core::TimeSeries::new(),
             show_trend: false,
             round_at_ms: None,
+            alerts,
+            show_alerts: false,
             handle: None,
             // M5 起默认使用**平台原生 ICMP**；`--mock` 可切回模拟后端做演示。
             // M12：后端选择（含 mock 分支）统一走核心注册表，三端共用一处。
@@ -428,6 +548,17 @@ impl App {
             }
         }
 
+        // 告警面板：同上——任意键关闭，`A` 自身也当关闭
+        if self.show_alerts {
+            self.show_alerts = false;
+            if !matches!(
+                action,
+                Action::Quit | Action::ForceQuit | Action::ShowAlerts
+            ) {
+                return;
+            }
+        }
+
         // 「发现上次结果」的确认框优先级最高：此时只有恢复/丢弃两个有效选择，
         // 免得用户在没意识到有弹窗的情况下误按其它键。
         if self.pending_restore.is_some() {
@@ -519,6 +650,8 @@ impl App {
                         "趋势面板：还没有历史数据，先扫描一轮（M 开监控可持续累积）".into();
                 }
             }
+            Action::ShowAlerts => self.toggle_alerts_panel(),
+            Action::ToggleAlertMute => self.toggle_alert_mute(),
             Action::LookupHostname => self.lookup_selected_hostname(),
             Action::SaveSnapshot => self.save_snapshot(),
             Action::LoadSnapshot => self.load_snapshot_from_disk(),
@@ -706,6 +839,174 @@ impl App {
             "曲线：每格一轮在线率（越高越满）；· = 该轮没测到这台主机（≠ 离线）。宽度 {curve_w} 格。"
         ));
         lines
+    }
+
+    // ------------------------------------------------------------------
+    // M15：告警
+    // ------------------------------------------------------------------
+
+    /// 打开/关闭告警面板。首次打开时**就地启用告警**（默认规则）。
+    ///
+    /// 为什么不要求用户先跑 `--alert`：TUI 的全部卖点就是「不用查文档」。
+    /// 按了 `A` 却只得到一句「请重启并加 --alert」是把人往外推。默认规则与
+    /// CLI 完全同源（`cping_core::alerts`），阈值不会两处不一样。
+    pub fn toggle_alerts_panel(&mut self) {
+        self.show_alerts = !self.show_alerts;
+        if self.show_alerts {
+            if self.alerts.is_none() {
+                self.alerts = Some(cping_core::AlertEngine::new(
+                    cping_core::AlertConfig::default(),
+                ));
+                self.status = "告警面板：已启用（默认阈值）。! 切静音，再按 A 关闭面板".into();
+            } else if self.alert_log_is_empty() {
+                self.status = "告警面板：还没有告警。跑一轮（Enter）或开监控（M）累积".into();
+            } else {
+                self.status = "告警面板".into();
+            }
+        }
+    }
+
+    fn alert_log_is_empty(&self) -> bool {
+        // 不用 `Option::is_none_or`：它要 Rust 1.82，而本项目的 MSRV 是 1.75
+        match self.alerts.as_ref() {
+            None => true,
+            Some(e) => e.log().total_seen() == 0,
+        }
+    }
+
+    /// 切换静音。
+    ///
+    /// 静音**不改判定**：规则照常求值、冷却照常推进，只是不产生通知——
+    /// 这样解除静音不会「补报」一堆积压告警（核心里有对应的回归测试）。
+    pub fn toggle_alert_mute(&mut self) {
+        if self.alerts.is_none() {
+            self.alerts = Some(cping_core::AlertEngine::new(
+                cping_core::AlertConfig::default(),
+            ));
+        }
+        let engine = self.alerts.as_mut().expect("上面刚保证存在");
+        let next = !engine.is_muted();
+        engine.set_muted(next);
+        self.status = if next {
+            "告警已静音：规则照常求值，只是不通知（! 解除）".into()
+        } else {
+            "告警已解除静音".into()
+        };
+    }
+
+    /// 求值一轮告警。`commit_round` 里调用，**在时序追加之后**——
+    /// 可用率规则要用到「含本轮在内」的累计观测数，先追加再求值才自洽。
+    fn run_alerts(&mut self) {
+        let Some(engine) = self.alerts.as_mut() else {
+            return;
+        };
+        let done: Vec<ProbeResult> = self.results.iter().flatten().cloned().collect();
+        if done.is_empty() {
+            return;
+        }
+        let uptime = if self.series.is_empty() {
+            Default::default()
+        } else {
+            self.series.uptime_map()
+        };
+        // 上一轮基线由引擎自己维护（`seen`），这里传空切片即可——
+        // 引擎内部对「没见过的地址」有明确语义，不需要界面再存一份。
+        let at = self.round_at_ms.unwrap_or_else(now_ms);
+        engine.evaluate(
+            at,
+            self.monitor.round(),
+            &[],
+            &done,
+            &self.thresholds,
+            &uptime,
+        );
+    }
+
+    /// 告警面板文本（供测试断言，与界面同源）。
+    ///
+    /// 不接收宽度参数：这里全是等宽定长列，不需要像趋势面板那样按宽度画曲线。
+    pub fn alert_lines(&self) -> Vec<String> {
+        let Some(engine) = self.alerts.as_ref() else {
+            return vec![
+                "告警未启用。".into(),
+                "按 A 打开面板即启用（默认：新增 / 离线 / 延迟>200ms / 可用率<90%）。".into(),
+            ];
+        };
+        let mut lines = Vec::new();
+        let cfg = engine.config();
+        let enabled: Vec<&str> = cfg
+            .rules
+            .iter()
+            .filter(|r| r.enabled)
+            .map(|r| r.kind.label_zh())
+            .collect();
+        lines.push(format!(
+            "状态：{} · 活跃规则 {}（{}）· 累计告警 {} 条 · 冷却挡下 {} 条",
+            if engine.is_muted() {
+                "已静音"
+            } else {
+                "生效中"
+            },
+            enabled.len(),
+            enabled.join(" / "),
+            engine.log().total_seen(),
+            engine.suppressed_by_cooldown()
+        ));
+        lines.push(format!(
+            "{:<17} {:>6} {:>8} {:>7}",
+            "时间", "轮次", "主机", "类别"
+        ));
+        let recent: Vec<String> = engine
+            .log()
+            .iter_recent_first()
+            .map(|e| {
+                format!(
+                    "{:<17} {:>6} {:>8} {:>7}",
+                    cping_core::format_unix_local(e.at_ms / 1000),
+                    e.round,
+                    e.ip.to_string(),
+                    e.kind.label_zh()
+                )
+            })
+            .take(200)
+            .collect();
+        if recent.is_empty() {
+            lines.push(String::new());
+            lines.push("还没有告警记录：先跑一轮（Enter），或开监控（M）持续观察。".into());
+            lines.push("「新增主机」在第一轮不会报——否则扫个 /24 会一次刷出 255 条。".into());
+        } else {
+            lines.extend(recent);
+        }
+        lines.push(String::new());
+        lines.push(format!(
+            "最近一条：{}",
+            engine
+                .log()
+                .iter_recent_first()
+                .next()
+                .map(|e| e.message.clone())
+                .unwrap_or_else(|| "（无）".into())
+        ));
+        lines
+    }
+
+    /// 状态栏用的告警摘要；未启用或没有记录时返回空串（不写「告警 0 条」这种噪音）。
+    pub fn alert_note(&self) -> String {
+        let Some(engine) = self.alerts.as_ref() else {
+            return String::new();
+        };
+        let total = engine.log().total_seen();
+        if total == 0 {
+            return String::new();
+        }
+        format!(
+            "，告警 {total} 条{}",
+            if engine.is_muted() {
+                "（已静音）"
+            } else {
+                ""
+            }
+        )
     }
 
     // ------------------------------------------------------------------
@@ -974,6 +1275,8 @@ impl App {
         // 一轮本身可能跑几秒，用结束时刻会让曲线的时间轴一点点被拉长。
         let at = self.round_at_ms.unwrap_or_else(now_ms);
         self.series.append_results(at, &done);
+        // M15：告警在时序追加**之后**求值——可用率规则要用含本轮在内的累计观测数
+        self.run_alerts();
     }
 
     /// 变化摘要（无变化时返回空串，不写「变化 0 项」这种噪音）。
@@ -1456,10 +1759,7 @@ pub fn now_string() -> String {
 
 /// 当前 Unix 毫秒（M14 时序点时间戳）。取不到就返回 0，由核心按「时间未知」处理。
 pub fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    cping_core::unix_millis_now()
 }
 
 /// 文件名用时间戳 `YYYYMMDD-HHMMSS`。
@@ -1492,17 +1792,11 @@ fn format_hms(secs: u64) -> String {
 }
 
 /// Howard Hinnant 的 civil_from_days（无第三方依赖）。
+///
+/// M15 起算法下沉到 `cping_core::timefmt`（此前三端各一份拷贝），
+/// 这里保留同名包装只是为了不动既有调用点。
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
+    cping_core::civil_from_days(z)
 }
 
 #[cfg(test)]
@@ -1582,7 +1876,7 @@ mod tests {
     fn help_overlay_renders() {
         let mut app = App::new(opts());
         app.show_help = true;
-        let out = render(&app, 130, 52);
+        let out = render(&app, 130, 64);
         assert!(out.contains("快捷键"));
         assert!(out.contains("Ctrl+C"));
         // M8 / M9 的新键也必须在帮助里
@@ -1594,6 +1888,17 @@ mod tests {
         assert!(
             out.contains("端口扫描与在线判定是两回事"),
             "帮助必须写明端口扫描与在线判定互不影响"
+        );
+        // M14 / M15 段落
+        assert!(out.contains("历史与趋势"), "帮助应含 M14 段落");
+        assert!(
+            out.contains("不是「离线」"),
+            "帮助必须写明趋势曲线里 · 的含义"
+        );
+        assert!(out.contains("告警"), "帮助应含 M15 段落");
+        assert!(
+            out.contains("第一轮不发"),
+            "帮助必须写明「第一轮不刷新增主机」这条最容易踩的边界"
         );
     }
 
@@ -2075,5 +2380,243 @@ mod tests {
             "状态: {}",
             app.status
         );
+    }
+
+    // ------------------------------------------------------------------
+    // M15：告警
+    // ------------------------------------------------------------------
+
+    /// M15 用的选项：默认不开告警（与 `--alert` 的语义一致）。
+    fn alert_opts() -> Options {
+        Options {
+            alert: true,
+            ..opts()
+        }
+    }
+
+    /// 造一台确定在线的主机：`10.0.x.y`（x/y 由序号推出，保证互不相同）。
+    fn online(idx: u16, rtt_ms: u32) -> ProbeResult {
+        let ip = IpAddr::from([10, 0, (idx >> 8) as u8, (idx & 0xff) as u8]);
+        ProbeResult::new(idx, ip, cping_core::ProbeStatus::Online { rtt_ms })
+    }
+
+    #[test]
+    fn alerts_are_off_unless_asked() {
+        let app = App::new(opts());
+        assert!(app.alerts.is_none(), "不问就不该有任何告警");
+        assert!(app.alert_note().is_empty(), "未启用时不占用状态栏");
+
+        let on = App::new(alert_opts());
+        assert!(on.alerts.is_some(), "--alert 应启用告警");
+    }
+
+    #[test]
+    fn pressing_a_enables_alerts_in_place_instead_of_asking_for_a_restart() {
+        let mut app = App::new(opts());
+        app.on_key(KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Char('A'),
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(app.show_alerts);
+        assert!(app.alerts.is_some(), "首次按 A 应就地启用告警");
+        assert!(
+            app.status.contains("已启用"),
+            "要告诉用户发生了什么：{}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn alert_panel_is_closed_by_any_key_and_reopens_with_a() {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+        let mut app = App::new(alert_opts());
+        app.show_alerts = true;
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(!app.show_alerts, "任意键应关闭面板");
+        app.on_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::NONE));
+        assert!(app.show_alerts, "A 应重新打开面板");
+    }
+
+    #[test]
+    fn alert_lines_explain_the_empty_state_instead_of_showing_zero_alerts() {
+        let app = App::new(alert_opts());
+        let lines = app.alert_lines();
+        assert!(lines[0].contains("累计告警 0 条"), "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("还没有告警记录")),
+            "空状态要说清楚，而不是只写一行 0：{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("第一轮不会报")),
+            "「第一轮不刷屏」这条最容易被误解，必须写在面板里：{lines:?}"
+        );
+    }
+
+    #[test]
+    fn alerts_fire_after_a_round_and_show_up_in_the_status_line() {
+        let mut app = App::new(alert_opts());
+        let mut cfg = cping_core::AlertConfig::default();
+        cfg.with_kinds(&[cping_core::AlertKind::LatencyAbove]);
+        for r in &mut cfg.rules {
+            if r.kind == cping_core::AlertKind::LatencyAbove {
+                r.threshold = 0;
+                r.cooldown_secs = 0;
+            }
+        }
+        app.alerts = Some(cping_core::AlertEngine::new(cfg));
+
+        // 直接喂一份确定的结果，不依赖模拟后端这一轮的随机时延
+        app.results = vec![Some(online(0, 271)), Some(online(1, 12))];
+        app.round_at_ms = Some(1_700_000_000_000);
+        app.run_alerts();
+
+        let engine = app.alerts.as_ref().expect("已启用");
+        assert_eq!(
+            engine.log().total_seen(),
+            2,
+            "两台主机都超过 0ms 阈值，且严格大于才算命中"
+        );
+        assert!(
+            app.alert_note().contains("告警 2 条"),
+            "状态栏应带告警摘要：{}",
+            app.alert_note()
+        );
+        let lines = app.alert_lines();
+        assert!(
+            lines.iter().any(|l| l.contains("延迟超阈")),
+            "面板里要能看到刚才那条：{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("10.0.0.1")),
+            "面板要显示是哪台主机：{lines:?}"
+        );
+    }
+
+    #[test]
+    fn first_round_does_not_report_every_online_host_as_new() {
+        let mut app = App::new(alert_opts());
+        let mut cfg = cping_core::AlertConfig::default();
+        cfg.with_kinds(&[cping_core::AlertKind::Appeared]);
+        app.alerts = Some(cping_core::AlertEngine::new(cfg));
+
+        // 256 台主机「一次性全部上线」——正是扫 /24 的实际情况
+        app.results = (0..=255)
+            .map(|i| Some(online(i as u16, 5)))
+            .collect::<Vec<_>>();
+        app.round_at_ms = Some(1_700_000_000_000);
+        app.run_alerts();
+
+        let engine = app.alerts.as_ref().expect("已启用");
+        assert_eq!(
+            engine.log().total_seen(),
+            0,
+            "第一轮只建立基线，不许把整段在线主机当成「新增」刷出来"
+        );
+
+        // 第二轮多出一台，才是真正的「新增」
+        app.results.push(Some(online(256, 5)));
+        app.round_at_ms = Some(1_700_000_060_000);
+        app.run_alerts();
+        assert_eq!(
+            app.alerts.as_ref().expect("已启用").log().total_seen(),
+            1,
+            "新出现的主机必须报，且只报那一台"
+        );
+    }
+
+    #[test]
+    fn muting_is_a_preference_and_does_not_flush_a_backlog_when_lifted() {
+        let mut app = App::new(alert_opts());
+        let mut cfg = cping_core::AlertConfig::default();
+        cfg.with_kinds(&[cping_core::AlertKind::LatencyAbove]);
+        for r in &mut cfg.rules {
+            if r.kind == cping_core::AlertKind::LatencyAbove {
+                r.threshold = 0;
+                r.cooldown_secs = 60;
+            }
+        }
+        app.alerts = Some(cping_core::AlertEngine::new(cfg));
+        app.results = vec![Some(online(0, 271))];
+
+        app.toggle_alert_mute();
+        assert!(app.alerts.as_ref().expect("已启用").is_muted());
+
+        app.round_at_ms = Some(1_700_000_000_000);
+        app.run_alerts();
+        let muted = app.alerts.as_ref().expect("已启用");
+        assert_eq!(muted.log().total_seen(), 0, "静音期间不产生通知");
+        assert!(
+            muted.suppressed_by_mute() > 0,
+            "静音的是「通知」而不是「求值」：抑制计数必须如实记录"
+        );
+
+        // 解除静音后，冷却窗口内的重复仍被挡下 → 不会一次性补报
+        app.toggle_alert_mute();
+        app.round_at_ms = Some(1_700_000_010_000);
+        app.run_alerts();
+        let after = app.alerts.as_ref().expect("已启用");
+        assert_eq!(after.log().total_seen(), 0, "解除静音不该补报积压告警");
+        assert!(
+            after.suppressed_by_cooldown() > 0,
+            "应是被冷却挡下，而不是规则失灵"
+        );
+    }
+
+    #[test]
+    fn alert_panel_renders_the_engine_state() {
+        let mut app = App::new(alert_opts());
+        app.prefix = "127.0.0".into();
+        app.start_scan();
+        wait_done(&mut app, 300);
+        app.show_alerts = true;
+
+        let text = render(&app, 120, 34);
+        assert!(text.contains("告警"), "{text}");
+        assert!(text.contains("延迟超阈"), "应列出启用的规则名：{text}");
+        assert!(text.contains("生效中"), "{text}");
+    }
+
+    #[test]
+    fn alert_flags_are_parsed_and_any_alert_flag_arms_the_engine() {
+        use cping_core::AlertKind;
+        let a = Options::from_args(
+            [
+                "--alert-latency",
+                "50",
+                "--alert-uptime",
+                "80",
+                "--alert-kinds",
+                "latency,offline",
+            ]
+            .iter()
+            .map(|s| s.to_string()),
+        );
+        assert!(a.alert, "给了任一 --alert-* 就应开启告警");
+        let rule = |k: AlertKind| a.alert_config.rules.iter().find(|r| r.kind == k).cloned();
+        assert_eq!(rule(AlertKind::LatencyAbove).unwrap().threshold, 50);
+        assert_eq!(rule(AlertKind::UptimeBelow).unwrap().threshold, 80);
+        assert!(rule(AlertKind::LatencyAbove).unwrap().enabled);
+        assert!(
+            rule(AlertKind::Disappeared).unwrap().enabled,
+            "offline = 离线"
+        );
+        assert!(
+            !rule(AlertKind::Appeared).unwrap().enabled,
+            "没点名的要关掉"
+        );
+
+        let b = Options::from_args(["--mute-alerts"].iter().map(|s| s.to_string()));
+        assert!(b.alert && b.alert_config.muted);
+
+        // 拼错的类别名不改变默认全集（免得变成「一条也不报」）
+        let c = Options::from_args(
+            ["--alert-kinds", "nope,also-nope"]
+                .iter()
+                .map(|s| s.to_string()),
+        );
+        assert!(c.alert_config.rules.iter().all(|r| r.enabled));
+
+        let d = Options::from_args(["--alert"].iter().map(|s| s.to_string()));
+        assert!(d.alert_config.rules.iter().all(|r| r.enabled), "默认全集");
     }
 }

@@ -335,3 +335,60 @@ export interface TrendDto {
   /** 空状态时的一句人话；有数据时为 null。 */
   emptyHint: string | null
 }
+
+// ---------------------------------------------------------------------------
+// M15：告警
+// ---------------------------------------------------------------------------
+
+/**
+ * 一条告警规则。
+ *
+ * `label` 与 `usesThreshold` 都来自核心——界面不再自己判断「这条规则用不用阈值」，
+ * 否则加一类新规则就要改两处。
+ */
+export interface AlertRuleDto {
+  kind: string
+  label: string
+  enabled: boolean
+  /** 只有延迟 / 可用率两类用得到阈值；边沿类（新增、离线）恒为 false。 */
+  usesThreshold: boolean
+  threshold: number
+  cooldownSecs: number
+}
+
+/** 一条告警事件。`time` 已由后端按 UTC 格式化，前端不做时区换算。 */
+export interface AlertEventDto {
+  kind: string
+  kindLabel: string
+  severity: string
+  severityLabel: string
+  ip: string
+  atMs: number
+  time: string
+  round: number
+  /** 触发时的实际值（延迟 ms / 可用率百分数）；边沿类规则为 null。 */
+  value: number | null
+  threshold: number | null
+  message: string
+}
+
+/** 告警页整体状态。 */
+export interface AlertDto {
+  enabled: boolean
+  muted: boolean
+  /** 是否已建立基线（第一轮之后为 true）。 */
+  primed: boolean
+  activeRules: number
+  /** 累计告警条数（「清空」会一并归零）。 */
+  total: number
+  kept: number
+  suppressedByCooldown: number
+  suppressedByMute: number
+  rules: AlertRuleDto[]
+  events: AlertEventDto[]
+  latencyThresholdMs: number
+  uptimeThresholdPct: number
+  cooldownSecs: number
+  /** 空状态时的一句人话；有数据时为 null。 */
+  emptyHint: string | null
+}

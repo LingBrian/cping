@@ -71,6 +71,12 @@ fn print_help() {
   --view <matrix|table>  初始视图
   --mock              使用模拟探测数据（演示 / UI 调试，不发真实报文）
   --snapshot-dir <目录>  结果快照的存放目录（默认当前目录）
+  --alert             启动即启用告警（也可在界面里按 A 就地启用）
+  --alert-kinds <列表>  启用哪几类：appeared,disappeared,latency,uptime
+  --alert-latency <ms>  延迟阈值（默认 200；严格大于才报）
+  --alert-uptime <百分比> 可用率阈值（默认 90；严格小于才报）
+  --alert-cooldown <秒> 同一主机同一类告警的冷却窗口（默认 300）
+  --mute-alerts       启动即静音（规则照常求值，只是不通知）
   --help              显示本帮助
 
 探测后端:
@@ -98,6 +104,10 @@ fn print_help() {
   S       导出 TXT
   m       读邻居表回填 MAC / 厂商
   n       反查当前行的主机名
+  F       端口指纹
+  U       可用率趋势
+  A       告警记录（首次按即启用告警）
+  !       告警静音开关
   w       保存快照
   l       从快照恢复
   ↑/↓ PgUp/PgDn  表格滚动

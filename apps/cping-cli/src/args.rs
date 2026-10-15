@@ -50,6 +50,20 @@ pub const HELP: &str = r#"CPing 无头命令行 —— 批量 PING，结果可�
       --history <路径>    把每轮追加到长期时序文件（跨会话累积，默认保留 7 天）
       --report <路径>     结束时写出可用率报表（.csv 或 .html）
       --keep-days <天>    时序保留天数（默认 7；仅与 --history 同用）
+      --alert             开启阈值告警（新增/离线/延迟/可用率）
+      --alert-kinds <列表> 启用哪几类：appeared,disappeared,latency,uptime（默认全部）
+      --alert-latency <ms> 延迟阈值（默认 200；严格大于才报）
+      --alert-uptime <百分比> 可用率阈值（默认 90；严格小于才报，0-100）
+      --alert-cooldown <秒> 同一主机同一类告警的冷却窗口（默认 300）
+      --alert-state <路径> 告警去重状态文件（跨会话保留冷却记录）
+      --mute-alerts       静音：规则照常求值、状态照常推进，只是不通知
+      --notify <列表>     通知通道：console,system,webhook,command,smtp（默认 console）
+      --notify-webhook <url> Webhook 地址（**仅 http://**，本构建不含 TLS）
+      --notify-cmd <模板> 通知命令模板，可重复；{title}/{body}/{json}/{count} 占位
+      --notify-smtp <host[:port]> 明文 SMTP 中继（不支持 TLS 与认证）
+      --notify-mail-from <地址>   邮件发件人
+      --notify-mail-to <地址,..>  邮件收件人
+      --notify-list       列出本平台各通知通道的可用性后退出
       --out <路径>        导出结果；按扩展名决定格式（.csv/.txt/.json/.html）
       --json <路径>       等价于 --out 且强制 JSON
   -q, --quiet             不打印人类可读摘要（只输出文件与退出码）
@@ -70,6 +84,10 @@ pub const HELP: &str = r#"CPing 无头命令行 —— 批量 PING，结果可�
   cping-cli -t 192.168.1 --fingerprint --out assets.csv
   cping-cli -t 192.168.1 --watch 30 --out rounds.json
   cping-cli -t 192.168.1 --watch 60 --history net.ts --report uptime.html
+  cping-cli -t 192.168.1 --watch 30 --alert --notify console,system
+  cping-cli -t 192.168.1 --watch 30 --alert --notify webhook \
+            --notify-webhook http://10.0.0.5:9000/cping
+  cping-cli -t 192.168.1 --alert --notify-cmd "curl -s -d {json} https://example.com/h"
 
 关于 --fingerprint：
   端口指纹是**独立于在线判定的第二趟探测**，只对在线主机做：
@@ -83,6 +101,14 @@ pub const HELP: &str = r#"CPing 无头命令行 —— 批量 PING，结果可�
   丢已跑过的轮次。报表数值可逐条对账回原始记录：降采样只做同类项相加，
   观测轮数与 RTT 求和在合并前后守恒。注意「从未在线」的主机 RTT 记为 -，
   而不是 0（0 会被读成「极快」）。
+
+关于 --alert / --notify：
+  规则匹配是纯函数：第一轮只建立基线（不发「新增主机」，否则扫个 /24 会一次
+  刷出 255 条）；阈值用严格不等号，恰好等于阈值不告警。通知通道**失败可见**：
+  每个通道单独汇报成功或失败原因，一个通道挂了不影响其它通道，也绝不阻塞
+  扫描主流程（投递在后台线程，队列满时丢弃并计数）。
+  webhook 只支持 http:// —— 本构建不含 TLS，不会把告警明文降级发出去；
+  需要 https 请用 --notify-cmd 调 curl 等自带 TLS 的工具。
 "#;
 
 /// 解析后的命令行参数。
@@ -110,6 +136,34 @@ pub struct Args {
     pub report: Option<String>,
     /// M14：时序保留天数。
     pub keep_days: u64,
+    /// M15：开启告警（阈值规则 + 通知通道）。
+    pub alert: bool,
+    /// M15：启用的规则类型（`--alert-kinds`）；空 = 全部。
+    pub alert_kinds: Vec<cping_core::AlertKind>,
+    /// M15：延迟阈值（毫秒）。
+    pub alert_latency_ms: u32,
+    /// M15：可用率阈值（百分数）。
+    pub alert_uptime_pct: u32,
+    /// M15：冷却窗口（秒）。
+    pub alert_cooldown_secs: u64,
+    /// M15：告警去重状态文件（跨会话保留冷却记录）。
+    pub alert_state: Option<String>,
+    /// M15：静音（规则照常求值，只是不通知）。
+    pub alert_muted: bool,
+    /// M15：通知通道选择（`--notify`）。
+    pub notify_channels: Vec<String>,
+    /// M15：webhook 地址（`http://`）。
+    pub notify_webhook: Option<String>,
+    /// M15：通知命令模板（可重复）。
+    pub notify_cmds: Vec<String>,
+    /// M15：SMTP `host[:port]`。
+    pub notify_smtp: Option<String>,
+    /// M15：邮件发件人。
+    pub notify_mail_from: Option<String>,
+    /// M15：邮件收件人。
+    pub notify_mail_to: Vec<String>,
+    /// M15：只列出通知通道可用性后退出。
+    pub notify_list: bool,
     pub out: Option<(ExportFormat, String)>,
     pub quiet: bool,
     /// M12：只列出后端能力后退出。
@@ -138,6 +192,20 @@ impl Default for Args {
             history: None,
             report: None,
             keep_days: DEFAULT_KEEP_DAYS,
+            alert: false,
+            alert_kinds: Vec::new(),
+            alert_latency_ms: cping_core::DEFAULT_LATENCY_THRESHOLD_MS,
+            alert_uptime_pct: cping_core::DEFAULT_UPTIME_THRESHOLD_PCT,
+            alert_cooldown_secs: cping_core::DEFAULT_COOLDOWN_SECS,
+            alert_state: None,
+            alert_muted: false,
+            notify_channels: Vec::new(),
+            notify_webhook: None,
+            notify_cmds: Vec::new(),
+            notify_smtp: None,
+            notify_mail_from: None,
+            notify_mail_to: Vec::new(),
+            notify_list: false,
             out: None,
             quiet: false,
             list_backends: false,
@@ -290,6 +358,102 @@ impl Args {
                     }
                     args.keep_days = v;
                 }
+                "--alert" => args.alert = true,
+                "--alert-kinds" => {
+                    let raw = take_value("--alert-kinds")?;
+                    let mut kinds = Vec::new();
+                    for part in raw.split(',') {
+                        let part = part.trim();
+                        if part.is_empty() {
+                            continue;
+                        }
+                        // 未知名字必须报错：静默忽略会让人以为规则开了，其实没开
+                        let kind = cping_core::AlertKind::parse_key(part)
+                            .ok_or_else(|| format!("--alert-kinds 不认识 {part:?}（appeared/disappeared/latency/uptime）"))?;
+                        if !kinds.contains(&kind) {
+                            kinds.push(kind);
+                        }
+                    }
+                    if kinds.is_empty() {
+                        return Err("--alert-kinds 至少要给一类".into());
+                    }
+                    args.alert_kinds = kinds;
+                    args.alert = true;
+                }
+                "--alert-latency" => {
+                    let v = parse_u32("--alert-latency", &take_value("--alert-latency")?)?;
+                    args.alert_latency_ms = v;
+                    args.alert = true;
+                }
+                "--alert-uptime" => {
+                    let v = parse_u32("--alert-uptime", &take_value("--alert-uptime")?)?;
+                    if v > 100 {
+                        return Err("--alert-uptime 是百分数，必须在 0..=100 之间".into());
+                    }
+                    args.alert_uptime_pct = v;
+                    args.alert = true;
+                }
+                "--alert-cooldown" => {
+                    let v = parse_u64("--alert-cooldown", &take_value("--alert-cooldown")?)?;
+                    args.alert_cooldown_secs = v;
+                    args.alert = true;
+                }
+                "--alert-state" => {
+                    args.alert_state = Some(take_value("--alert-state")?);
+                    args.alert = true;
+                }
+                "--mute-alerts" => {
+                    args.alert_muted = true;
+                    args.alert = true;
+                }
+                "--notify" => {
+                    let raw = take_value("--notify")?;
+                    for part in raw.split(',') {
+                        let p = part.trim().to_ascii_lowercase();
+                        if p.is_empty() {
+                            continue;
+                        }
+                        if !matches!(
+                            p.as_str(),
+                            "console" | "system" | "webhook" | "command" | "smtp"
+                        ) {
+                            return Err(format!(
+                                "--notify 不认识通道 {p:?}（console/system/webhook/command/smtp）"
+                            ));
+                        }
+                        if !args.notify_channels.contains(&p) {
+                            args.notify_channels.push(p);
+                        }
+                    }
+                    args.alert = true;
+                }
+                "--notify-webhook" => {
+                    args.notify_webhook = Some(take_value("--notify-webhook")?);
+                    args.alert = true;
+                }
+                "--notify-cmd" => {
+                    args.notify_cmds.push(take_value("--notify-cmd")?);
+                    args.alert = true;
+                }
+                "--notify-smtp" => {
+                    args.notify_smtp = Some(take_value("--notify-smtp")?);
+                    args.alert = true;
+                }
+                "--notify-mail-from" => {
+                    args.notify_mail_from = Some(take_value("--notify-mail-from")?);
+                    args.alert = true;
+                }
+                "--notify-mail-to" => {
+                    let raw = take_value("--notify-mail-to")?;
+                    for part in raw.split(',') {
+                        let p = part.trim();
+                        if !p.is_empty() && !args.notify_mail_to.iter().any(|x| x == p) {
+                            args.notify_mail_to.push(p.to_string());
+                        }
+                    }
+                    args.alert = true;
+                }
+                "--notify-list" => args.notify_list = true,
                 "-o" | "--out" => {
                     let path = take_value("--out")?;
                     let format = ExportFormat::from_path(&path).ok_or_else(|| {
@@ -322,6 +486,7 @@ impl Args {
         if self.history.is_none() && self.keep_days != DEFAULT_KEEP_DAYS {
             return Err("--keep-days 仅在同时指定 --history 时有意义".into());
         }
+        self.validate_alert_flags()?;
         Ok(())
     }
 
@@ -358,15 +523,43 @@ impl Args {
         } else {
             ""
         };
+        // M15：告警与通知
+        let alerts = if self.alert {
+            let kinds = if self.alert_kinds.is_empty() {
+                "全部".to_string()
+            } else {
+                self.alert_kinds
+                    .iter()
+                    .map(|k| k.label_zh())
+                    .collect::<Vec<_>>()
+                    .join("/")
+            };
+            let ch = if self.notify_channels.is_empty() {
+                "console".to_string()
+            } else {
+                self.notify_channels.join("+")
+            };
+            format!(
+                " · 告警（{kinds}）{} · 通知 {ch}",
+                if self.alert_muted {
+                    "［已静音］"
+                } else {
+                    ""
+                }
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "{} · {} 并发 · 超时 {} ms{}{}{}{}",
+            "{} · {} 并发 · 超时 {} ms{}{}{}{}{}",
             self.mode.describe(),
             self.concurrency,
             self.timeout_ms,
             watch,
             fp,
             hist,
-            rep
+            rep,
+            alerts
         )
     }
 
@@ -382,6 +575,127 @@ impl Args {
         }
         cfg.normalized()
     }
+
+    /// M15：CLI 参数 → 核心的告警配置。
+    pub fn alert_config(&self) -> cping_core::AlertConfig {
+        let mut cfg = cping_core::AlertConfig {
+            muted: self.alert_muted,
+            ..Default::default()
+        };
+        for rule in &mut cfg.rules {
+            rule.threshold = match rule.kind {
+                cping_core::AlertKind::LatencyAbove => self.alert_latency_ms,
+                cping_core::AlertKind::UptimeBelow => self.alert_uptime_pct,
+                _ => rule.threshold,
+            };
+            rule.cooldown_secs = self.alert_cooldown_secs;
+        }
+        if !self.alert_kinds.is_empty() {
+            cfg.with_kinds(&self.alert_kinds);
+        }
+        cfg
+    }
+
+    /// M15：CLI 参数 → 核心的通知配置。
+    ///
+    /// 规则只有两条，都好解释：
+    /// 1. 给了 `--notify` → **就是**这几条通道（多一个不给、少一个不补）；
+    /// 2. 没给 `--notify` → console，外加任何「给了参数」的通道。
+    ///
+    /// 第 2 条的意思是 `--notify-cmd …` 单独出现时**一定**会生效——
+    /// 静默忽略用户给的东西是这个项目里最不能接受的一类 bug。
+    pub fn notify_config(&self) -> cping_core::NotifyConfig {
+        use cping_core::ChannelConfig;
+        let explicit = !self.notify_channels.is_empty();
+        let wants = |name: &str| self.notify_channels.iter().any(|c| c == name);
+        let on = |name: &str| !explicit || wants(name);
+
+        let mut channels: Vec<ChannelConfig> = Vec::new();
+        if on("console") {
+            channels.push(ChannelConfig::Console);
+        }
+        if wants("system") {
+            channels.push(ChannelConfig::System {
+                app_name: "CPing".into(),
+            });
+        }
+        if on("webhook") {
+            if let Some(url) = &self.notify_webhook {
+                channels.push(ChannelConfig::Webhook {
+                    url: url.clone(),
+                    timeout_ms: cping_core::notify::DEFAULT_CHANNEL_TIMEOUT_MS,
+                });
+            }
+        }
+        if on("command") {
+            for tpl in &self.notify_cmds {
+                channels.push(ChannelConfig::Command {
+                    template: tpl.clone(),
+                    timeout_ms: cping_core::notify::DEFAULT_CHANNEL_TIMEOUT_MS,
+                });
+            }
+        }
+        if on("smtp") {
+            if let Some(endpoint) = &self.notify_smtp {
+                let (host, port) = match endpoint.rsplit_once(':') {
+                    Some((h, p)) => (h.to_string(), p.parse::<u16>().unwrap_or(25)),
+                    None => (endpoint.clone(), 25),
+                };
+                channels.push(ChannelConfig::Smtp {
+                    account: cping_core::SmtpAccount {
+                        host,
+                        port,
+                        from: self
+                            .notify_mail_from
+                            .clone()
+                            .unwrap_or_else(|| "cping@localhost".into()),
+                        to: self.notify_mail_to.clone(),
+                        subject_prefix: "[CPing]".into(),
+                    },
+                    timeout_ms: cping_core::notify::DEFAULT_CHANNEL_TIMEOUT_MS,
+                });
+            }
+        }
+        cping_core::NotifyConfig { channels }
+    }
+
+    /// M15：告警相关的参数组合校验。
+    ///
+    /// 三类问题必须报错而不是静默降级：
+    /// 1. 点名了通道却不给它的必填参数（会变成「什么也不发」）；
+    /// 2. 给了某通道的参数却没在 `--notify` 里选上它（参数被默默丢掉）；
+    /// 3. 参数依赖关系缺失（SMTP 没写收件人）。
+    fn validate_alert_flags(&self) -> Result<(), String> {
+        let explicit = !self.notify_channels.is_empty();
+        let wants = |name: &str| self.notify_channels.iter().any(|c| c == name);
+        let on = |name: &str| !explicit || wants(name);
+
+        if wants("webhook") && self.notify_webhook.is_none() {
+            return Err("--notify webhook 需要同时给 --notify-webhook <http://…>".into());
+        }
+        if wants("smtp") && self.notify_smtp.is_none() {
+            return Err("--notify smtp 需要同时给 --notify-smtp <host[:port]>".into());
+        }
+        if wants("command") && self.notify_cmds.is_empty() {
+            return Err("--notify command 需要同时给 --notify-cmd <模板>".into());
+        }
+        if self.notify_webhook.is_some() && !on("webhook") {
+            return Err("给了 --notify-webhook 却没在 --notify 里选上 webhook".into());
+        }
+        if self.notify_smtp.is_some() && !on("smtp") {
+            return Err("给了 --notify-smtp 却没在 --notify 里选上 smtp".into());
+        }
+        if !self.notify_cmds.is_empty() && !on("command") {
+            return Err("给了 --notify-cmd 却没在 --notify 里选上 command".into());
+        }
+        if self.notify_smtp.is_some() && self.notify_mail_to.is_empty() {
+            return Err("--notify-smtp 需要同时给 --notify-mail-to（至少一个收件人）".into());
+        }
+        if !self.alert && self.alert_state.is_some() {
+            return Err("--alert-state 只在开启告警（--alert 或任一 --alert-*）时有意义".into());
+        }
+        Ok(())
+    }
 }
 
 fn parse_u64(name: &str, text: &str) -> Result<u64, String> {
@@ -396,6 +710,14 @@ fn parse_u16(name: &str, text: &str) -> Result<u16, String> {
         return Err(format!("{name} 超出 0-65535"));
     }
     Ok(v as u16)
+}
+
+fn parse_u32(name: &str, text: &str) -> Result<u32, String> {
+    let v = parse_u64(name, text)?;
+    if v > u32::MAX as u64 {
+        return Err(format!("{name} 超出 0-{}", u32::MAX));
+    }
+    Ok(v as u32)
 }
 
 #[cfg(test)]
@@ -683,5 +1005,163 @@ mod tests {
         let a = Args::parse(&argv(&["-t", "a", "--keep-days", "30"])).unwrap();
         let err = a.validate().unwrap_err();
         assert!(err.contains("--history"), "{err}");
+    }
+
+    // ------------------------------------------------------------------
+    // M15：告警与通知
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn alert_flags_default_to_off_and_are_parsed() {
+        let a = Args::parse(&argv(&["-t", "10.0.0.1"])).unwrap();
+        assert!(!a.alert, "不指定 --alert 就不该有告警");
+        assert!(a.alert_kinds.is_empty());
+        assert_eq!(a.alert_latency_ms, cping_core::DEFAULT_LATENCY_THRESHOLD_MS);
+        assert_eq!(a.alert_uptime_pct, cping_core::DEFAULT_UPTIME_THRESHOLD_PCT);
+        assert!(a.notify_channels.is_empty());
+        assert!(!a.describe().contains("告警"), "{}", a.describe());
+
+        let b = Args::parse(&argv(&[
+            "-t",
+            "10.0.0.1",
+            "--alert",
+            "--alert-kinds",
+            "offline,latency",
+            "--alert-latency",
+            "80",
+            "--alert-uptime",
+            "99",
+            "--alert-cooldown",
+            "60",
+            "--mute-alerts",
+        ]))
+        .unwrap();
+        assert!(b.alert);
+        assert_eq!(
+            b.alert_kinds,
+            vec![
+                cping_core::AlertKind::Disappeared,
+                cping_core::AlertKind::LatencyAbove
+            ]
+        );
+        assert!(b.alert_muted);
+        let cfg = b.alert_config();
+        let lat = cfg.rule(cping_core::AlertKind::LatencyAbove).unwrap();
+        assert!(lat.enabled);
+        assert_eq!(lat.threshold, 80);
+        assert_eq!(lat.cooldown_secs, 60);
+        assert!(
+            !cfg.rule(cping_core::AlertKind::Appeared).unwrap().enabled,
+            "没选的规则要被停用"
+        );
+        assert!(cfg.muted);
+        assert!(b.describe().contains("告警"), "{}", b.describe());
+        assert!(b.describe().contains("已静音"), "{}", b.describe());
+    }
+
+    #[test]
+    fn alert_flag_errors_are_reported_not_ignored() {
+        assert!(Args::parse(&argv(&["-t", "a", "--alert-kinds", "nope"])).is_err());
+        assert!(Args::parse(&argv(&["-t", "a", "--alert-kinds", ""])).is_err());
+        assert!(Args::parse(&argv(&["-t", "a", "--alert-uptime", "101"])).is_err());
+        assert!(Args::parse(&argv(&["-t", "a", "--alert-latency", "abc"])).is_err());
+        // --alert-state 单独给没有意义
+        let a = Args::parse(&argv(&["-t", "a", "--alert-state", "s.txt"])).unwrap();
+        assert!(a.alert, "--alert-state 本身即开启告警");
+        let b = Args::parse(&argv(&["-t", "a"])).unwrap();
+        assert!(b.validate().is_ok());
+    }
+
+    #[test]
+    fn notify_defaults_to_console_and_channel_params_are_collected() {
+        let a = Args::parse(&argv(&["-t", "a", "--alert"])).unwrap();
+        assert_eq!(
+            a.notify_config().keys(),
+            vec!["console"],
+            "默认只用 console"
+        );
+
+        let b = Args::parse(&argv(&[
+            "-t",
+            "a",
+            "--notify-cmd",
+            "curl -s -d {json} http://x/",
+            "--notify-cmd",
+            "echo {count}",
+        ]))
+        .unwrap();
+        assert_eq!(
+            b.notify_config().keys(),
+            vec!["console", "command", "command"],
+            "没给 --notify 时：console + 任何给了参数的通道；命令模板可重复"
+        );
+        assert!(b.validate().is_ok());
+
+        let c = Args::parse(&argv(&[
+            "-t",
+            "a",
+            "--notify",
+            "webhook",
+            "--notify-webhook",
+            "http://10.0.0.5:9000/hook",
+        ]))
+        .unwrap();
+        assert_eq!(c.notify_config().keys(), vec!["webhook"]);
+
+        let d = Args::parse(&argv(&[
+            "-t",
+            "a",
+            "--notify",
+            "smtp",
+            "--notify-smtp",
+            "mail.lan:2525",
+            "--notify-mail-to",
+            "ops@lan,boss@lan",
+            "--notify-mail-from",
+            "cping@lan",
+        ]))
+        .unwrap();
+        assert_eq!(d.notify_config().keys(), vec!["smtp"]);
+        match &d.notify_config().channels[0] {
+            cping_core::ChannelConfig::Smtp { account, .. } => {
+                assert_eq!(account.host, "mail.lan");
+                assert_eq!(account.port, 2525);
+                assert_eq!(account.to, vec!["ops@lan", "boss@lan"]);
+                assert_eq!(account.from, "cping@lan");
+            }
+            other => panic!("应为 smtp 通道：{other:?}"),
+        }
+    }
+
+    #[test]
+    fn notify_channel_misuse_is_a_usage_error() {
+        // 点名了通道却不给必填参数 → 报错，别静默变成「什么也不发」
+        let a = Args::parse(&argv(&["-t", "a", "--notify", "webhook"])).unwrap();
+        assert!(a.validate().unwrap_err().contains("--notify-webhook"));
+
+        let b = Args::parse(&argv(&["-t", "a", "--notify", "smtp"])).unwrap();
+        assert!(b.validate().unwrap_err().contains("--notify-smtp"));
+
+        let c = Args::parse(&argv(&["-t", "a", "--notify-smtp", "mail.lan"])).unwrap();
+        assert!(c.validate().unwrap_err().contains("--notify-mail-to"));
+
+        // 给了 webhook 地址却没在 --notify 里选上它
+        let d = Args::parse(&argv(&[
+            "-t",
+            "a",
+            "--notify",
+            "console",
+            "--notify-webhook",
+            "http://x/",
+        ]))
+        .unwrap();
+        assert!(d.validate().unwrap_err().contains("webhook"));
+
+        assert!(Args::parse(&argv(&["-t", "a", "--notify", "telegram"])).is_err());
+        assert!(
+            Args::parse(&argv(&["-t", "a", "--notify-list"]))
+                .unwrap()
+                .notify_list
+        );
     }
 }

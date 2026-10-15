@@ -307,7 +307,7 @@ CLI 模式不初始化终端 UI。
 | M12 | **v2.0.0** | 架构升级 | IPv6 + 可选异步 + 后端插件化 |
 | M13 | v2.1.0 | 资产识别 | 端口指纹、服务横幅、设备类型推断 |
 | M14 | v2.2.0 | 历史与趋势 | 时序落盘、可用率报表、离线率曲线 |
-| M15 | v2.3.0 | 告警与通知 | 阈值告警、Webhook / 邮件 / 系统通知 |
+| M15 | **v2.3.0** ✅ | 告警与通知 | 阈值告警、Webhook / 邮件 / 系统通知 |
 | M16 | v2.4.0 | 配置与模板 | 扫描模板、配置导入导出、CLI 配置文件 |
 | M17 | v2.5.0 | 安全与合规 | 签名制品、权限最小化、审计日志、限速 |
 | M18 | v2.6.0 | 国际化与无障碍 | i18n（中/英）、键盘全导航、屏幕阅读器 |
@@ -641,4 +641,91 @@ RTT 本来就是 0 ms ——拿 0 当「没测到」的哨兵，会把一台**�
 - 未实测：跨天/跨周的长期保留与降采样（降采样只在单测里跑过，没有真实跑满
   2016 个点）；Android 上的趋势页（与桌面同一份 Vue 代码，未在真机跑过）；
   GUI 趋势页的人工目视确认（只做了构建与类型检查）
+
+### M15 — v2.3.0 告警与通知（实施记录，2026-10-15）
+
+**实现文件**
+
+- `crates/cping-core/src/alerts.rs`（新增，约 1200 行含测试）
+  - `AlertKind`（`Appeared` / `Disappeared` / `LatencyAbove` / `UptimeBelow`）
+    带 `key()` / `label_zh()` / `parse_key()` / `uses_threshold()`；`Severity` 三档
+  - `AlertRule`（`kind` / `enabled` / `threshold` / `cooldown_secs`）、
+    `AlertConfig`（`rules` / `muted` / `capacity`）、`AlertContext`
+  - **纯函数** `match_rule(rule, ctx) -> Option<AlertEvent>`
+  - `AlertEngine`：`evaluate` / `prime_with` / `reset` / `apply_config` /
+    `to_text` / `from_text` / `save_to_path` / `load_from_path` /
+    `suppressed_by_cooldown` / `suppressed_by_mute` / `log_mut`
+  - `AlertLog`：环形缓冲 + `total_seen`
+- `crates/cping-core/src/notify.rs`（新增，约 1400 行含测试）
+  - `deliver(events, cfg) -> Vec<DeliveryOutcome>`、`notifications_available()`
+  - 五个通道：`console` / `system`（Windows Toast、Linux `notify-send`）/
+    `webhook`（仅 `http://`）/ `command` / `smtp`（明文）
+  - `expand_template`（整词替换）、`events_to_json`、`base64`、
+    `encode_powershell`、`ps_quote`、`xml_escape`、`truncate`
+  - `AlertSink`：后台线程 + `sync_channel(64)`，队列满丢弃并计数
+- `crates/cping-core/src/timefmt.rs`（新增）：时间算法下沉，消除三份拷贝
+- `apps/cping-cli`：告警与通知全部参数 + `--notify-list`；
+  `execute()` 拆成 `run_rounds()` + `finish_alerts()`
+- `apps/cping-tui`：`A` 告警面板（首次按即启用）、`!` 静音、状态栏告警摘要
+- `apps/cping-gui`：`alert_state` / `set_alerts_enabled` / `set_alert_muted` /
+  `update_alert_rules` / `clear_alerts` + `alert-event` 事件 + 「告警」页签
+  `AlertPanel.vue`（桌面与移动端共用）
+
+**实现时定死的三条边界（本节初版计划只写了「阈值告警」，没说清这几处）**
+
+1. **第一轮不发 `Appeared`**。第一轮只建立基线（`primed` 抑制）。不这么做的话，
+   扫一个 /24 会一次刷出 255 条「新增主机」——那不是告警，是噪音。
+   纯函数层保留「`was_online == None` 且在线 → 新增」的语义，
+   「第一轮不刷屏」由引擎的 `primed` 负责，两层各有测试。
+2. **阈值用严格不等号**。`LatencyAbove` 用 `>`、`UptimeBelow` 用 `<`。
+   恰好等于阈值不告警——`>=` / `<=` 会让「阈值 200ms」在 200.0ms 上报一次，
+   用户按字面理解会觉得是误报。
+3. **静音不是暂停**。静音时规则照常求值、`last_fired` 照常推进，只是不返回事件。
+   因此解除静音**不会**补报一堆积压告警。这是「静音」与「暂停」的本质区别，
+   也是这一版里最容易被实现错的一处（朴素做法是直接 `return` 掉早退，
+   那样一解除静音就会炸出一堆历史告警）。
+
+**通知通道的两条原则**
+
+- **通道失败必须可见**：每个通道单独汇报成功/失败与原因，一个通道挂了不影响其它
+  通道；失败还会在 `--quiet` 下照样打到 stderr，并给一句「告警本身已记录」的提示。
+- **不静默降级**：`webhook` 只支持 `http://`。`https://` 会被明确拒绝并提示改用
+  `--notify-cmd` 调 curl——把告警明文发出去比发不出去更糟。
+- **不阻塞主流程**：投递在后台线程，队列满时丢弃并计数（`dropped`），
+  由 `finish_alerts()` 如实报出「有 N 批未投递」。
+
+**验收对照**
+
+| 验收要点 | 落地情况 |
+| --- | --- |
+| 规则匹配与状态无耦合 | `match_rule` 是纯函数，`AlertContext` 携带全部输入；`appeared_only_fires_for_a_genuinely_new_host` 等直接在纯函数层断言 |
+| 第一轮不刷屏 | `first_round_does_not_report_every_online_host_as_new`（核心 256 台 + TUI 256 台两条路径各一条） |
+| 阈值边界 | `threshold_uses_a_strict_inequality`（等于阈值不告警） |
+| 冷却按主机、按类型分别生效 | `cooldown_suppresses_a_level_rule_within_the_window`、`cooldown_is_per_host_and_per_kind` |
+| 静音不改变状态 | `mute_silences_events_but_keeps_the_dedup_state_advancing`（核心）+ TUI 同名场景 |
+| 投递不阻塞、失败可见 | `AlertSink` 的 `dropped()` 计数 + CLI `finish_alerts()` 的通道结果表；`--notify-list` 列出能力 |
+| 状态文件版本化 | `state_version_mismatch_is_rejected_and_bad_lines_are_counted`；`state_roundtrip_is_byte_stable` |
+
+**测试与实测**
+
+- 单元/集成测试：+57（`alerts.rs` 27 + `notify.rs` 22 + CLI 参数 5 + TUI 3），
+  工作区合计 **393 passed / 0 failed**
+- 真实冒烟（Windows 本机，非模拟后端）：
+  1. 目标 `1.1.1.1`（实测 271 ms），`--alert-latency 200` 触发 1 条；
+     **不给 `--notify`、只给 `--notify-webhook` 与 `--notify-cmd`** →
+     `console` / `webhook` / `command` 三条通道同时生效，
+     webhook 收到 200，两处 JSON 逐字段一致
+  2. `--notify webhook --notify-webhook https://…` → 通道明确失败并给出改用
+     `--notify-cmd` 的提示
+  3. 四类误用（缺地址 / 缺 `--notify-cmd` / 地址没被 `--notify` 选上 /
+     SMTP 缺收件人）全部退出码 2；`--notify telegram` 退出码 2
+  4. `--notify-list` 正确列出五通道能力（Windows 上 `system` 可用）
+  5. 告警状态跨会话：会话 B 被冷却挡下、会话 C 静音，计数与文件内容一致
+- `cargo fmt --check` / `cargo clippy --workspace --all-targets -- -D warnings`
+  两套工作区干净；GUI（独立工程）另跑一遍同样干净
+- 前端 `vue-tsc --noEmit` 0 错误、`npm run build` 通过
+- 未实测：TUI 的 `A` / `!` 未做人工键盘冒烟（单元测试直接驱动 `on_key` 与求值路径）；
+  GUI 告警页未做真机点击冒烟（仅编译 + 类型检查 + 构建通过）；
+  `system` 通道只在 Windows 上跑过（Linux 的 `notify-send` 未在真机验证）；
+  `smtp` 通道未接真实中继（只覆盖了构造与错误路径）
 

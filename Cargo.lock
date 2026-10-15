@@ -51,21 +51,21 @@ dependencies = [
 
 [[package]]
 name = "cping-cli"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "cping-core",
 ]
 
 [[package]]
 name = "cping-core"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "tokio",
 ]
 
 [[package]]
 name = "cping-tui"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "cping-core",
  "ratatui",

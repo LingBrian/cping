@@ -37,6 +37,10 @@ const monitorText = computed(() => {
       </span>
     </span>
     <span v-if="monitorText">{{ monitorText }}</span>
+    <!-- M15：有告警才出现。写「告警 0 条」是纯噪音，不如不显示。 -->
+    <span v-if="store.alertNote" style="color: #b45309">
+      <b>{{ store.alertNote }}</b>
+    </span>
     <!-- M7：认出了多少台如实报出来；数字直接数结果，不另外维护一份状态 -->
     <span>已识别 MAC：{{ store.recognized.mac }}</span>
     <span>厂商：{{ store.recognized.vendor }}</span>
