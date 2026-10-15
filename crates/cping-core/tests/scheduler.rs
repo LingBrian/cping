@@ -397,3 +397,72 @@ fn invalid_config_rejected_before_start() {
         Err(CoreError::InvalidConfig(_))
     ));
 }
+
+/// M19：`Result` 事件的**完整性**必须断言，`Progress` 的**顺序与完整性都不能**。
+///
+/// 完整性：一次扫描里结果事件必须**一条不少**（`Result` 条数 == 目标数），
+/// 且只有一条 `Started`、一条终态。这条在任何并发度下都必须成立。
+///
+/// `Progress` 则两条都不能信，原因都是「多个 worker 线程 + 一个协调线程
+/// 共用一个 `Sender` 但并发入队」：
+///
+/// 1. **不保序**：同一个 worker 确实是先发 `Result` 再发 `Progress`，但跨线程
+///    的入队顺序不保证，于是 `Progress` 会**领先于它自己的 `Result`** 到达。
+/// 2. **尾部会丢**：通道按「块」缓冲，最后一个未填满的块要等填满（或发送端
+///    析构）才可见；而终态是**协调线程**用另一个 `Sender` 发的，可能先被取走。
+///    结果是收到的最后一条 `Progress` 可能明显小于目标数（实测 232/255）。
+///
+/// 实测口径（255 目标 / 32 并发）：结果事件 5/5 轮一条不少；`Progress` 超前
+/// 0–42 次、最多超前 3 条，末值 232–255。
+///
+/// 所以这条测试**只断言完整性**，并把上面两条写进注释——它们是 M19 第二步的
+/// 直接依据：既然 `Progress` 既不保序又不完整，就把「进度」的权威来源定为
+/// `Result`（每条都到、且每次恰好加一），`Progress` 降级成粗粒度心跳。
+#[test]
+fn result_events_are_complete_but_progress_is_neither_ordered_nor_complete() {
+    const TARGETS: usize = 255;
+    for trial in 0..3 {
+        let backend = MockBackend::new(MockPolicy::AllOnline {
+            base_rtt_ms: 1,
+            span_ms: 10,
+        });
+        let sched = ProbeScheduler::new(backend);
+        let handle = sched
+            .start(&cfg(32), targets("10.1.1", TargetRange::Standard))
+            .unwrap();
+
+        let (mut results, mut started, mut terminal) = (0usize, 0usize, 0usize);
+        let mut last_progress = 0usize;
+        let mut progress_seen = 0usize;
+
+        loop {
+            match handle.recv() {
+                Some(ProbeEvent::Started { .. }) => started += 1,
+                Some(ProbeEvent::Result { .. }) => results += 1,
+                Some(ProbeEvent::Progress { completed, .. }) => {
+                    progress_seen += 1;
+                    last_progress = completed;
+                }
+                Some(ProbeEvent::Finished { .. }) | Some(ProbeEvent::Cancelled { .. }) => {
+                    terminal += 1;
+                    break;
+                }
+                None => break,
+            }
+        }
+
+        assert_eq!(results, TARGETS, "第 {trial} 轮：结果事件必须一条不少");
+        assert_eq!(started, 1, "第 {trial} 轮：Started 只应有一条");
+        assert_eq!(terminal, 1, "第 {trial} 轮：终态只应有一条");
+        // 不断言 `last_progress == TARGETS`（会随机红灯，见文档）；
+        // 只断言它**永不超出事实**——这是 `completed` 的定义决定的。
+        assert!(
+            last_progress <= TARGETS,
+            "第 {trial} 轮：进度值不得超出目标数（实测 {last_progress} / {TARGETS}）"
+        );
+        assert!(
+            progress_seen <= TARGETS,
+            "第 {trial} 轮：进度事件条数不得多于目标数"
+        );
+    }
+}

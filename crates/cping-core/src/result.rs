@@ -225,6 +225,69 @@ impl ScanStats {
         stats
     }
 
+    // -----------------------------------------------------------------
+    // M19：增量口径
+    // -----------------------------------------------------------------
+
+    /// 设定目标总数（增量模式的起点）。
+    ///
+    /// 增量模式下 `total` 由调用方一次设定，之后 [`Self::push_status`] 只改分项与
+    /// `completed`，**不再动 `total`**——否则「先设定总数再逐条累加」会把总数翻倍。
+    pub fn set_total(&mut self, total: usize) {
+        self.total = total;
+        self.pending = total.saturating_sub(self.completed);
+    }
+
+    /// **增量**累加一个状态（M19）。
+    ///
+    /// 为什么需要它：三端此前都是「每收到一条结果就把整表拍平成 `Vec` 再全量统计」，
+    /// 那是 O(n²)——65536 个目标要拍平 65536 次、累计克隆约 21 亿条结果，
+    /// 万级目标下界面会被统计本身拖死。增量累加是 O(1)。
+    ///
+    /// 口径必须与 [`Self::from_statuses`] **逐字段相同**，
+    /// 由 `incremental_stats_match_the_batch_ones` 守着：任何分项加错都会红灯。
+    ///
+    /// 注意 `pending` 在批量口径里也全由 `total - completed` 推出（见
+    /// [`Self::from_results_with_total`]），这里沿用同一条定义，保证两个口径
+    /// 在任意调用序列下都一致——**不要**在这里按变体去 `pending += 1`。
+    pub fn push_status(&mut self, status: &ProbeStatus) {
+        match status {
+            ProbeStatus::Pending => {}
+            ProbeStatus::Online { .. } => {
+                self.online += 1;
+                self.completed += 1;
+            }
+            ProbeStatus::Timeout => {
+                self.timeout += 1;
+                self.completed += 1;
+            }
+            ProbeStatus::Unreachable => {
+                self.unreachable += 1;
+                self.completed += 1;
+            }
+            ProbeStatus::PermissionDenied => {
+                self.permission_denied += 1;
+                self.completed += 1;
+            }
+            ProbeStatus::Unsupported => {
+                self.unsupported += 1;
+                self.completed += 1;
+            }
+            ProbeStatus::Error(_) => {
+                self.error += 1;
+                self.completed += 1;
+            }
+        }
+        self.pending = self.total.saturating_sub(self.completed);
+    }
+
+    /// 便捷入口：按目标总数建一个统计，再逐条 [`Self::push_status`]。
+    pub fn for_total(total: usize) -> Self {
+        let mut stats = Self::default();
+        stats.set_total(total);
+        stats
+    }
+
     /// 完成比例，`0.0..=1.0`。
     pub fn progress(&self) -> f64 {
         if self.total == 0 {
@@ -280,5 +343,113 @@ impl ProbeEvent {
             self,
             ProbeEvent::Finished { .. } | ProbeEvent::Cancelled { .. }
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn sample_statuses() -> Vec<ProbeStatus> {
+        vec![
+            ProbeStatus::Online { rtt_ms: 3 },
+            ProbeStatus::Timeout,
+            ProbeStatus::Unreachable,
+            ProbeStatus::PermissionDenied,
+            ProbeStatus::Unsupported,
+            ProbeStatus::Error("boom".into()),
+            ProbeStatus::Pending,
+            ProbeStatus::Online { rtt_ms: 42 },
+        ]
+    }
+
+    fn sample_results() -> Vec<ProbeResult> {
+        sample_statuses()
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                ProbeResult::new(
+                    i as u16,
+                    IpAddr::V4(Ipv4Addr::new(192, 168, 1, i as u8 + 1)),
+                    s.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// M19 的核心不变量：增量口径与批量口径必须逐字段相同。
+    ///
+    /// 三端在 M19 之后走的是增量路径（每收到一条结果加一次），而落盘/报表走的
+    /// 仍是批量路径。两条路一旦对不上，「界面上显示完成 500」与「报表里 498」
+    /// 会同时存在，而且没人知道哪个对。
+    #[test]
+    fn incremental_stats_match_the_batch_ones() {
+        let results = sample_results();
+        let batch = ScanStats::from_results_with_total(&results, results.len());
+
+        let mut incremental = ScanStats::for_total(results.len());
+        for r in &results {
+            incremental.push_status(&r.status);
+        }
+
+        assert_eq!(incremental, batch, "增量与批量统计必须逐字段相同");
+    }
+
+    /// 取消的场景：「已完成的保留、未开始的目标仍计入总数」。
+    ///
+    /// 批量路径靠 `from_results_with_total(results, total)` 表达，
+    /// 增量路径靠 `set_total(total)` + 只 push 已完成的那部分。
+    #[test]
+    fn incremental_stats_keep_cancelled_remainder_as_pending() {
+        let all = sample_results();
+        // 只探测了前 5 个就取消
+        let done = &all[..5];
+        let batch = ScanStats::from_results_with_total(done, all.len());
+
+        let mut incremental = ScanStats::for_total(all.len());
+        for r in done {
+            incremental.push_status(&r.status);
+        }
+
+        assert_eq!(incremental.completed, 5);
+        assert_eq!(incremental.pending, all.len() - 5);
+        assert_eq!(incremental, batch);
+    }
+
+    /// `Pending` 是「尚未得到结果」，不得被算进 `completed`，
+    /// 也不得让 `pending` 被加两次。
+    #[test]
+    fn pending_status_is_not_completed_and_is_not_double_counted() {
+        let mut stats = ScanStats::for_total(3);
+        stats.push_status(&ProbeStatus::Pending);
+        stats.push_status(&ProbeStatus::Online { rtt_ms: 1 });
+        stats.push_status(&ProbeStatus::Timeout);
+
+        assert_eq!(stats.completed, 2);
+        assert_eq!(stats.pending, 1);
+        assert_eq!(stats.total, 3);
+        assert_eq!(
+            stats.online
+                + stats.timeout
+                + stats.unreachable
+                + stats.permission_denied
+                + stats.unsupported
+                + stats.error,
+            stats.completed,
+            "所有终态分项之和必须等于 completed"
+        );
+    }
+
+    /// `set_total` 先设定总数、再逐条累加，`total` 不得被翻倍。
+    #[test]
+    fn setting_total_first_does_not_double_it() {
+        let mut stats = ScanStats::for_total(10);
+        for _ in 0..10 {
+            stats.push_status(&ProbeStatus::Timeout);
+        }
+        assert_eq!(stats.total, 10);
+        assert_eq!(stats.completed, 10);
+        assert_eq!(stats.pending, 0);
     }
 }

@@ -3,6 +3,41 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### 新增
+
+- **规模化性能（M19 第一步：增量统计口径与基准工程）**
+  - 核心层新增 `ScanStats::set_total` / `push_status` / `for_total`：**按条增量累加**
+    的 O(1) 统计口径，与既有批量口径（`from_results_with_total` / `from_statuses`）
+    **逐字段相同**，由 `incremental_stats_match_the_batch_ones` 守着
+  - 新增基准工程 `crates/cping-core/benches/scan.rs`（`harness = false`，
+    **不引 criterion**——核心 crate 的 dev-dependencies 保持为空）+ 基线
+    `docs/perf-baseline.txt`，`cargo bench -p cping-core --bench scan -- --check`
+    可比对回归；CI 新增 `perf` job（只跑机器无关的结构性断言，见下）
+  - 新增回归基线：**1 万目标 / 32 并发 / 1 s 超时**，以及 65536 目标的取消延迟
+
+### 修复
+
+- **三端统计是 O(n²)，万级目标下界面会被统计本身拖死**
+  - TUI 的 `App::recompute_stats` 与 GUI 的 `ProbeEvent::Result` 分支此前都是
+    「每收到一条结果就拍平整表再全量统计」：65536 个目标要拍平 65536 次、
+    累计克隆约 21 亿条结果。基准实测 8192 目标就要 **1276 ms**，
+    按二次关系外推到 65536 是 **82 秒**；改成增量累加后同一台机器是 **0.036 ms**
+    （外推加速比约 227 万倍，非实测）
+  - 落盘与报表仍走批量口径，两条路必须对得上——否则会出现「界面显示完成 500、
+    导出的报表里 498」这种没人知道哪个对的局面
+
+### 文档
+
+- **两条实测出来的事件契约**（写进 `docs/plan.md` 与测试注释，供后续阶段依据）：
+  1. **结果事件一条不少**：`Result` 条数恒等于目标数，`Started` / 终态各一条。
+  2. **`Progress` 既不保序也不完整**：多个 worker 线程并发入队，`Progress` 会
+     **领先于它自己的 `Result`**（实测 255 目标 / 32 并发：超前 0–42 次、最多 3 条）；
+     通道按块缓冲，尾部未填满的块要等填满或发送端析构才可见，而终态由**另一个**
+     发送者发出，所以最后收到的 `Progress` 可能明显小于目标数（实测 232/255）。
+     因此「进度」的权威来源只能是 `Result`，`Progress` 在 M19 第二步会降级成粗粒度心跳。
+
 ## [2.6.0] - 2026-10-15
 
 ### 新增

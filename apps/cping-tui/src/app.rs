@@ -1902,7 +1902,7 @@ impl App {
                 self.results = vec![None; targets.len()];
                 self.targets = targets;
                 self.spec = spec;
-                self.stats = ScanStats::from_results_with_total(&[], self.targets.len());
+                self.stats = ScanStats::for_total(self.targets.len());
                 self.elapsed_ms = 0;
                 self.started_at = Some(Instant::now());
                 self.scan_time = now_string();
@@ -1953,17 +1953,30 @@ impl App {
                 self.stats.total = total;
             }
             ProbeEvent::Result { result, .. } => {
+                // M19：按条**增量**累加（O(1)），不再「拍平整表再全量统计」（O(n²)）。
+                // 必须在把 `result` 移进槽位**之前**取状态——移进去之后就借不到了。
+                // 口径与批量路径逐字段一致，由核心的
+                // `incremental_stats_match_the_batch_ones` 守着（见 plan.md M19 第一步）。
+                self.stats.push_status(&result.status);
                 let idx = result.index as usize;
                 if let Some(slot) = self.results.get_mut(idx) {
                     *slot = Some(result);
                 }
-                self.recompute_stats();
             }
-            ProbeEvent::Progress { completed, .. } => {
-                // 统计以核心为准，这里只用它兜底
-                if self.stats.completed < completed {
-                    self.recompute_stats();
-                }
+            ProbeEvent::Progress { .. } => {
+                // M19：统计已由 `Result` 分支按条累加，这里**不再需要重算整表**。
+                //
+                // **刻意不做任何以 `completed` 为准的对账或断言。** 开发这一步时
+                // 写过一句 `debug_assert!(本地完成数 >= completed)`，结果 16 个测试
+                // 红灯——核心侧隔离复现后查明：`Result`/`Progress` 由**多个 worker
+                // 线程**并发发送，虽然是同一个 `Sender` 且每条结果都是「先发 Result
+                // 再发 Progress」，但跨线程的入队顺序不保证，`Progress` 会**领先于
+                // 它自己的 `Result`** 到达。实测（255 目标 / 32 并发 / 5 轮）：
+                // 结果事件一条不少，而 `Progress` 超前 0–42 次、最多超前 3 条。
+                //
+                // 所以：**`Progress` 不是交付顺序信号**，用它对账会造出随机红灯。
+                // 真正可靠的只有一件事——`Finished` / `Cancelled` 带的完整统计。
+                // （M19 第二步会把 `Progress` 降级成粗粒度心跳，见 plan.md。）
             }
             ProbeEvent::Finished {
                 stats, elapsed_ms, ..
@@ -2057,11 +2070,6 @@ impl App {
         self.next_round_at = self
             .watch_seconds
             .map(|secs| Instant::now() + Duration::from_secs(secs));
-    }
-
-    fn recompute_stats(&mut self) {
-        let done: Vec<ProbeResult> = self.results.iter().flatten().cloned().collect();
-        self.stats = ScanStats::from_results_with_total(&done, self.targets.len());
     }
 
     // ------------------------------------------------------------------
@@ -2749,6 +2757,59 @@ mod tests {
             "已完成结果必须与统计一致地保留"
         );
         assert!(app.stats.completed <= 255);
+    }
+
+    /// M19：TUI 的进度统计改走**增量累加**（`ScanStats::push_status`），
+    /// 而落盘/报表仍走**批量口径**（`from_results_with_total`）。
+    ///
+    /// 两条路必须逐字段相同——否则会出现「界面上显示完成 500、导出的报表里 498」
+    /// 这种没人知道哪个对的局面。这里不写死期望数字，而是**两条路互相对账**，
+    /// 这样连「未来某个状态变体没被分项统计」都能抓到。
+    #[test]
+    fn m19_incremental_stats_agree_with_a_full_recompute() {
+        let mut app = App::new(opts());
+        app.start_scan();
+        wait_done(&mut app, 300);
+
+        let done: Vec<ProbeResult> = app.results.iter().flatten().cloned().collect();
+        let batch = ScanStats::from_results_with_total(&done, app.targets.len());
+
+        assert_eq!(
+            app.stats, batch,
+            "增量累加的统计必须与「拍平整表再全量统计」逐字段相同"
+        );
+        assert_eq!(
+            app.stats.completed,
+            app.results.iter().flatten().count(),
+            "completed 必须等于表里真实的结果条数"
+        );
+    }
+
+    /// M19：取消这条边界上，增量口径与批量口径也要一致
+    /// （「已完成的保留、未开始的目标仍计入总数」）。
+    #[test]
+    fn m19_incremental_stats_agree_after_cancellation() {
+        let mut app = App::new(opts());
+        app.start_scan();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        app.cancel_scan(false);
+        wait_done(&mut app, 300);
+
+        let done: Vec<ProbeResult> = app.results.iter().flatten().cloned().collect();
+        let batch = ScanStats::from_results_with_total(&done, app.targets.len());
+
+        // 取消后 stats 来自核心的终态事件，同样必须与批量口径一致
+        assert_eq!(app.stats, batch, "取消后的统计必须与批量口径一致");
+        assert_eq!(app.stats.total, app.targets.len(), "未开始的目标仍计入总数");
+        // 不写「取消就一定还有 pending」：协调线程是在**收尾时**才读取消标志，
+        // 若取消请求落在最后一个目标刚跑完之后，终态仍是 `Cancelled` 而结果已全齐
+        // （本测试的模拟后端很快，正是这种情况）。所以只断言这条恒等式，
+        // 它在任何时序下都必须成立。
+        assert_eq!(
+            app.stats.completed + app.stats.pending,
+            app.stats.total,
+            "已完成 + 未完成必须恒等于总数"
+        );
     }
 
     #[test]

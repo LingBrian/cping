@@ -27,3 +27,12 @@ tokio = { version = "1", optional = true, default-features = false, features = [
 ] }
 
 [dev-dependencies]
+
+# M19 基准：`harness = false` 让它就是一个普通可执行文件，
+# 于是**不需要 criterion**（核心 crate 保持零第三方依赖的承诺不变，
+# dev-dependencies 也保持为空）。用法：
+#   cargo bench -p cping-core --bench scan
+#   cargo bench -p cping-core --bench scan -- --check
+[[bench]]
+name = "scan"
+harness = false

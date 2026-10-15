@@ -599,6 +599,86 @@ GUI 前端跑 `npm run typecheck`（含 `node scripts/check-i18n.mjs`）与 `npm
   必须单独跑，否则容易漏掉 lint。
 - **README 的测试徽章是手工数字**：改完测试要顺手改它（这轮从 336 校正到 507）。
 
+## M19：规模化性能（第一步：增量统计与基准，552 → 559 个测试）
+
+### 测试结果（2026-10-15，Windows 本机）
+
+| 套件 | 结果 |
+| --- | --- |
+| `cargo test --workspace` | **559 passed / 0 failed**（M18 收尾时 552，+7） |
+| GUI（`apps/cping-gui/src-tauri`） | **30 passed** |
+| 合计 | **589** |
+| `cargo bench -p cping-core --bench scan` | 全绿（含机器无关的结构性断言） |
+| `cargo fmt --all -- --check` | 干净 |
+| `cargo clippy --workspace --all-targets -- -D warnings` | 干净 |
+| GUI clippy（`src-tauri` 单独跑） | 干净（只剩 tauri **构建脚本**自身的一条告警） |
+| `vue-tsc --noEmit` / `check-i18n` / `check-symbols` / `check-portability` | 全部通过 |
+
+新增的 7 条：核心 `result.rs` 4 条（增量口径与批量口径逐字段一致、取消后
+「已完成保留 + 未开始仍计入总数」、`Pending` 不计入完成也不重复计、先设总数不会翻倍）、
+核心 `tests/scheduler.rs` 1 条（结果事件完整性 / `Progress` 不保序且不完整）、
+TUI 2 条（增量统计与「拍平整表再全量统计」逐字段对账，含取消后的边界）。
+
+### 基准实测（Windows 本机，bench profile）
+
+统计口径（批量重算 = M19 之前三端的写法；增量 = 本步）：
+
+| 目标数 | 批量重算 | 增量累加 | 加速比 |
+| --- | --- | --- | --- |
+| 1024 | 17.03 ms | 0.004 ms | 4367× |
+| 2048 | 101.89 ms | 0.008 ms | 12737× |
+| 4096 | 318.85 ms | 0.017 ms | 18538× |
+| 8192 | 1276.17 ms | 0.036 ms | 35548× |
+| 65536 | 81675 ms（按 O(n²) 外推，**非实测**） | 0.036 ms | 2275061× |
+
+调度器（10000 目标 / 32 并发 / 1 s 超时）：不限速 5.7–6.6 ms（约 150–174 万目标/秒）；
+默认策略（500 pps）19.0 s，实测/理论 0.95×；65536 目标 + 300 ms 后取消，
+取消延迟 3.2–4.3 ms。
+
+### 这轮最关键的发现：`Progress` 既不保序也不完整
+
+给 TUI 接线时顺手加了一句不变式断言「本地完成数 ≥ `Progress.completed`」，
+**16 个测试立刻红灯，且恰好差 1**。隔离到核心层（不经过 TUI）复现后拿到硬结论：
+
+- **结果事件一条不少**：5/5 轮 255 条全到，`Started` / 终态各一条。
+- **`Progress` 会领先于它自己的 `Result`**：`Result` 与 `Progress` 由多个 worker
+  线程**并发入队**，同一个 worker 内部确实先发 `Result` 再发 `Progress`，
+  但跨线程的入队顺序不保证。实测超前 0–42 次、最多超前 3 条。
+- **`Progress` 尾部会丢**：通道按「块」缓冲，最后一个未填满的块要等填满
+  （或发送端析构）才可见；而终态由**协调线程**用另一个 `Sender` 发出，
+  可能先被取走。于是收到的最后一条 `Progress` 可能明显小于目标数
+  （实测 232 / 255）。
+
+所以那句不变式是错的，删掉，换成一条**只断言完整性、刻意不碰顺序**的常驻测试。
+这条结论直接决定了 M19 第二步：**进度的权威来源只能是 `Result`**。
+
+### 真实冒烟（Windows 本机）
+
+1. `cping-cli -t 127.0.0.0/29 --timeout 500` → 6 目标 / 6 在线 / 0 错误，
+   0.012 s，退出码 0
+2. `cargo bench -p cping-core --bench scan -- --write-baseline` → 生成
+   `docs/perf-baseline.txt`
+3. `cargo bench -p cping-core --bench scan -- --check` → 退出码 0
+   （亚毫秒指标按「两边都 < 1 ms」跳过并打印原因）
+
+### 这轮踩到的坑
+
+- **`cargo bench` 的工作目录是包目录**：基线用相对路径 `docs/perf-baseline.txt`
+  会落到 `crates/cping-core/docs/`（不存在），报 `os error 3`。
+  要用编译期 `CARGO_MANIFEST_DIR` 往上退两级。
+- **微秒级指标不能用一位小数写进基线**：会被四舍五入成 `0.0`，
+  最重要的那个数字反而没信息量。改自适应精度。
+- **亚毫秒耗时不能按绝对值比对**：同机连续两次 0.064 / 0.375 ms（差 5.8×），
+  `--check` 误报「回归」。改取 9 次最小值 + 比对时跳过亚毫秒项；
+  真正的判定交给机器无关的结构性断言（批量必须比增量慢 100× 以上）。
+- **`cargo clippy --all-targets --message-format short -- -D warnings`**：
+  `--message-format` 放在 `--` **之后**会被 clippy 当成自己的参数，
+  报 `Unrecognized option: 'message-format'`。位置必须在 `--` 之前。
+- **`cargo clean -p cping-gui` 后立刻重编会撞 `os error 5 拒绝访问`**
+  （Windows 文件锁），`sleep 3` 重试即可，不是代码问题。
+- **测试模块里的 `debug_assert` 会真的把测试打红**——这轮正是它立了功
+  （发现了 `Progress` 超前），但也说明**写进测试路径的断言必须先自己验证过**。
+
 ## 尚未完成的验证
 
 - **M17**：gpg **成功**签名路径（Git Bash 下 `GNUPGHOME` 解释不一致，

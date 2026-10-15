@@ -8,7 +8,7 @@ Rust 核心 · TUI（ratatui）· 桌面 GUI（Tauri 2 + Vue 3）· Android
 
 [![Release](https://img.shields.io/badge/release-v2.6.0-111827)](../../releases)
 [![CI](https://github.com/LingBrian/cping/actions/workflows/ci.yml/badge.svg)](https://github.com/LingBrian/cping/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-582%20passed-brightgreen)](docs/testing.md)
+[![Tests](https://img.shields.io/badge/tests-589%20passed-brightgreen)](docs/testing.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20Android-lightgrey)](docs/platform-compatibility.md)
 
@@ -116,9 +116,18 @@ cd src-tauri && cargo build --release
 # 命令行（无头）
 cargo run -p cping-cli -- --target 192.168.1 --mode tcp --port 80
 
+# 性能基准（M19）：量统计口径 / 调度器吞吐 / 取消延迟 / 内存
+cargo bench -p cping-core --bench scan              # 跑并打印全部数字
+cargo bench -p cping-core --bench scan -- --check   # 与本机基线比对（亚毫秒指标自动跳过）
+cargo bench -p cping-core --bench scan -- --write-baseline  # 重新生成本机基线
+
 # Android APK（默认构建全部已安装的 ABI；需 ANDROID_HOME / NDK_HOME / JDK 17，见 docs/release.md §2）
 cd apps/cping-gui && npm run tauri:android:build
 ```
+
+> 基准的回归判定分两层：**结构性断言**（结果事件一条不少、批量必须比增量慢 100× 以上、
+> 取消延迟 < 500 ms）是机器无关的，已接进 CI；`--check` 的绝对值比对依赖机器，
+> 只作本地工具。数字与口径见 [`docs/perf-baseline.txt`](docs/perf-baseline.txt)。
 
 > 常见构建坑（cargo 离线沙箱、npm postinstall、Android 符号校验等）的排查表
 > 见 [README 附表](#构建环境注意事项) 与 [`docs/testing.md`](docs/testing.md)。
@@ -334,6 +343,7 @@ v3.0.0 之后的主题转折（**从「单机工具」到「平台」**）与追
 | --- | --- |
 | [`docs/reverse-findings.md`](docs/reverse-findings.md) | 原版逆向结论（静态 + Frida 动态复核），确证行为 / 待验证 / 设计决策三清单 |
 | [`docs/plan.md`](docs/plan.md) | 分阶段计划、各阶段验收条件、路线图 |
+| [`docs/perf-baseline.txt`](docs/perf-baseline.txt) | 性能基线（M19）：统计口径、调度器吞吐、取消延迟、内存 |
 | [`docs/platform-compatibility.md`](docs/platform-compatibility.md) | 各平台 ICMP 能力、权限要求与实测记录 |
 | [`docs/testing.md`](docs/testing.md) | 每阶段真实构建/测试记录与踩坑 |
 | [`docs/release.md`](docs/release.md) | 产物清单与发布说明 |

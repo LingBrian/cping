@@ -1089,7 +1089,7 @@ pub fn start_scan(
         sh.targets = targets;
         sh.cell_slots = slots;
         sh.results = vec![None; total];
-        sh.stats = ScanStats::from_results_with_total(&[], total);
+        sh.stats = ScanStats::for_total(total);
         sh.elapsed_ms = 0;
         sh.cancel = Some(token);
         sh.mode = mode;
@@ -1106,8 +1106,10 @@ pub fn start_scan(
                     if let Some(slot) = sh.results.get_mut(result.index as usize) {
                         *slot = Some(result.clone());
                     }
-                    let done: Vec<ProbeResult> = sh.results.iter().flatten().cloned().collect();
-                    sh.stats = ScanStats::from_results_with_total(&done, sh.targets.len());
+                    // M19：按条增量累加（O(1)），不再拍平整表再全量统计（O(n²)）。
+                    // 统计口径与批量路径一致，由核心的
+                    // `incremental_stats_match_the_batch_ones` 守着。
+                    sh.stats.push_status(&result.status);
                 }
                 ProbeEvent::Finished {
                     stats, elapsed_ms, ..

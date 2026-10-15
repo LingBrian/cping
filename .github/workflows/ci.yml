@@ -84,6 +84,33 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
+  # 性能：核心基准（M19）
+  #
+  # 这里**只跑基准、不加 `--check`**，是有意的：
+  # - 基准里那些断言是**机器无关**的（结果事件一条不少、批量必须比增量慢
+  #   100× 以上、取消延迟 < 500 ms），它们在任何机器上都成立，能抓住
+  #   真正的算法性回归。
+  # - `--check` 是拿**本机生成的基线**去比绝对值，换台机器就会误报；
+  #   它只作为开发者本地工具（见 docs/plan.md 的 M19 实施记录与
+  #   docs/perf-baseline.txt 头部说明）。
+  # ---------------------------------------------------------------------------
+  perf:
+    name: perf (bench structural assertions)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo bench（核心基准）
+        run: cargo bench -p cping-core --bench scan
+
+  # ---------------------------------------------------------------------------
   # 前端：类型检查 + 生产构建
   # ---------------------------------------------------------------------------
   gui-frontend:
