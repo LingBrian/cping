@@ -295,6 +295,7 @@ CI 绿了再推 tag」——发布 v2.7.0。
 | 5 | `artifact-manifest.sh` 的 EXIT trap 把成功改成失败（`[[ ]] &&` 空变量返回 1） | 每次自动 publish 都以 exit 1 收场——**v2.0.0 附件里没有 `MANIFEST.json` 的真因** | cleanup 改显式 `if` + `trap 'rc=$?; cleanup; exit $rc'`；负向验证过 |
 | 6 | `linux-gui` 上传原始 bundle 路径（带 `deb/`、`appimage/` 子目录），重命名步骤的产物没被上传 | publish 的顶层 `find` 与 `files: dist/*` 都看不见 → deb / AppImage **静默缺席** | 上传扁平的重命名目录 + publish 下载后**展平**（重名即报错） |
 | 7 | `sign-android.sh` 在 build-tools 37+ 选中 `lib/apksigner.jar` 并直接执行 | `Exec format error`，签名校验整个失效（且无密钥时说辞与事实不符） | 优先可执行脚本、jar 走 `java -jar`；说辞以 verify 实际输出为准 |
+| 8 | 展平步骤把各 job 自带的局部 `SHA256SUMS.txt` 当成「产物重名」 | 第三次发布时 publish 在展平处 exit 1（linux-gui 的 `2.7.0/SHA256SUMS.txt` 与顶层已有的冲突） | 展平时识别并丢弃局部清单——下一步本来就会删除并统一重算全局清单 |
 
 第 4 条最值得记：**「本地全绿」在工具链版本不一致时没有意义**。CI 自 10-14 起
 就没跑过，`stable` 已前进两个小版本；本地 `rustup update stable` 到 1.99 后，
@@ -304,7 +305,13 @@ CI 绿了再推 tag」——发布 v2.7.0。
 
 第 5–7 条同属一个根因：**这条发布链路自 v2.0.0 起从来没有真正走通过一次**——
 publish 一直死在 trap 上，所以「清单缺文件」「签名校验失效」这类只影响产出的
-缺陷全部被掩盖着。修好第 5 条后，链路第一次跑到底，第 6、7 条才现形。
+缺陷全部被掩盖着。修好第 5 条后，链路第一次跑到底，第 6、7 条才现形；第 8 条
+则是链路第一次真正跑到展平之后才暴露的。
+
+最终结果：第三次 release run（`3eba0a0`）七个 job 全绿，草稿 Release 核对产物与
+SHA256 无误后转正——**v2.7.0 于 2026-10-16 正式发布**（12 个附件：10 个产物 +
+`MANIFEST.json` + `SHA256SUMS.txt`）。期间 android job 曾因 aliyun maven 镜像
+502 失败一次，`gh run rerun --failed` 重跑即过，属基础设施抖动。
 
 产物清单与 SHA256 见该 Release 附件；产品侧变更见 `docs/release-notes-v2.7.0.md`。
 
