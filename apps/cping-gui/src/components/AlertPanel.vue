@@ -11,6 +11,7 @@ import {
   useMessage,
 } from 'naive-ui'
 import { usePingStore } from '../stores/ping'
+import { t } from '../i18n'
 
 const store = usePingStore()
 const message = useMessage()
@@ -77,8 +78,8 @@ function severityType(sev: string): 'default' | 'info' | 'warning' | 'error' {
 /** 值 → 可读文本：边沿类规则没有值，写「-」而不是 0。 */
 function valueText(v: number | null, threshold: number | null, kind: string): string {
   if (v === null) return '-'
-  if (kind === 'uptime_below') return `${v.toFixed(1)}%（阈值 ${threshold}%）`
-  return `${v.toFixed(0)} ms（阈值 ${threshold} ms）`
+  if (kind === 'uptime_below') return t('alert.valueUptime', v.toFixed(1), threshold)
+  return t('alert.valueLatency', v.toFixed(0), threshold)
 }
 </script>
 
@@ -86,21 +87,21 @@ function valueText(v: number | null, threshold: number | null, kind: string): st
   <div ref="rootEl" class="alert-panel">
     <div class="alert-panel__head">
       <span v-if="store.alerts">
-        <b>{{ store.alerts.enabled ? '已启用' : '未启用' }}</b> ·
-        活跃规则 <b>{{ store.alerts.activeRules }}</b> ·
-        累计告警 <b>{{ store.alerts.total }}</b> 条 ·
-        冷却挡下 {{ store.alerts.suppressedByCooldown }} 条 ·
-        静音抑制 {{ store.alerts.suppressedByMute }} 条
+        <b>{{ store.alerts.enabled ? t('alert.enabled') : t('alert.disabled') }}</b> ·
+        {{ t('alert.activeRules', store.alerts.activeRules) }} ·
+        {{ t('alert.total', store.alerts.total) }} ·
+        {{ t('alert.suppressedCooldown', store.alerts.suppressedByCooldown) }} ·
+        {{ t('alert.suppressedMute', store.alerts.suppressedByMute) }}
       </span>
-      <span v-else>告警</span>
+      <span v-else>{{ t('alert.titleShort') }}</span>
       <div class="alert-panel__actions">
         <NSwitch
           :value="store.alerts?.enabled ?? false"
           size="small"
           @update:value="(v: boolean) => store.setAlertsEnabled(v)"
         >
-          <template #checked>告警开启</template>
-          <template #unchecked>告警关闭</template>
+          <template #checked>{{ t('alert.on') }}</template>
+          <template #unchecked>{{ t('alert.off') }}</template>
         </NSwitch>
         <NSwitch
           :value="store.alerts?.muted ?? false"
@@ -108,30 +109,26 @@ function valueText(v: number | null, threshold: number | null, kind: string): st
           :disabled="!store.alerts?.enabled"
           @update:value="(v: boolean) => store.setAlertMuted(v)"
         >
-          <template #checked>已静音</template>
-          <template #unchecked>声音开启</template>
+          <template #checked>{{ t('alert.muted') }}</template>
+          <template #unchecked>{{ t('alert.unmuted') }}</template>
         </NSwitch>
-        <NButton size="tiny" :loading="store.alertsBusy" @click="store.loadAlerts()">刷新</NButton>
+        <NButton size="tiny" :loading="store.alertsBusy" @click="store.loadAlerts()">{{ t('btn.refresh') }}</NButton>
         <NButton
           size="tiny"
           quaternary
           :disabled="!store.alerts || store.alerts.total === 0"
           @click="store.dropAlerts()"
         >
-          清空记录
+          {{ t('btn.clearRecords') }}
         </NButton>
       </div>
     </div>
 
     <!--
       这几条边界是本项目里最容易被读错的地方，必须写在界面上而不是只写在代码注释里。
+      文案里的 <b> 是我们自己的静态标记（无用户输入），故用 v-html 保留强调。
     -->
-    <div class="alert-panel__note">
-      规则匹配是<b>纯函数</b>，判定只看本轮与上一轮的事实。第一轮只建立基线，
-      <b>不发「新增主机」</b>——否则扫个 /24 会一次刷出 255 条。
-      阈值用<b>严格不等号</b>，恰好等于阈值不告警。
-      <b>静音不改判定</b>：规则照常求值、冷却照常推进，所以解除静音不会补报一堆积压告警。
-    </div>
+    <div class="alert-panel__note" v-html="t('alert.note')" />
 
     <NAlert v-if="store.alerts?.emptyHint" type="info" :bordered="false" style="margin-bottom: 12px">
       {{ store.alerts.emptyHint }}
@@ -152,37 +149,36 @@ function valueText(v: number | null, threshold: number | null, kind: string): st
               {{ r.kind === 'uptime_below' ? `${r.threshold}%` : `${r.threshold} ms` }}
             </code>
           </template>
-          当前阈值（在下面的表单里统一修改）
+          {{ t('alert.thresholdTip') }}
         </NTooltip>
-        <span v-else class="alert-panel__rule-th alert-panel__rule-th--none">无阈值</span>
-        <span class="alert-panel__rule-cd">冷却 {{ r.cooldownSecs }}s</span>
+        <span v-else class="alert-panel__rule-th alert-panel__rule-th--none">{{ t('alert.noThreshold') }}</span>
+        <span class="alert-panel__rule-cd">{{ t('alert.cooldown', r.cooldownSecs) }}</span>
       </div>
     </div>
 
     <div class="alert-panel__form">
       <label>
-        延迟阈值 (ms)
+        {{ t('alert.latencyThreshold') }}
         <NInputNumber v-model:value="latencyMs" size="tiny" :min="0" :max="60000" style="width: 110px" />
       </label>
       <label>
-        可用率阈值 (%)
+        {{ t('alert.uptimeThreshold') }}
         <NInputNumber v-model:value="uptimePct" size="tiny" :min="0" :max="100" style="width: 110px" />
       </label>
       <label>
-        冷却 (秒)
+        {{ t('alert.cooldownLabel') }}
         <NInputNumber v-model:value="cooldownSecs" size="tiny" :min="0" :max="86400" style="width: 110px" />
       </label>
       <NButton size="tiny" type="primary" :disabled="!dirty" @click="applyThresholds">
-        应用
+        {{ t('btn.apply') }}
       </NButton>
-      <span v-if="dirty" class="alert-panel__dirty">有未应用的修改</span>
+      <span v-if="dirty" class="alert-panel__dirty">{{ t('alert.dirty') }}</span>
     </div>
 
-    <NEmpty v-if="!store.alerts || store.alerts.events.length === 0" description="还没有告警记录">
+    <NEmpty v-if="!store.alerts || store.alerts.events.length === 0" :description="t('alert.empty')">
       <template #extra>
         <div style="font-size: 12px; color: #6b7280; max-width: 460px; line-height: 1.6">
-          打开上面的「告警开启」开关，然后跑一轮扫描。开着「持续监控」连续跑几轮，
-          才能看出延迟是否在变差、某台主机是不是开始掉线。
+          {{ t('alert.emptyHint') }}
         </div>
       </template>
     </NEmpty>
@@ -196,7 +192,7 @@ function valueText(v: number | null, threshold: number | null, kind: string): st
         <code class="cping-mono alert-panel__ip">{{ e.ip }}</code>
         <span class="alert-panel__msg">{{ e.message }}</span>
         <span class="alert-panel__val cping-mono">{{ valueText(e.value, e.threshold, e.kind) }}</span>
-        <span class="alert-panel__round">第 {{ e.round }} 轮</span>
+        <span class="alert-panel__round">{{ t('round.n', e.round) }}</span>
       </div>
     </div>
   </div>

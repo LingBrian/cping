@@ -5,6 +5,7 @@
 //! 即 `rtt < 50` → 低；`50 <= rtt <= 100` → 中；`rtt > 100` → 高。
 
 use crate::error::{CoreError, CoreResult};
+use crate::i18n::{self, Key, Lang};
 use crate::result::ProbeStatus;
 
 /// 分类阈值（毫秒）。默认对齐原版。
@@ -64,12 +65,24 @@ impl LatencyClass {
         }
     }
 
-    pub const fn label_zh(self) -> &'static str {
-        match self {
-            LatencyClass::Low => "低延迟",
-            LatencyClass::Mid => "中延迟",
-            LatencyClass::High => "高延迟",
-        }
+    /// 中文标签（等价于 `label_in(Lang::Zh)`）。
+    ///
+    /// 核心层内部的报表与导出仍在用它——**产物内容是数据契约**：
+    /// 同一份 CSV / HTML 在中英文机器上必须一致；只有界面跟着语言变。
+    pub fn label_zh(self) -> &'static str {
+        self.label_in(Lang::Zh)
+    }
+
+    /// 按语言渲染的标签。
+    pub fn label_in(self, lang: Lang) -> &'static str {
+        i18n::text(
+            lang,
+            match self {
+                LatencyClass::Low => Key::LabelLatencyLow,
+                LatencyClass::Mid => Key::LabelLatencyMid,
+                LatencyClass::High => Key::LabelLatencyHigh,
+            },
+        )
     }
 }
 
@@ -96,14 +109,26 @@ impl ResultClass {
         }
     }
 
-    pub const fn label_zh(self) -> &'static str {
-        match self {
-            ResultClass::Low => "低延迟",
-            ResultClass::Mid => "中延迟",
-            ResultClass::High => "高延迟",
-            ResultClass::Offline => "无回应",
-            ResultClass::Error => "错误",
-        }
+    /// 中文标签（等价于 `label_in(Lang::Zh)`）。
+    ///
+    /// 核心层内部的报表与导出仍在用它——**产物内容是数据契约**：
+    /// 同一份 CSV / HTML 在中英文机器上必须一致；只有界面跟着语言变。
+    pub fn label_zh(self) -> &'static str {
+        self.label_in(Lang::Zh)
+    }
+
+    /// 按语言渲染的标签。
+    pub fn label_in(self, lang: Lang) -> &'static str {
+        i18n::text(
+            lang,
+            match self {
+                ResultClass::Low => Key::LabelResultLow,
+                ResultClass::Mid => Key::LabelResultMid,
+                ResultClass::High => Key::LabelResultHigh,
+                ResultClass::Offline => Key::LabelResultOffline,
+                ResultClass::Error => Key::LabelResultError,
+            },
+        )
     }
 
     /// 该类别对应的颜色配置键。

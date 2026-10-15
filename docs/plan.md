@@ -951,3 +951,130 @@ RTT 本来就是 0 ms ——拿 0 当「没测到」的哨兵，会把一台**�
   - Linux deb 签名：本仓库当前不产出 deb，`docs/signing.md` 只给流程说明
   - TUI / GUI 的限速人工冒烟：TUI 用单元测试驱动了策略装配与状态栏提示，
     未做真实键盘操作下的限速观察；GUI 沿用默认策略，未做界面观察
+
+### M18 — v2.6.0 国际化与无障碍（第一步实施记录，2026-10-15）
+
+> 本阶段按「机制 → 界面 → 无障碍」三步走。**本步只做完了 i18n 的机制与三端
+> 界面自有文案**；核心层自由文本、GUI 的后端文案、无障碍与键盘导航
+> 见文末「本步未做」。
+
+**实现文件**
+
+- `crates/cping-core/src/i18n.rs`（新增，约 900 行含 14 条测试）
+  - `Lang { Zh, En }`：`parse`（`zh_CN.UTF-8` / `en-US` 都认；`C` / `POSIX` /
+    空串返回 `None`）、`from_env()`、`code()` / `label()` / `describe()`
+  - `Key`（83 键）+ `TABLE` + `ordinal` + `text` + `render_template` / `render`
+  - `detect_from_values()`：`from_env` 的**纯函数内核**。拆出来是为了能测——
+    直接读写进程环境变量的测试会互相污染（cargo test 默认多线程），
+    而「优先级顺序」恰恰是最容易写错的逻辑
+- `crates/cping-core/src/error.rs`：`CoreError::code()` + `localized(lang)`；
+  `ProbeError::localized(lang)`；`Display` 改为 `localized(Lang::Zh)` 的转发
+- `crates/cping-core/src/policy.rs`：
+  - `ReservedKind`（10 个类别）+ `reserved_kind()` + `reason(lang)`；
+    `reserved_reason()` 保留为中文快捷方式
+  - `ScanPolicy::validate_in` / `check_targets_in` / `describe_in`
+  - `consent::notice_text_in` / `notice_lines_in`
+- 14 个枚举加 `label_in(lang)`：`alerts`（`AlertKind` / `Severity`）、
+  `classify`（`LatencyClass` / `ResultClass`）、`diff`（`DiffKind`）、
+  `fingerprint`（`Confidence`）、`monitor`（`ChangeKind`）、
+  `policy`（`AuditEvent`）、`registry`（`BackendId`，以及
+  `BackendRegistry::summary_in`）、`result`（`ProbeStatus`）、
+  `target`（`TargetRange`）
+- `apps/cping-cli/src/i18n.rs`（新增，148 键）+ `help_zh.txt` / `help_en.txt`
+  （帮助正文用 `include_str!` 编译期内联）+ `args.rs` / `main.rs` 接线
+- `apps/cping-tui/src/i18n.rs`（新增，225 键）+ `app.rs` / `ui.rs` / `main.rs` 接线
+- `apps/cping-gui/src/i18n/{index,zh,en}.ts`（**241 键**）+
+  `components/LanguageSettings.vue` + `scripts/check-i18n.mjs`
+
+**定死的边界（下阶段别推翻）**
+
+1. **核心层产出键，界面产出句子**。核心层只给「哪一个键、哪些参数」，
+   渲染在界面侧。否则三端只能各自复刻一遍核心层的判定逻辑才知道该说什么，
+   那就是三份会各自漂移的实现。
+2. **键是枚举不是字符串**。字符串键写错了只会在运行期暴露，而且表现为
+   「界面上显示成键名」而不是崩溃——这种错没人会当成 bug 来报。
+3. **「翻译好不好」测不了，「漏译」能测**。四条测试把最常犯的错变成红灯：
+   `english_has_no_cjk`（英文条目含中日韩字符）、`placeholders_match`
+   （中英 `{}` 个数不等）、`table_covers_every_key`（字典漏键）、
+   `enum_labels_are_localized_both_ways`（从枚举一路走到渲染结果，
+   抓「映射到了错的条目」）。其中 `chinese_entries_are_not_empty_and_not_ascii_only`
+   抓的是反方向——把英文粘到了中文栏上。
+4. **中文只有一个来源**。`label_zh()` 变成 `label_in(Lang::Zh)` 的转发，
+   不保留原先各枚举里的中文 `match`——两份中文迟早会漂移，而漂移了没人会发现。
+5. **错误码与错误句子分开**。`code()` 给脚本与查表用（**不要靠匹配消息文本
+   判断错误类型**，那句话随时会因为改措辞而变化），`localized(lang)` 给人读。
+6. **`Display` 就是 `localized(Lang::Zh)`**，不是另写一份。两处各自 `match`
+   的结果是改了其中一处、另一处悄悄留在旧措辞上。
+7. **底层细节原样透传**。`Export("No such file (os error 2)")` 里的 `detail`
+   来自操作系统：本地化的只是外面那层框。翻了反而让用户搜不到。
+8. **数据契约不翻译**。CSV / JSON 的列名与字段名、快照与时序的文件格式、
+   审计字段名一律保持原样——同一份报表在中英文机器上必须一致，
+   否则下游脚本会「在同事的机器上」失效。TUI / GUI 的状态符号
+   （`#` `+` `*` `-` `!` `.`）同理：符号不是文字。
+9. **`C` / `POSIX` 不是英文**。它表示「没有本地化偏好」，
+   当成英文等于让服务器的默认 locale 决定用户看到什么。
+10. **`--lang` 非法值报错**，不静默忽略。TUI 是唯一的例外（交互式程序，
+    启动后还能在状态栏看到告警并修正），沿用该程序既有的
+    「参数告警不退出」惯例。
+11. **连分隔符也跟着语言走**。`BackendRegistry::summary_in` 中文用全角分号、
+    英文用 `"; "`——把中文标点留在英文句子里，读起来是「一眼假」的机器翻译味。
+
+**范围决定：本步做到哪**
+
+**做完的**：i18n 的全部机制 + 核心层「枚举标签」类文案 + 三端**界面自有文案**。
+
+**刻意没做的**（不是遗漏，是边界）：
+
+- **核心层「自由文本」类文案仍未本地化**：`TargetSpec::summary()`、
+  `Change::summary()`、`AlertEvent::message`、`HostFingerprint` 的端口 / 设备摘要、
+  `BackendCaps::note`、`notifications_available()` 的说明、
+  `ScanProfile::describe()`、`native_icmp_hint()`、`ConfigDocument` 的 notes、
+  `TimeSeries` / `AlertEngine` 的读写错误、`PortScanConfig::parse_ports` 的错误文本。
+  它们要么参数多、要么嵌在 `Result<_, String>` 里，**改造面比标签大一个量级**，
+  且需要先定下「参数化模板」的形态，留到本阶段第二步。
+- **GUI 的后端文案因此仍是中文**：GUI 的「状态」列、「资产」摘要、趋势与告警
+  面板里那些**由 Rust 侧生成的**文字，走的就是上面那批自由文本。
+  第二步要把 `lang` 一路传进 Tauri 命令，并让核心层按语言产出。
+- **CLI / TUI 各自的「键 → 展示名」桥接函数尚未收敛到 `label_in`**：
+  两端的桥接目前**输出与核心层一致**（都过了各自的测试），但翻译存了三份。
+  收敛需要删除字典条目并重排 `ordinal`（CLI 148 键 / TUI 225 键），
+  是纯机械但高风险的改动，与第二步一起做。
+  TUI 的 `status_label` 还多一段 TUI 特有的 `TCP-OPEN` 显示逻辑，
+  收敛时要把它一并考虑（该逻辑或许应当下沉到核心层）。
+- **无障碍与键盘全导航**：本阶段第三步（高对比主题、字体缩放、ARIA 标注、
+  色盲友好备选配色、GUI 纯键盘可达）。
+
+**测试与实测**
+
+- 测试 **460 → 507 passed / 0 failed**（核心 266 → 291，CLI 51 → 62，TUI 47 → 58）
+- `cargo fmt --all -- --check` / `cargo clippy --workspace --all-targets -- -D warnings`
+  / GUI `npm run typecheck` / `npm run build` 均干净
+- GUI 词典校验：`node scripts/check-i18n.mjs` →「zh/en 各 241 条词条，
+  键一致、无中文残留、占位符个数一致」
+- **真实冒烟（Windows 本机，debug 构建的真实二进制）**：
+  1. `cping-cli --lang en --help` → 全文**零中日韩字符**，标题为
+     「CPing headless command line -- batch PING with exportable results
+     and scriptable exit codes」
+  2. `cping-cli --lang zh --help` → 中文原文
+  3. `cping-cli --lang en -t 224.0.0.0/29` → 退出码 2，stderr 为
+     「argument error: target 224.0.0.1 is in a reserved range: multicast
+     address: one probe disturbs the entire group」+「hint: add
+     --allow-reserved if you really mean to scan this; such addresses are
+     either meaningless or disturb others.」
+  4. `cping-cli --lang zh -t 224.0.0.0/29` → 同一判定、中文提示、退出码 2
+  5. `cping-cli --lang fr` → 退出码 2，报「--lang value "fr" is invalid;
+     expected zh or en」并打印帮助（**没有静默回退成某种语言**）
+  6. `cping-tui --lang en --help` → 零中日韩字符；
+     `cping-tui --lang zh --help` → 中文
+
+**未实测（如实登记）**
+
+- 三端在**非中文 Windows / 纯英文 Linux** 上的默认语言推断
+  （本机测的是显式 `--lang` 与 Git Bash 的环境变量）
+- GUI 的语言切换与 `localStorage` 持久化**未在真机 / 浏览器里点过**，
+  只跑了 typecheck + build + 词典校验脚本
+- TUI 在英文模式下的**实际终端观感**（列宽、对齐）未人工确认，
+  只由单元测试覆盖数据路径
+- GUI 的 241 键之外，仍有「后端生成的中文」会露在英文界面下
+  （见上「范围决定」）——**这是本步已知的、有意的未完成项**，
+  不是漏测

@@ -10,6 +10,7 @@ use cping_core::classify::{classify_status, ResultClass, Thresholds};
 use cping_core::config::{ColorConfig, ProbeConfig, ViewMode};
 use cping_core::enrich::{enrich_with_mac_and_vendor, EnrichReport};
 use cping_core::export::{export_to_path, ExportMeta};
+use cping_core::i18n::Lang;
 use cping_core::monitor::{Change, ChangeKind, MonitorConfig, MonitorState};
 use cping_core::scheduler::{ProbeScheduler, SchedulerHandle};
 use cping_core::snapshot::{load_from_path, save_to_path, Snapshot};
@@ -22,6 +23,7 @@ use ratatui::crossterm::event::KeyEvent;
 use ratatui::Terminal;
 
 use crate::events::{next_event, UiEvent};
+use crate::i18n::{self, Key};
 use crate::input::{map_key, Action};
 use crate::ui;
 
@@ -34,11 +36,15 @@ pub const HANDLED_FILE: &str = "cping-autosave.handled";
 ///
 /// 与 CLI 共用 `cping-core::policy::consent` 的同一份状态与同一段文案：
 /// 三端提示不一致，用户会以为哪一份是过期的。
-pub fn print_authorization_notice() {
+///
+/// M18：语言必须由调用方传入。这个函数**独立于 [`App`] 实例**（在进入备用屏幕
+/// 之前就被 `main` 调用，那时 App 还不存在），所以它不能去读 `self.lang`；
+/// 语言只能从命令行选项一路带过来。
+pub fn print_authorization_notice(lang: Lang) {
     if !cping_core::policy::consent::load().needs_notice() {
         return;
     }
-    println!("{}", cping_core::policy::consent::notice_text());
+    println!("{}", cping_core::policy::consent::notice_text_in(lang));
     println!();
     let _ = cping_core::policy::consent::acknowledge(cping_core::unix_millis_now());
 }
@@ -72,7 +78,12 @@ pub struct Options {
     /// TUI 是交互式全屏程序，为一个参数拼错就拒绝启动体验很差；但**静默**
     /// 忽略用户显式给的参数是本项目最不能接受的一类问题。折中：照常启动，
     /// 把问题写进状态栏、摆在用户眼前。
+    ///
+    /// M18：这里存的是**已按当前语言渲染好**的句子（语言在解析结束、`--lang`
+    /// 尘埃落定之后才确定，所以不能边解析边拼串）。
     pub arg_warnings: Vec<String>,
+    /// M18：界面语言。`--lang` 显式给定时用它，否则用 [`Lang::from_env`]。
+    pub lang: Lang,
 }
 
 impl Default for Options {
@@ -91,6 +102,9 @@ impl Default for Options {
             alert_config: cping_core::AlertConfig::default(),
             policy: cping_core::ScanPolicy::default(),
             arg_warnings: Vec::new(),
+            // 测试与 `Options::default()` 走中文；命令行路径会在 `from_args`
+            // 里把它换成 `Lang::from_env()`（见那里的注释）。
+            lang: Lang::default(),
         }
     }
 }
@@ -99,8 +113,14 @@ impl Options {
     pub fn from_args<I: Iterator<Item = String>>(args: I) -> Self {
         let mut opts = Options {
             no_color: std::env::var_os("NO_COLOR").is_some(),
+            // M18：不给 `--lang` 时按 POSIX 约定从环境推断（CPING_LANG →
+            // LC_ALL → LC_MESSAGES → LANG），兜底中文。显式 `--lang` 会覆盖它。
+            lang: Lang::from_env(),
             ..Options::default()
         };
+        // 解析过程中先把告警/语言的问题**攒成键 + 参数**，等 `--lang` 定了再渲染：
+        // 否则「--lang 写在 --max-pps 后面」会让前面的告警用错语言。
+        let mut warnings: Vec<(Key, Vec<String>)> = Vec::new();
         // M15：告警开关先收集，循环结束后一次性折成配置
         let mut alert_kinds: Vec<cping_core::AlertKind> = Vec::new();
         let mut alert_latency: Option<u32> = None;
@@ -158,20 +178,34 @@ impl Options {
                 "--max-pps" => match it.next() {
                     Some(v) => match v.parse::<u32>() {
                         Ok(n) => opts.policy.max_pps = n,
-                        Err(_) => opts
-                            .arg_warnings
-                            .push(format!("--max-pps 需要一个非负整数，得到 {v:?}")),
+                        Err(_) => warnings.push((
+                            Key::ArgIntExpected,
+                            vec!["--max-pps".into(), format!("{v:?}")],
+                        )),
                     },
-                    None => opts.arg_warnings.push("--max-pps 缺少取值".into()),
+                    None => warnings.push((Key::ArgMissingValue, vec!["--max-pps".into()])),
                 },
                 "--max-targets" => match it.next() {
                     Some(v) => match v.parse::<usize>() {
                         Ok(n) => opts.policy.max_targets = n,
-                        Err(_) => opts
-                            .arg_warnings
-                            .push(format!("--max-targets 需要一个非负整数，得到 {v:?}")),
+                        Err(_) => warnings.push((
+                            Key::ArgIntExpected,
+                            vec!["--max-targets".into(), format!("{v:?}")],
+                        )),
                     },
-                    None => opts.arg_warnings.push("--max-targets 缺少取值".into()),
+                    None => warnings.push((Key::ArgMissingValue, vec!["--max-targets".into()])),
+                },
+                // M18：接口语言。取值非法**必须报出来**，不能静默忽略用户
+                // 显式指定的语言——「我明明写了 --lang en，界面还是中文」
+                // 是最难自查的一类问题。处理方式与上面的策略参数一致：
+                // 照常启动，把问题摆到状态栏。
+                "--lang" => match it.next() {
+                    Some(v) => match Lang::parse(&v) {
+                        Some(l) => opts.lang = l,
+                        None => warnings
+                            .push((Key::ArgLangInvalid, vec!["--lang".into(), format!("{v:?}")])),
+                    },
+                    None => warnings.push((Key::ArgMissingValue, vec!["--lang".into()])),
                 },
                 "--allow-reserved" => opts.policy.allow_reserved = true,
                 "--view" => {
@@ -232,6 +266,14 @@ impl Options {
             alert_cooldown,
             mute_alerts,
         );
+        // 到了这里 `--lang` 已经尘埃落定，可以把攒下的告警渲染成当前语言了。
+        opts.arg_warnings = warnings
+            .iter()
+            .map(|(key, args)| {
+                let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                i18n::render(opts.lang, *key, &refs)
+            })
+            .collect();
         opts
     }
 }
@@ -318,6 +360,10 @@ pub struct App {
     pub colors: ColorConfig,
     pub no_color: bool,
     pub show_help: bool,
+    /// M18：界面语言。**唯一**的语言来源：所有界面文案都经 [`App::t`] /
+    /// [`App::r`] 从这里取，不允许各处再自己读一遍环境变量（那样会出现
+    /// 「一半界面中文、一半英文」的自相矛盾状态）。
+    pub lang: Lang,
 
     pub results: Vec<Option<ProbeResult>>,
     pub targets: Vec<IpAddr>,
@@ -419,6 +465,9 @@ impl App {
         // M17：策略与参数告警也要在字段被搬走之前取出来
         let policy = options.policy;
         let arg_warnings = options.arg_warnings.clone();
+        // M18：语言在字段被搬走之前取出。`status` / `local_ip` 的初始文案
+        // 也用它——否则第一帧会是中文，下一帧才变成目标语言。
+        let lang = options.lang;
         let spec = parse_spec(&options.prefix, TargetRange::Standard)
             .unwrap_or_else(|_| TargetSpec::default());
         let monitor = MonitorState::new(MonitorConfig {
@@ -438,6 +487,7 @@ impl App {
             colors: ColorConfig::default(),
             no_color: options.no_color,
             show_help: false,
+            lang,
             results: Vec::new(),
             targets: Vec::new(),
             cell_slots: vec![None; MATRIX_CELLS],
@@ -446,9 +496,9 @@ impl App {
             running: false,
             cancelled: false,
             started_at: None,
-            status: "就绪。按 i 编辑网段，Enter 开始探测，M 开监控，? 查看帮助。".into(),
+            status: i18n::text(lang, Key::StatusReady).into(),
             last_export: None,
-            local_ip: local_ip_label(),
+            local_ip: local_ip_label(lang),
             scroll: 0,
             quit_confirm: false,
             quit_requested: false,
@@ -484,16 +534,35 @@ impl App {
         // 界面上看得见，而不是静默按默认值跑。
         app.apply_policy();
         if !arg_warnings.is_empty() {
-            app.status = arg_warnings.join("；");
+            // 多条告警用「；」拼起来；这个分隔符也随语言变化（英文里用全角分号
+            // 会显得像乱码），所以它同样从字典取。
+            let sep = i18n::text(lang, Key::ArgWarnSeparator);
+            app.status = arg_warnings.join(sep);
         }
         app.check_pending_snapshot();
         app
     }
 
+    /// 取一条不带参数的消息（当前语言）。
+    ///
+    /// 之所以做成方法而不是各处直接 `i18n::text(self.lang, ...)`：
+    /// 语言只有 `self.lang` 一个来源，读错来源就会得到「一半中文一半英文」。
+    pub fn t(&self, key: Key) -> &'static str {
+        i18n::text(self.lang, key)
+    }
+
+    /// 渲染一条带参数的消息（当前语言）。
+    pub fn r(&self, key: Key, args: &[&str]) -> String {
+        i18n::render(self.lang, key, args)
+    }
+
     /// M17：把当前策略装上调度器。失败时写进状态栏（不 panic、不静默）。
     fn apply_policy(&mut self) {
         if let Err(e) = self.scheduler.set_policy(self.policy) {
-            self.status = format!("安全策略无效：{e}");
+            // M18：核心错误用 `localized(lang)`——错误码与话术都在核心层，
+            // 界面只负责挑语言，不复刻任何判定。
+            let msg = e.localized(self.lang);
+            self.status = self.r(Key::StatusPolicyInvalid, &[&msg]);
         }
     }
 
@@ -506,9 +575,83 @@ impl App {
         cping_core::BackendRegistry::new().caps_of(self.backend_id)
     }
 
-    /// 本平台的后端能力摘要（M12），与 `cping-cli --list-backends` 同源。
+    /// 本平台的后端能力摘要（M12）。
+    ///
+    /// M18：核心只提供 `summary_zh()`（它没有 `_in` 变体，而本次改动不允许动
+    /// 核心层），所以这里按 `BackendCaps` 的**公开字段**自己拼一份可本地化的
+    /// 摘要。拼的是"怎么显示"，不是"怎么判定"——可用性、权限、地址族全部
+    /// 仍来自核心注册表，TUI 一个判断都不做。
     pub fn backend_summary(&self) -> String {
-        cping_core::BackendRegistry::new().summary_zh()
+        let reg = cping_core::BackendRegistry::new();
+        let mut parts: Vec<String> = Vec::new();
+        let icmp = reg.caps_of(cping_core::BackendId::Icmp4);
+        if icmp.available {
+            let key = if icmp.needs_privilege {
+                Key::BackendSummaryIcmpPrivileged
+            } else {
+                Key::BackendSummaryIcmp
+            };
+            parts.push(self.t(key).to_string());
+        } else {
+            parts.push(self.t(Key::BackendSummaryIcmpUnavailable).to_string());
+        }
+        let tcp = reg.caps_of(cping_core::BackendId::Tcp);
+        if tcp.available && tcp.ipv6 {
+            parts.push(self.t(Key::BackendSummaryTcp).to_string());
+        }
+        if !reg.caps_of(cping_core::BackendId::Icmp6).available {
+            parts.push(self.t(Key::BackendSummaryIcmp6Missing).to_string());
+        }
+        parts.join(self.t(Key::ArgWarnSeparator))
+    }
+
+    /// 当前后端能力的一行描述，供帮助面板使用。
+    ///
+    /// 同上：核心的 `BackendCaps::describe()` 只会吐中文，这里按公开字段自己拼。
+    /// 后端标识用 `BackendId::key()`（`icmp4` / `tcp` / `mock`）而不是中文标签——
+    /// 这是稳定的机器标识，两种语言下都不该变。
+    pub fn backend_caps_line(&self) -> String {
+        let caps = self.backend_caps();
+        let mut parts: Vec<String> = vec![caps.id.key().to_string()];
+        if caps.needs_privilege {
+            parts.push(self.t(Key::BackendPrivilege).to_string());
+        }
+        match (caps.ipv4, caps.ipv6) {
+            (true, true) => parts.push(self.t(Key::BackendFamiliesBoth).to_string()),
+            (true, false) => parts.push(self.t(Key::BackendFamiliesV4).to_string()),
+            (false, true) => parts.push(self.t(Key::BackendFamiliesV6).to_string()),
+            (false, false) => {}
+        }
+        if !caps.available {
+            parts.push(self.t(Key::BackendUnavailable).to_string());
+        }
+        parts.join(" · ")
+    }
+
+    /// 目标规格的一行摘要，供状态栏使用。
+    ///
+    /// 核心的 `TargetSpec::summary()` 只会吐中文（没有 `_in` 变体），这里按
+    /// **核心已经解析好的** `TargetSpec` 公开字段重新拼一份可本地化的文本。
+    /// 段数、目标数、段标签全部来自核心，TUI 不做任何解析或判定。
+    pub fn spec_summary(&self) -> String {
+        let spec = &self.spec;
+        if spec.targets.is_empty() {
+            return self.t(Key::SpecSummaryEmpty).to_string();
+        }
+        if spec.segments.len() == 1 {
+            let seg = &spec.segments[0];
+            return self.r(
+                Key::SpecSummarySingle,
+                &[&seg.label, &seg.count.to_string()],
+            );
+        }
+        self.r(
+            Key::SpecSummaryMulti,
+            &[
+                &spec.segments.len().to_string(),
+                &spec.targets.len().to_string(),
+            ],
+        )
     }
 
     /// 当前探测方式。
@@ -542,7 +685,7 @@ impl App {
 
     pub fn set_mode(&mut self, mode: ProbeMode) {
         if self.running {
-            self.status = "任务运行中不能切换探测方式，请先取消（Esc）".into();
+            self.status = self.t(Key::StatusCantSwitchMode).into();
             return;
         }
         self.backend_mode = mode;
@@ -552,7 +695,10 @@ impl App {
         self.scheduler = ProbeScheduler::new(backend);
         // 换方式后旧结果不再可比，重置变化基线
         self.monitor.reset_baseline();
-        self.status = format!("探测方式已切换为 {}", mode.describe());
+        // `mode.describe()` 是 `ICMP` / `TCP:80` 这类协议标识，两种语言下一致，
+        // 不进字典（它就是"参数名不翻译"的同类）。
+        let desc = mode.describe();
+        self.status = self.r(Key::StatusModeSwitched, &[&desc]);
         // M17：换了调度器就得把策略重新装上，否则切一次探测方式，限速与
         // 保留网段守卫就被悄悄丢掉了。放在最后，好让装配失败的信息
         // 盖过上面那句成功提示。
@@ -565,7 +711,7 @@ impl App {
 
             match next_event()? {
                 UiEvent::Key(key) => self.on_key(key),
-                UiEvent::Resize => self.status = "已适配终端尺寸".into(),
+                UiEvent::Resize => self.status = self.t(Key::StatusResized).into(),
                 UiEvent::Tick => {}
             }
 
@@ -658,7 +804,7 @@ impl App {
                 }
                 Action::Start | Action::ToggleEdit | Action::Cancel => {
                     self.editing = false;
-                    self.status = "输入已确认".into();
+                    self.status = self.t(Key::StatusInputConfirmed).into();
                 }
                 Action::ForceQuit => self.quit_requested = true,
                 _ => {}
@@ -671,14 +817,14 @@ impl App {
             Action::Quit => {
                 if self.running && !self.quit_confirm {
                     self.quit_confirm = true;
-                    self.status = "探测仍在进行：再按一次 q 退出（已完成的按 Esc 取消）".into();
+                    self.status = self.t(Key::StatusQuitConfirm).into();
                 } else {
                     self.quit_requested = true;
                 }
             }
             Action::Start => {
                 if self.running {
-                    self.status = "已有任务在运行".into();
+                    self.status = self.t(Key::StatusAlreadyRunning).into();
                 } else {
                     self.start_scan();
                 }
@@ -689,12 +835,12 @@ impl App {
                 } else if self.running {
                     self.cancel_scan(false);
                 } else {
-                    self.status = "没有正在运行的任务".into();
+                    self.status = self.t(Key::StatusNoTask).into();
                 }
             }
             Action::ToggleEdit => {
                 self.editing = true;
-                self.status = "编辑网段前缀（只接受数字与点），Enter 确认".into();
+                self.status = self.t(Key::StatusEditingPrefix).into();
             }
             Action::ViewMatrix => self.view = ViewMode::Matrix,
             Action::ViewTable => self.view = ViewMode::Table,
@@ -702,9 +848,9 @@ impl App {
                 self.hide_offline = !self.hide_offline;
                 self.scroll = 0;
                 self.status = if self.hide_offline {
-                    "已开启「过滤不在线」".into()
+                    self.t(Key::StatusFilterOn).into()
                 } else {
-                    "已关闭「过滤不在线」".into()
+                    self.t(Key::StatusFilterOff).into()
                 };
             }
             Action::SaveCsv => self.save("csv"),
@@ -716,8 +862,7 @@ impl App {
             Action::ShowTrend => {
                 self.show_trend = !self.show_trend;
                 if self.show_trend && self.series.is_empty() {
-                    self.status =
-                        "趋势面板：还没有历史数据，先扫描一轮（M 开监控可持续累积）".into();
+                    self.status = self.t(Key::StatusTrendEmpty).into();
                 }
             }
             Action::ShowAlerts => self.toggle_alerts_panel(),
@@ -760,7 +905,7 @@ impl App {
     /// 端口扫描是独立的一趟探测，不得影响在线判定。
     pub fn fingerprint_targets(&mut self) {
         if self.fingerprint_job.is_some() {
-            self.status = "已有一次指纹探测在进行中，稍候…".into();
+            self.status = self.t(Key::StatusFingerprintBusy).into();
             return;
         }
         let cfg = cping_core::PortScanConfig::default();
@@ -782,7 +927,7 @@ impl App {
                 .collect(),
         };
         if hosts.is_empty() {
-            self.status = "没有在线主机可做端口指纹（先扫描，或先把光标移到在线行）".into();
+            self.status = self.t(Key::StatusFingerprintNoHosts).into();
             return;
         }
         let (tx, rx) = mpsc::channel();
@@ -792,11 +937,11 @@ impl App {
             let out = cping_core::fingerprint_hosts(&job_hosts, &cfg);
             let _ = tx.send(out);
         });
-        self.status = format!(
-            "正在对 {} 台主机探测 {} 个端口（只读横幅，不发送协议请求）…",
-            hosts.len(),
-            ports
+        let reply = self.r(
+            Key::StatusFingerprintRunning,
+            &[&hosts.len().to_string(), &ports.to_string()],
         );
+        self.status = reply;
         self.fingerprint_job = Some(FingerprintJob {
             hosts: hosts.len(),
             ports,
@@ -817,30 +962,40 @@ impl App {
                 self.fingerprints = fps;
                 self.fingerprint_job = None;
                 self.show_fingerprints = true;
-                self.status = format!(
-                    "指纹完成：{hosts} 台主机 × {ports} 个端口 · 发现 {open_total} 个开放端口（{with_open} 台有开放端口）"
+                self.status = self.r(
+                    Key::StatusFingerprintDone,
+                    &[
+                        &hosts.to_string(),
+                        &ports.to_string(),
+                        &open_total.to_string(),
+                        &with_open.to_string(),
+                    ],
                 );
                 self.autosave();
             }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 self.fingerprint_job = None;
-                self.status = "指纹探测线程异常结束".into();
+                self.status = self.t(Key::StatusFingerprintThreadFail).into();
             }
         }
     }
 
     /// 指纹面板的展示文本（供测试断言使用，与界面同源）。
+    ///
+    /// `device_summary()` 原样透传：设备类型与推断依据由**核心**给出
+    /// （`DeviceGuess` 的 `kind` / `basis` 都是中文短语），界面重写它等于
+    /// 复刻核心的推断逻辑——那是明令禁止的。它保持中文，是本次改动的已知边界。
     pub fn fingerprint_lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
-        lines.push("端口指纹（附加信息，与在线判定相互独立）".to_string());
+        lines.push(self.t(Key::FingerprintLinesHeader).to_string());
         if self.fingerprints.is_empty() {
-            lines.push("（还没有指纹结果：按 F 对选中主机探测）".to_string());
+            lines.push(self.t(Key::FingerprintLinesEmpty).to_string());
             return lines;
         }
         for fp in &self.fingerprints {
             if !fp.has_open_ports() {
-                lines.push(format!("{}  无开放端口", fp.ip()));
+                lines.push(self.r(Key::FingerprintNoOpenPorts, &[&fp.ip().to_string()]));
                 continue;
             }
             lines.push(format!("{}  {}", fp.ip(), fp.open_ports_summary()));
@@ -867,23 +1022,36 @@ impl App {
     /// 被读错的一处，所以图例里必须写明。
     pub fn trend_lines(&self, width: usize) -> Vec<String> {
         let mut lines = Vec::new();
-        lines.push(format!(
-            "时间跨度 {:.1} 小时 · {} 个时间点 · 累计 {} 轮（保留 {} 天）",
-            self.series.span_ms() as f64 / 3_600_000.0,
-            self.series.len(),
-            self.series.total_rounds(),
-            self.series.retention_secs / 86_400
+        // `{:.1}` 是 Rust 的格式说明，`render_template` 只认 `{}`，
+        // 所以先格式化再当参数传进去（否则会显示出字面的 `{:.1}`）。
+        let span = format!("{:.1}", self.series.span_ms() as f64 / 3_600_000.0);
+        lines.push(self.r(
+            Key::TrendHeader,
+            &[
+                &span,
+                &self.series.len().to_string(),
+                &self.series.total_rounds().to_string(),
+                &(self.series.retention_secs / 86_400).to_string(),
+            ],
         ));
         let report = self.series.report();
         if report.is_empty() {
             lines.push(String::new());
-            lines.push("还没有历史数据：先扫描一轮。".to_string());
-            lines.push("开监控（M）连续跑几轮，这里就会出现每台主机的可用率曲线。".to_string());
+            lines.push(self.t(Key::TrendEmpty1).to_string());
+            lines.push(self.t(Key::TrendEmpty2).to_string());
             return lines;
         }
+        // 表头列宽与下面的数据行严格一致（17/7/7/9/9/8）——列宽是「排版」不是
+        // 「文案」，不随语言变；英文列名比中文长时 Rust 的 `{:>N}` 不会截断，
+        // 只是不再补空格，列会自然变宽而不会串位。
         lines.push(format!(
             "{:<17} {:>7} {:>7} {:>9} {:>9} {:>8}",
-            "主机", "可用率", "在线/总", "平均RTT", "最差RTT", "抖动"
+            self.t(Key::TrendColHost),
+            self.t(Key::TrendColUptime),
+            self.t(Key::TrendColOnlineTotal),
+            self.t(Key::TrendColAvgRtt),
+            self.t(Key::TrendColWorstRtt),
+            self.t(Key::TrendColJitter),
         ));
         // 曲线宽度：预留给文字列，至少 8 格
         let curve_w = width.saturating_sub(56).max(8);
@@ -905,9 +1073,7 @@ impl App {
             ));
         }
         lines.push(String::new());
-        lines.push(format!(
-            "曲线：每格一轮在线率（越高越满）；· = 该轮没测到这台主机（≠ 离线）。宽度 {curve_w} 格。"
-        ));
+        lines.push(self.r(Key::TrendLegend, &[&curve_w.to_string()]));
         lines
     }
 
@@ -927,11 +1093,11 @@ impl App {
                 self.alerts = Some(cping_core::AlertEngine::new(
                     cping_core::AlertConfig::default(),
                 ));
-                self.status = "告警面板：已启用（默认阈值）。! 切静音，再按 A 关闭面板".into();
+                self.status = self.t(Key::StatusAlertsEnabled).into();
             } else if self.alert_log_is_empty() {
-                self.status = "告警面板：还没有告警。跑一轮（Enter）或开监控（M）累积".into();
+                self.status = self.t(Key::StatusAlertsEmpty).into();
             } else {
-                self.status = "告警面板".into();
+                self.status = self.t(Key::StatusAlertsPanel).into();
             }
         }
     }
@@ -958,9 +1124,9 @@ impl App {
         let next = !engine.is_muted();
         engine.set_muted(next);
         self.status = if next {
-            "告警已静音：规则照常求值，只是不通知（! 解除）".into()
+            self.t(Key::StatusAlertsMuted).into()
         } else {
-            "告警已解除静音".into()
+            self.t(Key::StatusAlertsUnmuted).into()
         };
     }
 
@@ -998,33 +1164,39 @@ impl App {
     pub fn alert_lines(&self) -> Vec<String> {
         let Some(engine) = self.alerts.as_ref() else {
             return vec![
-                "告警未启用。".into(),
-                "按 A 打开面板即启用（默认：新增 / 离线 / 延迟>200ms / 可用率<90%）。".into(),
+                self.t(Key::AlertLinesDisabled1).to_string(),
+                self.t(Key::AlertLinesDisabled2).to_string(),
             ];
         };
         let mut lines = Vec::new();
         let cfg = engine.config();
+        // 规则名走 TUI 字典（核心只给 `label_zh()`，见 `i18n::alert_kind_key`）。
         let enabled: Vec<&str> = cfg
             .rules
             .iter()
             .filter(|r| r.enabled)
-            .map(|r| r.kind.label_zh())
+            .map(|r| self.t(i18n::alert_kind_key(r.kind)))
             .collect();
-        lines.push(format!(
-            "状态：{} · 活跃规则 {}（{}）· 累计告警 {} 条 · 冷却挡下 {} 条",
-            if engine.is_muted() {
-                "已静音"
-            } else {
-                "生效中"
-            },
-            enabled.len(),
-            enabled.join(" / "),
-            engine.log().total_seen(),
-            engine.suppressed_by_cooldown()
+        lines.push(self.r(
+            Key::AlertStatusLine,
+            &[
+                self.t(if engine.is_muted() {
+                    Key::AlertStateMuted
+                } else {
+                    Key::AlertStateActive
+                }),
+                &enabled.len().to_string(),
+                &enabled.join(" / "),
+                &engine.log().total_seen().to_string(),
+                &engine.suppressed_by_cooldown().to_string(),
+            ],
         ));
         lines.push(format!(
             "{:<17} {:>6} {:>8} {:>7}",
-            "时间", "轮次", "主机", "类别"
+            self.t(Key::AlertColTime),
+            self.t(Key::AlertColRound),
+            self.t(Key::AlertColHost),
+            self.t(Key::AlertColKind)
         ));
         let recent: Vec<String> = engine
             .log()
@@ -1035,28 +1207,33 @@ impl App {
                     cping_core::format_unix_local(e.at_ms / 1000),
                     e.round,
                     e.ip.to_string(),
-                    e.kind.label_zh()
+                    self.t(i18n::alert_kind_key(e.kind))
                 )
             })
             .take(200)
             .collect();
         if recent.is_empty() {
             lines.push(String::new());
-            lines.push("还没有告警记录：先跑一轮（Enter），或开监控（M）持续观察。".into());
-            lines.push("「新增主机」在第一轮不会报——否则扫个 /24 会一次刷出 255 条。".into());
+            lines.push(self.t(Key::AlertLinesEmpty1).to_string());
+            lines.push(self.t(Key::AlertLinesEmpty2).to_string());
         } else {
             lines.extend(recent);
         }
         lines.push(String::new());
-        lines.push(format!(
-            "最近一条：{}",
-            engine
-                .log()
-                .iter_recent_first()
-                .next()
-                .map(|e| e.message.clone())
-                .unwrap_or_else(|| "（无）".into())
-        ));
+        // `e.message` 由核心生成（`cping_core::alerts` 里只有中文），界面
+        // 不能重写它——那等于复刻核心的告警文案。它保持原样，是本次改动的
+        // 已知边界（外面那层「最近一条：」是翻了的）。
+        lines.push(
+            self.r(
+                Key::AlertLinesLatest,
+                &[&engine
+                    .log()
+                    .iter_recent_first()
+                    .next()
+                    .map(|e| e.message.clone())
+                    .unwrap_or_else(|| self.t(Key::AlertNone).to_string())],
+            ),
+        );
         lines
     }
 
@@ -1069,14 +1246,14 @@ impl App {
         if total == 0 {
             return String::new();
         }
-        format!(
-            "，告警 {total} 条{}",
-            if engine.is_muted() {
-                "（已静音）"
-            } else {
-                ""
-            }
-        )
+        // 未静音时后缀就是空串——空串不能进字典（`chinese_entries_are_not_empty...`
+        // 会拦下来），所以这一支在代码里给。
+        let suffix = if engine.is_muted() {
+            self.t(Key::AlertNoteMutedSuffix)
+        } else {
+            ""
+        };
+        self.r(Key::AlertNote, &[&total.to_string(), suffix])
     }
 
     // ------------------------------------------------------------------
@@ -1093,7 +1270,7 @@ impl App {
                     ..self.monitor.config().clone()
                 })
                 .ok();
-            self.status = "持续监控已关闭".into();
+            self.status = self.t(Key::StatusMonitorOff).into();
         } else {
             self.watch_seconds = Some(cping_core::MONITOR_DEFAULT_INTERVAL_MS / 1000);
             self.monitor
@@ -1103,10 +1280,8 @@ impl App {
                 })
                 .ok();
             self.next_round_at = Some(Instant::now());
-            self.status = format!(
-                "持续监控已开启：每 {} 秒重扫一次（M 关闭，[ ] 调间隔）",
-                self.watch_seconds.unwrap_or(0)
-            );
+            let secs = self.watch_seconds.unwrap_or(0).to_string();
+            self.status = self.r(Key::StatusMonitorOn, &[&secs]);
         }
     }
 
@@ -1132,7 +1307,8 @@ impl App {
             })
             .ok();
         self.next_round_at = Some(Instant::now());
-        self.status = format!("重扫间隔 = {} 秒", STEPS[next_idx]);
+        let secs = STEPS[next_idx].to_string();
+        self.status = self.r(Key::StatusInterval, &[&secs]);
     }
 
     /// 主循环每帧调用：到点且空闲时自动开下一轮。
@@ -1206,7 +1382,9 @@ impl App {
         let spec = match parse_spec(&self.prefix, TargetRange::Standard) {
             Ok(s) => s,
             Err(e) => {
-                self.status = format!("输入无效：{e}");
+                // M18：核心错误按当前语言渲染（`localized`），界面只挑语言。
+                let msg = e.localized(self.lang);
+                self.status = self.r(Key::StatusInvalidInput, &[&msg]);
                 self.watch_seconds = None;
                 return;
             }
@@ -1238,15 +1416,14 @@ impl App {
                 self.last_export = None;
                 self.scroll = 0;
                 self.quit_confirm = false;
-                self.status = format!(
-                    "开始探测 {}（{} · 后端 {}）",
-                    self.spec.summary(),
-                    self.backend_mode.describe(),
-                    self.backend_name()
-                );
+                let summary = self.spec_summary();
+                let mode = self.backend_mode.describe();
+                let backend = self.backend_name();
+                self.status = self.r(Key::StatusScanStarted, &[&summary, &mode, backend]);
             }
             Err(e) => {
-                self.status = format!("无法启动：{e}");
+                let msg = e.localized(self.lang);
+                self.status = self.r(Key::StatusStartFailed, &[&msg]);
                 // 启动失败就别继续空转重试
                 self.watch_seconds = None;
             }
@@ -1256,7 +1433,7 @@ impl App {
     pub fn cancel_scan(&mut self, silent: bool) {
         if let Some(handle) = &self.handle {
             if handle.cancel() && !silent {
-                self.status = "已请求取消：不再调度新目标，已完成结果保留".into();
+                self.status = self.t(Key::StatusCancelRequested).into();
             }
         }
         // 拉取剩余事件，让终态落到统计里
@@ -1302,14 +1479,16 @@ impl App {
                 self.enrich(true);
                 self.commit_round();
                 self.schedule_next_round();
-                self.status = format!(
-                    "第 {} 轮完成：{} 个目标，{} 在线，用时 {:.2}s {}{}",
-                    self.monitor.round(),
-                    self.stats.total,
-                    self.stats.online,
-                    elapsed_ms as f64 / 1000.0,
-                    self.enrich_note,
-                    self.change_note()
+                // `{:.2}` 不是 `{}` 占位符，先格式化再当参数传。
+                let elapsed = format!("{:.2}", elapsed_ms as f64 / 1000.0);
+                let round = self.monitor.round().to_string();
+                let total = self.stats.total.to_string();
+                let online = self.stats.online.to_string();
+                let enrich = self.enrich_note.clone();
+                let change = self.change_note();
+                self.status = self.r(
+                    Key::StatusRoundDone,
+                    &[&round, &total, &online, &elapsed, &enrich, &change],
                 );
             }
             ProbeEvent::Cancelled {
@@ -1326,9 +1505,13 @@ impl App {
                 // 用户主动取消就不要自动再来一轮
                 self.watch_seconds = None;
                 self.next_round_at = None;
-                self.status = format!(
-                    "已取消：完成 {}/{}，其中 {} 在线，已完成结果保留 {}",
-                    self.stats.completed, self.stats.total, self.stats.online, self.enrich_note
+                let completed = self.stats.completed.to_string();
+                let total = self.stats.total.to_string();
+                let online = self.stats.online.to_string();
+                let enrich = self.enrich_note.clone();
+                self.status = self.r(
+                    Key::StatusCancelled,
+                    &[&completed, &total, &online, &enrich],
                 );
             }
         }
@@ -1363,7 +1546,14 @@ impl App {
             .iter()
             .filter(|c| c.kind == ChangeKind::Disappeared)
             .count();
-        format!("，本轮变化 {} 项（上线 {up} / 离线 {down}）", changes.len())
+        self.r(
+            Key::ChangeNote,
+            &[
+                &changes.len().to_string(),
+                &up.to_string(),
+                &down.to_string(),
+            ],
+        )
     }
 
     fn schedule_next_round(&mut self) {
@@ -1385,7 +1575,7 @@ impl App {
     pub fn enrich(&mut self, quiet: bool) {
         if self.results.is_empty() {
             if !quiet {
-                self.status = "尚无扫描结果可补全".into();
+                self.status = self.t(Key::StatusNoResultsEnrich).into();
             }
             return;
         }
@@ -1396,7 +1586,7 @@ impl App {
                 *slot = Some(r);
             }
         }
-        self.enrich_note = describe_enrich(&report);
+        self.enrich_note = describe_enrich(self.lang, &report);
         if !quiet {
             self.status = self.enrich_note.clone();
         }
@@ -1406,23 +1596,21 @@ impl App {
     /// 反查「当前选中行」的主机名。放到线程里做，界面不卡。
     pub fn lookup_selected_hostname(&mut self) {
         if self.hostname_job.is_some() {
-            self.status = "已有一次主机名反查在进行中，稍候…".into();
+            self.status = self.t(Key::StatusHostnameBusy).into();
             return;
         }
         let Some(idx) = self.selected_target_index() else {
-            self.status = "没有可反查的行（先扫描、或用 t 切到表格视图）".into();
+            self.status = self.t(Key::StatusHostnameNoRow).into();
             return;
         };
         let Some(result) = self.results.get(idx).and_then(|r| r.as_ref()) else {
-            self.status = "该行尚未探测出结果".into();
+            self.status = self.t(Key::StatusHostnameNoResult).into();
             return;
         };
         if result.hostname.is_some() {
-            self.status = format!(
-                "{} 已有主机名 {}",
-                result.ip,
-                result.hostname.as_deref().unwrap_or_default()
-            );
+            let ip = result.ip.to_string();
+            let name = result.hostname.clone().unwrap_or_default();
+            self.status = self.r(Key::StatusHostnameAlready, &[&ip, &name]);
             return;
         }
         let ip = result.ip;
@@ -1432,7 +1620,8 @@ impl App {
             let _ = tx.send(name);
         });
         self.hostname_job = Some(HostnameJob { index: idx, ip, rx });
-        self.status = format!("正在反查 {ip} 的主机名（最长 1.5s）…");
+        let ip_text = ip.to_string();
+        self.status = self.r(Key::StatusHostnameLooking, &[&ip_text]);
     }
 
     fn poll_hostname_job(&mut self) {
@@ -1447,18 +1636,21 @@ impl App {
                 if let Some(Some(r)) = self.results.get_mut(index) {
                     r.hostname = Some(name.clone());
                 }
+                // `{ip} → {name}` 全是数据（地址与主机名），不含任何自然语言，
+                // 所以不进字典——它就是「数据契约」那一类的同类。
                 self.status = format!("{ip} → {name}");
                 self.hostname_job = None;
                 self.autosave();
             }
             Ok(None) => {
                 // 查不到就如实说查不到，不填占位文本
-                self.status = format!("{ip} 没有反向解析记录");
+                let ip_text = ip.to_string();
+                self.status = self.r(Key::StatusHostnameNotFound, &[&ip_text]);
                 self.hostname_job = None;
             }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
-                self.status = "主机名反查线程异常结束".into();
+                self.status = self.t(Key::StatusHostnameThreadFail).into();
                 self.hostname_job = None;
             }
         }
@@ -1517,7 +1709,7 @@ impl App {
     /// 显式另存为一份带时间戳的快照。
     pub fn save_snapshot(&mut self) {
         if self.targets.is_empty() {
-            self.status = "尚无扫描结果可保存".into();
+            self.status = self.t(Key::StatusNoResultsToSave).into();
             return;
         }
         let snap = self.build_snapshot();
@@ -1526,16 +1718,17 @@ impl App {
         let path = self.snapshot_path(&name);
         match save_to_path(&snap, &path.to_string_lossy()) {
             Ok(()) => {
-                self.status = format!(
-                    "已保存快照：{} 条结果（共 {} 个目标）→ {}",
-                    snap.results.len(),
-                    snap.total,
-                    path.display()
-                );
+                let rows = snap.results.len().to_string();
+                let total = snap.total.to_string();
+                let shown = path.display().to_string();
+                self.status = self.r(Key::StatusSnapshotSaved, &[&rows, &total, &shown]);
                 self.last_snapshot = Some(path.to_string_lossy().to_string());
                 self.mark_handled(&snap);
             }
-            Err(e) => self.status = format!("保存快照失败：{e}"),
+            Err(e) => {
+                let msg = e.localized(self.lang);
+                self.status = self.r(Key::StatusSnapshotSaveFailed, &[&msg]);
+            }
         }
     }
 
@@ -1559,9 +1752,12 @@ impl App {
                     elapsed_ms: snap.elapsed_ms,
                     error: None,
                 });
-                self.status = "发现上次的扫描结果，是否恢复？y 恢复 / n 丢弃".into();
+                self.status = self.t(Key::StatusPendingFound).into();
             }
             Err(e) => {
+                // `PendingRestore.error` 会被渲染到确认框里，所以这里就按当前
+                // 语言定稿——核心错误的 `detail` 仍原样透传。
+                let msg = e.localized(self.lang);
                 self.pending_restore = Some(PendingRestore {
                     path: path.to_string_lossy().to_string(),
                     scan_time: String::new(),
@@ -1569,9 +1765,9 @@ impl App {
                     total: 0,
                     rows: 0,
                     elapsed_ms: 0,
-                    error: Some(e.to_string()),
+                    error: Some(msg),
                 });
-                self.status = "发现一份无法读取的快照，按 n 丢弃".into();
+                self.status = self.t(Key::StatusPendingUnreadable).into();
             }
         }
     }
@@ -1582,13 +1778,15 @@ impl App {
             return;
         };
         if let Some(err) = &pending.error {
-            self.status = format!("快照无法读取，已跳过：{err}");
+            let err = err.clone();
+            self.status = self.r(Key::StatusRestoreUnreadable, &[&err]);
             return;
         }
         let snap = match load_from_path(&pending.path) {
             Ok(s) => s,
             Err(e) => {
-                self.status = format!("恢复失败：{e}");
+                let msg = e.localized(self.lang);
+                self.status = self.r(Key::StatusRestoreFailed, &[&msg]);
                 return;
             }
         };
@@ -1596,7 +1794,8 @@ impl App {
         let parsed = match parse_prefix(&snap.prefix) {
             Ok(p) => p,
             Err(e) => {
-                self.status = format!("快照中的网段无法解析：{e}");
+                let msg = e.localized(self.lang);
+                self.status = self.r(Key::StatusRestoreBadPrefix, &[&msg]);
                 return;
             }
         };
@@ -1605,16 +1804,15 @@ impl App {
         let targets = match spec_from_prefix(&parsed, TargetRange::Standard) {
             Ok(spec) => spec.targets,
             Err(e) => {
-                self.status = format!("按快照网段生成目标失败：{e}");
+                let msg = e.localized(self.lang);
+                self.status = self.r(Key::StatusRestoreSpecFailed, &[&msg]);
                 return;
             }
         };
         if targets.len() != snap.total {
-            self.status = format!(
-                "快照与当前目标规则不一致（快照 {} 个目标，按网段算出 {} 个），已跳过",
-                snap.total,
-                targets.len()
-            );
+            let want = snap.total.to_string();
+            let got = targets.len().to_string();
+            self.status = self.r(Key::StatusRestoreMismatch, &[&want, &got]);
             return;
         }
 
@@ -1623,7 +1821,8 @@ impl App {
         for r in snap.results.iter() {
             let idx = r.index as usize;
             if idx >= total {
-                self.status = format!("快照中的下标 {idx} 超出范围，已跳过");
+                let idx = idx.to_string();
+                self.status = self.r(Key::StatusRestoreIndexOob, &[&idx]);
                 return;
             }
             slots[idx] = Some(r.clone());
@@ -1646,23 +1845,19 @@ impl App {
         self.mark_handled(&snap);
         // 恢复出来的结果同样经不起进程被杀，立刻再落一次盘
         self.autosave();
-        self.status = format!(
-            "已恢复 {}（{} 条结果 / {} 个目标，用时 {:.2}s）",
-            snap.scan_time,
-            snap.results.len(),
-            snap.total,
-            snap.elapsed_ms as f64 / 1000.0
-        );
+        let scan_time = snap.scan_time.clone();
+        let rows = snap.results.len().to_string();
+        let total = snap.total.to_string();
+        let elapsed = format!("{:.2}", snap.elapsed_ms as f64 / 1000.0);
+        self.status = self.r(Key::StatusRestored, &[&scan_time, &rows, &total, &elapsed]);
     }
 
     /// `l` 键：手动从自动落盘文件恢复（例如刚才按 n 忽略了、后来又想恢复）。
     pub fn load_snapshot_from_disk(&mut self) {
         self.check_pending_snapshot();
         if self.pending_restore.is_none() {
-            self.status = format!(
-                "没有可恢复的快照：{} 不存在或已经处理过",
-                self.snapshot_path(AUTOSAVE_FILE).display()
-            );
+            let path = self.snapshot_path(AUTOSAVE_FILE).display().to_string();
+            self.status = self.r(Key::StatusNoSnapshot, &[&path]);
         }
     }
 
@@ -1677,7 +1872,7 @@ impl App {
         if delete {
             let _ = std::fs::remove_file(&pending.path);
         }
-        self.status = "已忽略上次的扫描结果".into();
+        self.status = self.t(Key::StatusDismissed).into();
     }
 
     fn handled_path(&self) -> PathBuf {
@@ -1731,12 +1926,12 @@ impl App {
 
     pub fn save(&mut self, ext: &str) {
         if self.results.is_empty() {
-            self.status = "没有可导出的结果".into();
+            self.status = self.t(Key::StatusNothingToExport).into();
             return;
         }
         let done: Vec<ProbeResult> = self.results.iter().flatten().cloned().collect();
         if done.is_empty() {
-            self.status = "尚无已完成的结果可导出".into();
+            self.status = self.t(Key::StatusNoDoneResults).into();
             return;
         }
         let meta = ExportMeta {
@@ -1744,6 +1939,9 @@ impl App {
             local_ip: self.local_ip.clone(),
             elapsed_ms: self.elapsed_ms,
             mode: self.backend_mode,
+            // 刻意用核心的 `summary()`（中文）而不是 TUI 的可本地化版本：
+            // 这是**写进导出文件**的内容，必须与界面语言无关——
+            // 同一份数据在中文与英文机器上导出的报表应当逐字节可比。
             target_desc: self.spec.summary(),
             round: self.monitor.round(),
         };
@@ -1754,42 +1952,47 @@ impl App {
                 let written = std::fs::write(&path, &bytes);
                 match written {
                     Ok(()) => {
-                        self.status = format!(
-                            "已导出 {} 条结果 → {path}（{} 字节）",
-                            done.len(),
-                            bytes.len()
-                        );
+                        let count = done.len().to_string();
+                        let size = bytes.len().to_string();
+                        self.status = self.r(Key::StatusExported, &[&count, &path, &size]);
                         self.last_export = Some(path);
                     }
                     Err(e) => {
-                        self.status = format!("写入失败：{e}（目标路径 {path}）");
+                        // `e` 是 `io::Error`：来自操作系统的细节**原样透传**，
+                        // 只本地化外面那层框。
+                        let detail = e.to_string();
+                        self.status = self.r(Key::StatusWriteFailed, &[&detail, &path]);
                     }
                 }
             }
             Err(e) => {
-                self.status = format!("导出失败：{e}");
+                let msg = e.localized(self.lang);
+                self.status = self.r(Key::StatusExportFailed, &[&msg]);
             }
         }
     }
 }
 
 /// 把核心的补全报告翻成一句人话（界面只说真实发生的事）。
-fn describe_enrich(report: &EnrichReport) -> String {
+fn describe_enrich(lang: Lang, report: &EnrichReport) -> String {
     if !report.table_ok {
-        return format!(
-            "读取邻居表失败：{}",
-            report.error.as_deref().unwrap_or("未知原因")
-        );
+        let reason = report
+            .error
+            .as_deref()
+            .unwrap_or_else(|| i18n::text(lang, Key::EnrichUnknownReason));
+        return i18n::render(lang, Key::EnrichTableFailed, &[reason]);
     }
     if report.mac_filled == 0 && report.vendor_filled == 0 {
-        return format!(
-            "邻居表 {} 条，没有可回填的目标（ARP 表只记录近期通信过的地址）",
-            report.entries
-        );
+        return i18n::render(lang, Key::EnrichNoFill, &[&report.entries.to_string()]);
     }
-    format!(
-        "邻居表 {} 条，新填 MAC {} 条、厂商 {} 条",
-        report.entries, report.mac_filled, report.vendor_filled
+    i18n::render(
+        lang,
+        Key::EnrichFilled,
+        &[
+            &report.entries.to_string(),
+            &report.mac_filled.to_string(),
+            &report.vendor_filled.to_string(),
+        ],
     )
 }
 
@@ -1805,16 +2008,16 @@ fn fingerprint(snap: &Snapshot) -> String {
     )
 }
 
-fn local_ip_label() -> String {
+fn local_ip_label(lang: Lang) -> String {
     use cping_core::local_ip::{pick_primary, LocalAddressProvider, UnsupportedProvider};
 
     let provider = UnsupportedProvider;
     match provider.list() {
         Ok(list) => pick_primary(&list)
             .map(|a| a.ip.to_string())
-            .unwrap_or_else(|| "未知".into()),
+            .unwrap_or_else(|| i18n::text(lang, Key::LocalIpUnknown).to_string()),
         // M5 接入真实网卡枚举；在此之前如实说明，不猜一个地址
-        Err(_) => "未知（M5 接入网卡枚举）".into(),
+        Err(_) => i18n::text(lang, Key::LocalIpUnknownM5).to_string(),
     }
 }
 
@@ -2755,5 +2958,165 @@ mod tests {
             "坏策略必须看得见：{}",
             app.status
         );
+    }
+
+    // ------------------------------------------------------------------
+    // M18：中 / 英双语
+    // ------------------------------------------------------------------
+
+    /// 与 `crate::i18n::tests::has_cjk` 同源（那边是私有的，这里再来一份小的）。
+    fn has_cjk(s: &str) -> bool {
+        s.chars().any(|c| {
+            let u = c as u32;
+            (0x3000..=0x303F).contains(&u)
+                || (0x3040..=0x30FF).contains(&u)
+                || (0x3400..=0x4DBF).contains(&u)
+                || (0x4E00..=0x9FFF).contains(&u)
+                || (0xF900..=0xFAFF).contains(&u)
+                || (0xFF00..=0xFFEF).contains(&u)
+        })
+    }
+
+    /// 英文界面用的选项（其余与 `opts()` 相同：模拟后端 + 临时快照目录）。
+    fn en_opts() -> Options {
+        Options {
+            lang: Lang::En,
+            ..opts()
+        }
+    }
+
+    #[test]
+    fn m18_lang_flag_is_parsed_and_bad_values_are_reported() {
+        let arg = |s: &str| s.to_string();
+
+        let a = Options::from_args(["--lang", "en"].iter().map(|s| arg(s)));
+        assert_eq!(a.lang, Lang::En);
+        assert!(a.arg_warnings.is_empty(), "{:?}", a.arg_warnings);
+
+        // 接受 POSIX 风格的语言标识（与核心的 `Lang::parse` 同一套规则）
+        let b = Options::from_args(["--lang", "zh_CN.UTF-8"].iter().map(|s| arg(s)));
+        assert_eq!(b.lang, Lang::Zh);
+
+        // 取值非法**必须报出来**：静默忽略用户显式给的语言是最难自查的一类问题。
+        // 处理方式与既有策略参数一致——照常启动，把问题摆到状态栏。
+        let c = Options::from_args(["--lang", "fr"].iter().map(|s| arg(s)));
+        assert_eq!(c.arg_warnings.len(), 1, "{:?}", c.arg_warnings);
+        assert!(c.arg_warnings[0].contains("--lang"), "{:?}", c.arg_warnings);
+
+        // 缺取值同样要报
+        let d = Options::from_args(["--lang"].iter().map(|s| arg(s)));
+        assert_eq!(d.arg_warnings.len(), 1, "{:?}", d.arg_warnings);
+
+        // 不给 `--lang` 时按环境推断（这里只断言它是个合法值，具体取值取决于
+        // 运行测试的 shell，不能写死）。
+        let e = Options::from_args(std::iter::empty::<String>());
+        assert!(Lang::ALL.contains(&e.lang));
+    }
+
+    #[test]
+    fn m18_english_status_messages_and_filters_are_english() {
+        let mut app = App::new(en_opts());
+        assert!(
+            !has_cjk(&app.status),
+            "英文模式的首屏状态必须是英文：{}",
+            app.status
+        );
+
+        // 交互产生的状态栏文案也要跟着语言走
+        app.on_key(KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Char('i'),
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(!has_cjk(&app.status), "编辑提示必须是英文：{}", app.status);
+        app.on_key(KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Char('f'),
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(!has_cjk(&app.status), "过滤提示必须是英文：{}", app.status);
+
+        // 非法输入走的是**核心的错误**：外框翻了，核心给出的 detail 原样透传
+        app.prefix = "999.999.999".into();
+        app.start_scan();
+        assert!(!app.running);
+        assert!(
+            app.status.starts_with("invalid input"),
+            "核心错误的外框必须本地化：{}",
+            app.status
+        );
+    }
+
+    /// 英文模式下，**典型界面**（主界面 / 表格 / 各面板的空态）不得出现中日韩字符。
+    ///
+    /// 「典型」是有意圈定的：设备推断（`DeviceGuess`）与告警正文（`AlertEvent::message`）
+    /// 由**核心**生成，核心没有 `_in` 变体，界面又不能复刻核心的判定与文案，
+    /// 所以它们在英文模式下仍是中文——这是本次改动的已知边界（已在报告里列出）。
+    /// 面板的空态、标题、表头、图例、按键帮助全部是本界面自己的话，必须干净。
+    #[test]
+    fn m18_english_typical_screens_have_no_cjk() {
+        // 主界面：输入区 + 状态栏 + 矩阵 + 按键条
+        let app = App::new(en_opts());
+        let main = render(&app, 130, 34);
+        assert!(!has_cjk(&main), "英文主界面出现中文：{main}");
+
+        // 帮助面板（含后端能力行——那两行由本界面按注册表公开字段拼）
+        let mut help_app = App::new(en_opts());
+        help_app.show_help = true;
+        let help = render(&help_app, 130, 64);
+        assert!(!has_cjk(&help), "英文帮助面板出现中文：{help}");
+
+        // 面板空态
+        let mut empty = App::new(en_opts());
+        empty.show_changes = true;
+        let changes = render(&empty, 120, 34);
+        assert!(!has_cjk(&changes), "英文变化面板出现中文：{changes}");
+
+        let mut trend = App::new(en_opts());
+        trend.show_trend = true;
+        let trend_out = render(&trend, 120, 34);
+        assert!(!has_cjk(&trend_out), "英文趋势面板出现中文：{trend_out}");
+
+        let mut fps = App::new(en_opts());
+        fps.show_fingerprints = true;
+        let fps_out = render(&fps, 120, 34);
+        assert!(!has_cjk(&fps_out), "英文指纹面板出现中文：{fps_out}");
+
+        let mut alerts = App::new(Options {
+            alert: true,
+            ..en_opts()
+        });
+        alerts.show_alerts = true;
+        let alerts_out = render(&alerts, 120, 34);
+        assert!(!has_cjk(&alerts_out), "英文告警面板出现中文：{alerts_out}");
+    }
+
+    /// 英文模式下的**数据视图**：状态列、分类列、详情行也得是英文。
+    #[test]
+    fn m18_english_table_view_has_no_cjk() {
+        let mut app = App::new(en_opts());
+        app.prefix = "127.0.0".into();
+        app.start_scan();
+        wait_done(&mut app, 300);
+        app.view = ViewMode::Table;
+        // 详情行的标签也要跟着语言走（造数据，不依赖本机 ARP / DNS）
+        for r in app.results.iter_mut().flatten() {
+            r.vendor = Some("Acme Networks".into());
+            r.hostname = Some("router.local".into());
+        }
+        // 状态栏里的「邻居表」失败原因来自操作系统（中文 Windows 上就是中文），
+        // 本用例考的是表格本身，所以先把状态栏清空，避开 OS 细节这个变量。
+        app.status.clear();
+        let out = render(&app, 120, 34);
+        assert!(!has_cjk(&out), "英文表格视图出现中文：{out}");
+        assert!(out.contains("vendor"), "详情行标签应是英文：{out}");
+        assert!(out.contains("host"), "详情行标签应是英文：{out}");
+    }
+
+    /// `Options::default()` 必须**不读环境**、恒定中文。
+    ///
+    /// 测试全都建立在它之上（读过环境的默认值会让同一个用例在不同 shell 下
+    /// 得到不同语言）；读环境这件事只发生在 `Options::from_args` 里。
+    #[test]
+    fn m18_options_default_is_deterministic_chinese() {
+        assert_eq!(Options::default().lang, Lang::Zh);
     }
 }

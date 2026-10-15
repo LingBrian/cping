@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { NButton, NModal, NSpace, useMessage } from 'naive-ui'
+import { t } from '../i18n'
 import { usePingStore } from '../stores/ping'
 
 /**
@@ -32,7 +33,7 @@ async function onRestore() {
 
 async function onDismiss(deleteFile: boolean) {
   await store.dismissSnapshot(deleteFile)
-  message.info(deleteFile ? '已丢弃上次的结果' : '已忽略，下次启动不再提示')
+  message.info(deleteFile ? t('msg.discarded') : t('msg.ignored'))
 }
 </script>
 
@@ -46,20 +47,21 @@ async function onDismiss(deleteFile: boolean) {
     @esc="onDismiss(false)"
   >
     <div class="cping-panel" style="width: min(520px, 92vw); padding: 18px">
-      <div style="font-size: 15px; font-weight: 600">发现上次未处理完的扫描结果</div>
+      <div style="font-size: 15px; font-weight: 600">{{ t('restore.title') }}</div>
 
       <template v-if="readable">
         <div style="font-size: 13px; color: #374151; margin-top: 12px; line-height: 1.9">
-          <div>扫描时间：{{ pending?.scanTime }}</div>
-          <div>网段：{{ pending?.prefix }}</div>
-          <div>结果：{{ pending?.rows }} 条 / 共 {{ pending?.total }} 个目标</div>
-          <div>用时：{{ elapsed }}</div>
+          <div>{{ t('restore.scanTime', pending?.scanTime) }}</div>
+          <div>{{ t('restore.prefix', pending?.prefix) }}</div>
+          <div>{{ t('restore.rows', pending?.rows, pending?.total) }}</div>
+          <div>{{ t('restore.elapsed', elapsed) }}</div>
         </div>
       </template>
       <template v-else>
-        <!-- 读不出来就如实说读不出来，不提供「恢复」这条路 -->
+        <!-- 读不出来就如实说读不出来，不提供「恢复」这条路。
+             下面那行 error 是后端给的原文，原样透传。 -->
         <div style="font-size: 13px; color: #b91c1c; margin-top: 12px; line-height: 1.9">
-          <div>这份快照无法读取，不能恢复。</div>
+          <div>{{ t('restore.unreadable') }}</div>
           <div>{{ pending?.error }}</div>
         </div>
       </template>
@@ -72,13 +74,13 @@ async function onDismiss(deleteFile: boolean) {
           word-break: break-all;
         "
       >
-        文件：{{ pending?.path }}
+        {{ t('restore.file', pending?.path) }}
       </div>
 
       <NSpace justify="end" style="margin-top: 16px">
-        <NButton @click="onDismiss(true)">丢弃</NButton>
-        <NButton @click="onDismiss(false)">暂不恢复</NButton>
-        <NButton v-if="readable" type="primary" @click="onRestore">恢复结果</NButton>
+        <NButton @click="onDismiss(true)">{{ t('btn.discard') }}</NButton>
+        <NButton @click="onDismiss(false)">{{ t('btn.notNow') }}</NButton>
+        <NButton v-if="readable" type="primary" @click="onRestore">{{ t('btn.restore') }}</NButton>
       </NSpace>
     </div>
   </NModal>

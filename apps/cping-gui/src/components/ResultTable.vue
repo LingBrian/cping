@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { NButton, useMessage } from 'naive-ui'
+import { t } from '../i18n'
 import { usePingStore } from '../stores/ping'
 import { CLASS_SYMBOLS } from '../shared/types'
 
@@ -31,13 +32,14 @@ function changeTitle(index: number, base: string): string {
     <table class="result-table">
       <thead>
         <tr>
-          <th style="width: 13%">IP 地址</th>
-          <th style="width: 14%">状态</th>
+          <th style="width: 13%">{{ t('table.ip') }}</th>
+          <th style="width: 14%">{{ t('table.status') }}</th>
+          <!-- RTT 是语言中立的技术缩写，中英文一致，故不入字典 -->
           <th style="width: 6%">RTT</th>
-          <th style="width: 16%">MAC 地址</th>
-          <th style="width: 21%">厂商</th>
-          <th style="width: 20%">主机名</th>
-          <th style="width: 10%">类别</th>
+          <th style="width: 16%">{{ t('table.mac') }}</th>
+          <th style="width: 21%">{{ t('table.vendor') }}</th>
+          <th style="width: 20%">{{ t('table.hostname') }}</th>
+          <th style="width: 10%">{{ t('table.class') }}</th>
         </tr>
       </thead>
       <tbody>
@@ -47,15 +49,15 @@ function changeTitle(index: number, base: string): string {
           :class="{ 'result-table__row--changed': store.isChanged(row.index) }"
         >
           <td class="cping-mono" :title="row.ip">{{ row.ip }}</td>
-          <td :title="changeTitle(row.index, row.result ? row.result.statusLabel : '等待')">
+          <td :title="changeTitle(row.index, row.result ? row.result.statusLabel : t('class.waiting'))">
             <!-- M8：变化用「符号 + 文字」双通道标出，不靠颜色单独表意 -->
             <span v-if="store.isChanged(row.index)" class="badge badge--change">{{
-              store.changeMap.get(row.index)?.kindLabel ?? '变化'
+              store.changeMap.get(row.index)?.kindLabel ?? t('change.fallback')
             }}</span>
             <span v-if="row.result" class="badge">{{
               row.result.classKey ? CLASS_SYMBOLS[row.result.classKey] : '·'
             }}</span>
-            {{ row.result ? row.result.statusLabel : '等待' }}
+            {{ row.result ? row.result.statusLabel : t('class.waiting') }}
           </td>
           <td class="cping-mono">{{ row.result?.rttMs ?? '' }}</td>
           <td class="cping-mono" :title="row.result?.mac ?? ''">{{ row.result?.mac ?? '' }}</td>
@@ -75,7 +77,7 @@ function changeTitle(index: number, base: string): string {
                 :disabled="store.hostnameBusy !== null"
                 @click="onLookup(row.index)"
               >
-                反查
+                {{ t('btn.lookupShort') }}
               </NButton>
             </div>
           </td>

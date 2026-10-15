@@ -1,0 +1,124 @@
+CPing 无头命令行 —— 批量 PING，结果可导出，退出码可判
+
+用法：
+  cping-cli --target <规格> [选项]
+
+目标规格（三者可混用，逗号/空格/换行分隔）：
+  192.168.1             C 类网段前三段（原版写法，默认 .1–.255 共 255 个）
+  192.168.1.7           单个地址
+  192.168.1.0/24        CIDR（必须写网络号；主机位非 0 会报错）
+  10.0.0.0/30, 192.168.1
+
+选项：
+  -t, --target <规格>     目标规格（必需，除非设置了 --target-file）
+      --target-file <f>   从文件读取目标规格（每行/逗号分隔）
+      --range <r>         standard | full | hosts_only（默认 standard）
+      --mode <m>          icmp | tcp（默认 icmp；Android 上默认 tcp）
+  -p, --port <n>          TCP 模式端口（默认 80）
+      --timeout <ms>      单目标超时（默认 1000，上限 60000）
+  -c, --concurrency <n>   并发数（默认 32，上限 256）
+      --enrich            扫描后补全 MAC 与厂商（读本机邻居表，离线 OUI 库）
+      --fingerprint       对在线主机做端口指纹 + 设备类型推断（M13）
+      --fp-ports <列表>   指纹探测的端口，如 22,80,443-445（默认内置常用集）
+      --no-banner         指纹时**不**抓取服务横幅（默认抓，只读不写）
+      --fp-timeout <ms>   指纹的单端口超时（默认 800，上限 60000）
+  -w, --watch <秒>        持续监控：每 N 秒重扫一轮，并输出变化
+  -n, --rounds <n>        watch 模式总轮数（默认一直跑，Ctrl+C 停止）
+      --history <路径>    把每轮追加到长期时序文件（跨会话累积，默认保留 7 天）
+      --report <路径>     结束时写出可用率报表（.csv 或 .html）
+      --keep-days <天>    时序保留天数（默认 7；仅与 --history 同用）
+      --alert             开启阈值告警（新增/离线/延迟/可用率）
+      --alert-kinds <列表> 启用哪几类：appeared,disappeared,latency,uptime（默认全部）
+      --alert-latency <ms> 延迟阈值（默认 200；严格大于才报）
+      --alert-uptime <百分比> 可用率阈值（默认 90；严格小于才报，0-100）
+      --alert-cooldown <秒> 同一主机同一类告警的冷却窗口（默认 300）
+      --alert-state <路径> 告警去重状态文件（跨会话保留冷却记录）
+      --mute-alerts       静音：规则照常求值、状态照常推进，只是不通知
+      --notify <列表>     通知通道：console,system,webhook,command,smtp（默认 console）
+      --notify-webhook <url> Webhook 地址（**仅 http://**，本构建不含 TLS）
+      --notify-cmd <模板> 通知命令模板，可重复；{title}/{body}/{json}/{count} 占位
+      --notify-smtp <host[:port]> 明文 SMTP 中继（不支持 TLS 与认证）
+      --notify-mail-from <地址>   邮件发件人
+      --notify-mail-to <地址,..>  邮件收件人
+      --notify-list       列出本平台各通知通道的可用性后退出
+      --out <路径>        导出结果；按扩展名决定格式（.csv/.txt/.json/.html）
+      --json <路径>       等价于 --out 且强制 JSON
+  -q, --quiet             不打印人类可读摘要（只输出文件与退出码）
+      --list-backends     列出本平台可用的探测后端与能力（含不可用的），然后退出
+      --config <路径>     读配置文件（模板 + [probe]/[colors]/[ui]/[monitor]）
+      --profile <名>      选用配置里的哪一份模板（名字不区分大小写）
+      --list-profiles     列出配置里的全部模板后退出（需同时给 --config）
+      --dump-config <路径> 把**这次实际生效**的参数写成配置文件后退出
+      --max-pps <n>       全局速率上限（探测包/秒，默认 500；写 0 = 不限速）
+      --max-targets <n>   单次任务的目标数上限（只能比结构上限 65536 更严）
+      --allow-reserved    放行组播 / 保留段等特殊网段（默认拒绝）
+      --audit <路径>      审计日志（JSONL 追加写；含谁/何时/参数/结果计数）
+      --lang <zh|en>      界面语言（默认取自 CPING_LANG / LC_ALL / LC_MESSAGES / LANG，兜底中文）
+  -h, --help              显示本帮助
+  -V, --version           显示版本
+
+退出码：
+  0  全部目标在线
+  1  有目标不在线（超时/不可达/端口关闭）
+  2  参数或配置错误
+  3  探测后端不可用（权限不足 / 平台不支持）
+
+示例：
+  cping-cli -t 192.168.1
+  cping-cli -t 192.168.1.0/24 --mode tcp --port 445 --out scan.csv
+  cping-cli -t 10.0.0.0/30 --json report.json --enrich
+  cping-cli -t 192.168.1 --fingerprint --out assets.csv
+  cping-cli -t 192.168.1 --watch 30 --out rounds.json
+  cping-cli -t 192.168.1 --watch 60 --history net.ts --report uptime.html
+  cping-cli -t 192.168.1 --watch 30 --alert --notify console,system
+  cping-cli -t 192.168.1 --watch 30 --alert --notify webhook \
+            --notify-webhook http://10.0.0.5:9000/cping
+  cping-cli -t 192.168.1 --alert --notify-cmd "curl -s -d {json} https://example.com/h"
+  cping-cli --config prod.toml --profile dmz --out dmz.csv
+  cping-cli --config prod.toml --list-profiles
+  cping-cli -t 10.0.0.0/24 -c 64 --dump-config nightly.toml
+
+关于 --config / --profile：
+  配置文件把「扫什么、怎么扫」固化成一份份**命名模板**，CI 与巡检脚本复用同一份：
+  写 [[profiles]] 段（**双方括号**；写成 [profiles] 会明确报错而不是被忽略）。
+  合并优先级**高 → 低**：命令行 → 模板 → 配置的 [probe]。模板只填空缺，
+  绝不覆盖你在命令行上手敲的值；每次都会把「哪些字段来自哪一层」逐条打印出来。
+  --profile 点名的模板不存在会**报错退出**，不会悄悄退回 default_profile。
+  配置文件带 schema_version：低版本的旧文件（v1 的 [probe] 写法）会被自动迁移，
+  高版本会**拒绝读取**（猜着读会吃掉你不认识的项）。不认识的键原样保留，
+  但**注释不保留**（子集解析器不建 AST）。
+  --dump-config 只写「扫什么、怎么扫」：导出路径、--history、通知通道、告警规则
+  刻意不写进去——否则换个模板会把通知一起换掉。
+
+关于 --max-pps / --max-targets / --allow-reserved / --audit（M17）：
+  这四项是**本机的合规策略**，刻意只走命令行、不进配置文件——否则一份从别处
+  拷来的模板就能把限速改成「不限速」，等于留了个绕过合规的暗门。
+  默认已限速（500 包/秒）并拒绝三类特殊网段：组播（会打扰整组主机）、
+  保留段（含 255.255.255.255 广播）、文档示例网段（公网不路由，扫了必失败）。
+  **私有网段与回环不拦**（10/8、172.16/12、192.168/16、127/8）——那正是本
+  工具的正常用途。命中时给出原因与放行方式，而不是笼统的「参数错误」。
+  越界值一律报错，不静默夹取：`--max-pps` 上限 100000、`--max-targets`
+  只能比 65536 更严（那是结果槽位的结构上限，参数突破不了）。
+  --audit 写出的是 JSONL（首行 `CPING-AUDIT 1`）：只记「谁、何时、扫了什么
+  规格、结果计数」，**不记**逐主机明细、MAC、厂商或反查出的主机名。
+
+关于 --fingerprint：
+  端口指纹是**独立于在线判定的第二趟探测**，只对在线主机做：
+  端口全关不会把主机改成离线，端口开放也不会把离线主机变在线。
+  服务横幅只读对方主动送出的前 256 字节，**不发送任何协议请求**；
+  设备类型是「厂商 + 开放端口」的**推断**结论，识别不出就留空。
+
+关于 --history / --report：
+  时序文件带格式版本号（首行 CPING-TS <版本>）；版本不符会**拒绝读取**并退
+  出码 2，绝不用猜出来的数据覆盖你已有的历史。每轮都立即落盘，Ctrl+C 也不
+  丢已跑过的轮次。报表数值可逐条对账回原始记录：降采样只做同类项相加，
+  观测轮数与 RTT 求和在合并前后守恒。注意「从未在线」的主机 RTT 记为 -，
+  而不是 0（0 会被读成「极快」）。
+
+关于 --alert / --notify：
+  规则匹配是纯函数：第一轮只建立基线（不发「新增主机」，否则扫个 /24 会一次
+  刷出 255 条）；阈值用严格不等号，恰好等于阈值不告警。通知通道**失败可见**：
+  每个通道单独汇报成功或失败原因，一个通道挂了不影响其它通道，也绝不阻塞
+  扫描主流程（投递在后台线程，队列满时丢弃并计数）。
+  webhook 只支持 http:// —— 本构建不含 TLS，不会把告警明文降级发出去；
+  需要 https 请用 --notify-cmd 调 curl 等自带 TLS 的工具。

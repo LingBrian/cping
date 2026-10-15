@@ -6,18 +6,21 @@
 //! 退出码见 [`args`] 模块；这是给脚本与 CI 用的契约，改动属于破坏性变更。
 
 mod args;
+mod i18n;
 
 use args::{Args, EXIT_BACKEND, EXIT_OFFLINE, EXIT_OK, EXIT_USAGE};
 use cping_core::classify::Thresholds;
 use cping_core::config::ProbeConfig;
 use cping_core::enrich::enrich_with_mac_and_vendor;
 use cping_core::export::{ExportFormat, ExportMeta, ScanReport};
+use cping_core::i18n::Lang;
 use cping_core::monitor::{diff_scans, Change, ChangeLog, DEFAULT_CHANGE_CAPACITY};
 use cping_core::result::{ProbeResult, ScanStats};
 use cping_core::scheduler::ProbeScheduler;
 use cping_core::spec::{parse_spec, TargetSpec};
 use cping_core::timeseries::TimeSeries;
 use cping_core::{backend_for_run, config::ColorConfig};
+use i18n::Key;
 use std::time::{Duration, Instant};
 
 fn main() {
@@ -26,35 +29,48 @@ fn main() {
 }
 
 fn run(argv: &[String]) -> i32 {
+    // 解析失败时也得能打出**对应语言**的帮助，所以语言要先定一次。
+    // `Args::parse` 内部会再做一次同样的推断（用户没给 `--lang` 时），两者结果
+    // 一致；这里显式算一遍只是为了错误分支也能拿到语言。`resolve_lang` 自己
+    // 出错（`--lang` 取值非法）时退回环境推断——那个非法值本来就不可信，
+    // 真正的报错由 `Args::parse` 用同一个语言给出。
+    let fallback = Lang::from_env();
+    let lang = args::resolve_lang(argv, fallback).unwrap_or(fallback);
     let parsed = match Args::parse(argv) {
         Ok(a) => a,
         Err(msg) => {
-            eprintln!("参数错误：{msg}");
-            eprintln!("\n{}", args::HELP);
+            eprintln!("{}", i18n::render(lang, Key::ErrUsagePrefix, &[&msg]));
+            eprintln!("\n{}", args::help(lang));
             return EXIT_USAGE;
         }
     };
     if parsed.help {
-        print!("{}", args::HELP);
+        print!("{}", args::help(parsed.lang));
         return EXIT_OK;
     }
     if parsed.version {
         println!(
-            "cping-cli {} · {} · 后端 {}",
-            cping_core::VERSION,
-            std::env::consts::OS,
-            parsed.mode.backend_name()
+            "{}",
+            i18n::render(
+                parsed.lang,
+                Key::VersionLine,
+                &[
+                    cping_core::VERSION,
+                    std::env::consts::OS,
+                    parsed.mode.backend_name(),
+                ],
+            )
         );
         return EXIT_OK;
     }
     // M12：打印后端能力后退出。放在参数校验之前——这个命令不需要目标。
     if parsed.list_backends {
-        print_backends();
+        print_backends(parsed.lang);
         return EXIT_OK;
     }
     // M15：打印通知通道能力后退出。同样不需要目标。
     if parsed.notify_list {
-        print_notify_channels();
+        print_notify_channels(parsed.lang);
         return EXIT_OK;
     }
     // M16：配置合并的说明必须先打出来——「模板改了哪几个参数」「哪条命令行盖掉了
@@ -67,7 +83,10 @@ fn run(argv: &[String]) -> i32 {
     // （与 --list-backends / --notify-list 同一处理）。
     if parsed.list_profiles {
         if let Err(msg) = print_profiles(&parsed) {
-            eprintln!("参数错误：{msg}");
+            eprintln!(
+                "{}",
+                i18n::render(parsed.lang, Key::ErrUsagePrefix, &[&msg])
+            );
             return EXIT_USAGE;
         }
         return EXIT_OK;
@@ -77,38 +96,56 @@ fn run(argv: &[String]) -> i32 {
     // 同样不需要目标（只固化探测参数也是合理用法）。
     if let Some(path) = parsed.dump_config.clone() {
         if let Err(msg) = write_effective_config(&parsed, &path) {
-            eprintln!("配置写出失败：{msg}");
+            eprintln!(
+                "{}",
+                i18n::render(parsed.lang, Key::ErrDumpConfigPrefix, &[&msg])
+            );
             return EXIT_USAGE;
         }
         return EXIT_OK;
     }
 
     if let Err(msg) = parsed.validate() {
-        eprintln!("参数错误：{msg}");
+        eprintln!(
+            "{}",
+            i18n::render(parsed.lang, Key::ErrUsagePrefix, &[&msg])
+        );
         return EXIT_USAGE;
     }
 
     let spec = match parse_spec(&parsed.target_spec, parsed.range) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("目标规格错误：{e}");
+            eprintln!(
+                "{}",
+                i18n::render(
+                    parsed.lang,
+                    Key::ErrTargetSpecPrefix,
+                    &[&e.localized(parsed.lang)]
+                )
+            );
             return EXIT_USAGE;
         }
     };
 
     // M17：首次运行告知「仅用于获授权网络」。位置刻意放在参数都校验完、
     // 确认真的要开扫之后——为一次失败的调用弹一段授权提示只会让人麻木。
-    print_authorization_notice(parsed.quiet);
+    print_authorization_notice(parsed.lang, parsed.quiet);
 
     // M17：保留网段与目标数上限在**开扫之前**就拦下。晚一步拦的代价是：
     // 错误会被一堆轮次输出淹掉，而且线程已经起来了。调度器里那道检查仍然保留，
     // 它是权威（三端共用），这里只是把同一份判断提前一次，让 CLI 的体验一致。
-    if let Err(e) = parsed.policy().check_targets(&spec.targets) {
-        eprintln!("参数错误：{e}");
+    if let Err(e) = parsed.policy().check_targets_in(&spec.targets, parsed.lang) {
+        eprintln!(
+            "{}",
+            i18n::render(
+                parsed.lang,
+                Key::ErrUsagePrefix,
+                &[&e.localized(parsed.lang)]
+            )
+        );
         if matches!(e, cping_core::CoreError::ReservedTarget { .. }) {
-            eprintln!(
-                "提示：确认要扫就加 --allow-reserved；这类地址扫了要么没意义、要么会打扰别人。"
-            );
+            eprintln!("{}", i18n::text(parsed.lang, Key::HintAllowReserved));
         }
         return EXIT_USAGE;
     }
@@ -126,12 +163,12 @@ fn run(argv: &[String]) -> i32 {
 /// 等于把工具弄坏。提示一次、记一次，就足以起到告知作用。
 ///
 /// `--quiet` 下改走 stderr：静默模式是「别刷屏」，不是「免告知」。
-fn print_authorization_notice(quiet: bool) {
+fn print_authorization_notice(lang: Lang, quiet: bool) {
     use cping_core::policy::consent;
     if !consent::load().needs_notice() {
         return;
     }
-    let text = consent::notice_text();
+    let text = consent::notice_text_in(lang);
     if quiet {
         eprintln!("{text}");
     } else {
@@ -141,11 +178,12 @@ fn print_authorization_notice(quiet: bool) {
     if !consent::acknowledge(cping_core::unix_millis_now()) {
         // 写不进去不是致命错误，但要说清楚——否则每次启动都提示一遍，
         // 用户会以为程序坏了
+        let path = consent::consent_path()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| i18n::text(lang, Key::HomeDirectory).to_string());
         eprintln!(
-            "提示：无法记录授权确认状态（{} 不可写），下次启动会再提示一遍",
-            consent::consent_path()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|| "家目录".into())
+            "{}",
+            i18n::render(lang, Key::HintConsentUnwritable, &[&path])
         );
     }
 }
@@ -177,16 +215,21 @@ struct Session {
 
 impl Session {
     fn new(args: &Args, spec: &TargetSpec) -> Result<Self, i32> {
+        let lang = args.lang;
         if args.watch_seconds.is_some() && args.rounds.is_none() {
             eprintln!(
-                "提示：持续监控模式不会自动停止（每 {} 秒一轮），按 Ctrl+C 结束",
-                args.watch_seconds.unwrap_or(0)
+                "{}",
+                i18n::render(
+                    lang,
+                    Key::HintWatchForever,
+                    &[&args.watch_seconds.unwrap_or(0).to_string()]
+                )
             );
         }
         if spec.len() > 1024 && args.watch_seconds.is_some() {
             eprintln!(
-                "警告：{} 个目标进入持续监控，每轮都会重新扫描，请确认网络负载可接受",
-                spec.len()
+                "{}",
+                i18n::render(lang, Key::WarnManyTargetsWatch, &[&spec.len().to_string()])
             );
         }
         // M14：长期时序。`--history` 指向的文件若已存在就**续写**（跨会话累积），
@@ -196,14 +239,22 @@ impl Session {
                 Ok((s, skipped)) => {
                     if skipped > 0 {
                         eprintln!(
-                            "警告：历史文件 {path} 有 {skipped} 行无法解析，已跳过（其余数据继续使用）"
+                            "{}",
+                            i18n::render(
+                                lang,
+                                Key::WarnHistoryUnparsed,
+                                &[path, &skipped.to_string()]
+                            )
                         );
                     }
                     if !args.quiet && !s.is_empty() {
                         println!(
-                            "已载入历史 {} 点 · {} 轮（{path}）",
-                            s.len(),
-                            s.total_rounds()
+                            "{}",
+                            i18n::render(
+                                lang,
+                                Key::InfoHistoryLoaded,
+                                &[&s.len().to_string(), &s.total_rounds().to_string(), path]
+                            )
                         );
                     }
                     s
@@ -212,7 +263,7 @@ impl Session {
                     // 文件**不存在**是首次使用的正常情况；文件存在却读不动（版本不符、
                     // 不是 CPing 时序）就必须拒绝——否则下一轮写回时会把用户的历史覆盖掉。
                     if std::path::Path::new(path).exists() {
-                        eprintln!("历史文件无法使用：{e}");
+                        eprintln!("{}", i18n::render(lang, Key::ErrHistoryUnusable, &[&e]));
                         return Err(EXIT_USAGE);
                     }
                     TimeSeries::new()
@@ -230,18 +281,32 @@ impl Session {
                     match cping_core::AlertEngine::load_from_path(path) {
                         Ok((e, skipped)) => {
                             if skipped > 0 {
-                                eprintln!("警告：告警状态 {path} 有 {skipped} 行无法解析，已跳过");
+                                eprintln!(
+                                    "{}",
+                                    i18n::render(
+                                        lang,
+                                        Key::WarnAlertStateUnparsed,
+                                        &[path, &skipped.to_string()]
+                                    )
+                                );
                             }
                             if !args.quiet {
                                 eprintln!(
-                                    "已载入告警状态：{} 台主机的冷却记录（{path}）",
-                                    e.seen_hosts()
+                                    "{}",
+                                    i18n::render(
+                                        lang,
+                                        Key::InfoAlertStateLoaded,
+                                        &[&e.seen_hosts().to_string(), path]
+                                    )
                                 );
                             }
                             e
                         }
                         Err(err) => {
-                            eprintln!("告警状态文件无法使用：{err}");
+                            eprintln!(
+                                "{}",
+                                i18n::render(lang, Key::ErrAlertStateUnusable, &[&err])
+                            );
                             return Err(EXIT_USAGE);
                         }
                     }
@@ -257,13 +322,10 @@ impl Session {
         };
         if let Some(e) = &alerts {
             if e.is_muted() {
-                eprintln!("提示：告警已静音（--mute-alerts）：规则照常求值，但不会通知");
+                eprintln!("{}", i18n::text(lang, Key::HintAlertsMuted));
             }
             if args.watch_seconds.is_none() {
-                eprintln!(
-                    "提示：只跑一轮时，「新增主机」规则只建立基线（不发事件）。\
-                     要观察上线下线请加 --watch"
-                );
+                eprintln!("{}", i18n::text(lang, Key::HintSingleRoundBaseline));
             }
         }
         // M15：通知在后台线程投递，绝不在扫描主循环里做网络 I/O
@@ -274,13 +336,16 @@ impl Session {
         let mut scheduler = ProbeScheduler::new(backend_for_run(args.mode, false));
         // M17：限速与保留网段守卫在**起线程之前**生效
         if let Err(e) = scheduler.set_policy(args.policy()) {
-            eprintln!("安全策略无效：{e}");
+            eprintln!(
+                "{}",
+                i18n::render(lang, Key::ErrPolicyInvalid, &[&e.localized(lang)])
+            );
             return Err(EXIT_USAGE);
         }
         // 只在限速被改动时把策略摆出来。默认值写进每一行只会变成噪音，
         // 而「限速被关掉」是需要摆在明面上的事。
         if !args.quiet && scheduler.policy().max_pps != cping_core::DEFAULT_MAX_PPS {
-            println!("{}", scheduler.policy().describe());
+            println!("{}", scheduler.policy().describe_in(lang));
         }
 
         // M17：审计日志。**打开失败直接退出码 2**——用户显式要求留审计，
@@ -289,7 +354,10 @@ impl Session {
             Some(path) => match cping_core::AuditLog::open(path) {
                 Ok(log) => Some(log),
                 Err(e) => {
-                    eprintln!("审计日志不可用：{e}");
+                    eprintln!(
+                        "{}",
+                        i18n::render(lang, Key::ErrAuditUnavailable, &[&e.localized(lang)])
+                    );
                     return Err(EXIT_USAGE);
                 }
             },
@@ -329,9 +397,12 @@ impl Session {
         if let Some(log) = &self.audit {
             if !self.args.quiet {
                 println!(
-                    "  审计：{} 条记录 → {}",
-                    log.written(),
-                    log.path().to_string_lossy()
+                    "{}",
+                    i18n::render(
+                        self.args.lang,
+                        Key::InfoAuditCount,
+                        &[&log.written().to_string(), &log.path().to_string_lossy()]
+                    )
                 );
             }
         }
@@ -385,7 +456,10 @@ impl Session {
         let record = self.audit_record(event, at_ms);
         if let Some(log) = &mut self.audit {
             if let Err(e) = log.append(&record) {
-                eprintln!("审计写入失败：{e}");
+                eprintln!(
+                    "{}",
+                    i18n::render(self.args.lang, Key::ErrAuditWrite, &[&e.to_string()])
+                );
             }
         }
     }
@@ -426,11 +500,14 @@ impl Session {
 
             if let Some((format, path)) = &self.args.out {
                 if let Err(e) = self.write_report(*format, path, &outcome) {
-                    eprintln!("导出失败：{e}");
+                    eprintln!(
+                        "{}",
+                        i18n::render(self.args.lang, Key::ErrExportFailed, &[&e])
+                    );
                     return EXIT_USAGE;
                 }
                 if !self.args.quiet {
-                    println!("  已写出 {path}");
+                    println!("{}", i18n::render(self.args.lang, Key::InfoWrote, &[path]));
                 }
             }
 
@@ -442,15 +519,25 @@ impl Session {
             }
             if let Some(path) = &self.args.history {
                 if let Err(e) = self.series.save_to_path(path) {
-                    eprintln!("历史写入失败：{e}");
+                    eprintln!(
+                        "{}",
+                        i18n::render(self.args.lang, Key::ErrHistoryWrite, &[&e])
+                    );
                     return EXIT_USAGE;
                 }
                 if !self.args.quiet {
                     println!(
-                        "  历史：{} 点 · {} 轮 · 保留 {} 天 → {path}",
-                        self.series.len(),
-                        self.series.total_rounds(),
-                        self.series.retention_secs / 86_400
+                        "{}",
+                        i18n::render(
+                            self.args.lang,
+                            Key::InfoHistoryLine,
+                            &[
+                                &self.series.len().to_string(),
+                                &self.series.total_rounds().to_string(),
+                                &(self.series.retention_secs / 86_400).to_string(),
+                                path,
+                            ]
+                        )
                     );
                 }
             }
@@ -479,12 +566,25 @@ impl Session {
         // M14：报表在**所有轮次之后**生成——它描述的是整个过程，而不是某一轮。
         if let Some(path) = &self.args.report {
             if self.series.is_empty() {
-                eprintln!("报表：没有可用的历史数据，已跳过 {path}");
+                eprintln!(
+                    "{}",
+                    i18n::render(self.args.lang, Key::WarnReportNoData, &[path])
+                );
             } else if let Err(e) = self.write_uptime_report(path) {
-                eprintln!("报表写入失败：{e}");
+                eprintln!(
+                    "{}",
+                    i18n::render(self.args.lang, Key::ErrReportWrite, &[&e])
+                );
                 return EXIT_USAGE;
             } else if !self.args.quiet {
-                println!("可用率报表（{} 台主机）→ {path}", self.series.hosts().len());
+                println!(
+                    "{}",
+                    i18n::render(
+                        self.args.lang,
+                        Key::InfoUptimeReport,
+                        &[&self.series.hosts().len().to_string(), path]
+                    )
+                );
             }
         }
 
@@ -495,9 +595,12 @@ impl Session {
             && stats.permission_denied + stats.unsupported == stats.total
         {
             eprintln!(
-                "后端不可用：{} 个目标全部「权限不足/不支持」。{}",
-                stats.total,
-                cping_core::native_icmp_hint()
+                "{}",
+                i18n::render(
+                    self.args.lang,
+                    Key::ErrBackendUnavailable,
+                    &[&stats.total.to_string(), cping_core::native_icmp_hint()]
+                )
             );
             return EXIT_BACKEND;
         }
@@ -521,7 +624,14 @@ impl Session {
         let handle = match self.scheduler.start(&config, self.spec.targets.clone()) {
             Ok(h) => h,
             Err(e) => {
-                eprintln!("无法启动扫描：{e}");
+                eprintln!(
+                    "{}",
+                    i18n::render(
+                        self.args.lang,
+                        Key::ErrScanStart,
+                        &[&e.localized(self.args.lang)]
+                    )
+                );
                 return Err(EXIT_USAGE);
             }
         };
@@ -534,8 +644,16 @@ impl Session {
             let report = enrich_with_mac_and_vendor(&mut results);
             if !self.args.quiet {
                 println!(
-                    "  补全：MAC {} 条 · 厂商 {} 条（邻居表 {} 条）",
-                    report.mac_filled, report.vendor_filled, report.entries
+                    "{}",
+                    i18n::render(
+                        self.args.lang,
+                        Key::InfoEnrich,
+                        &[
+                            &report.mac_filled.to_string(),
+                            &report.vendor_filled.to_string(),
+                            &report.entries.to_string(),
+                        ]
+                    )
                 );
             }
         }
@@ -550,7 +668,7 @@ impl Session {
                 .collect();
             if online.is_empty() {
                 if !self.args.quiet {
-                    println!("  端口指纹：没有在线主机，跳过");
+                    println!("{}", i18n::text(self.args.lang, Key::InfoFpNoOnline));
                 }
                 Vec::new()
             } else {
@@ -559,10 +677,16 @@ impl Session {
                 if !self.args.quiet {
                     let open_total: usize = fps.iter().map(|f| f.report.findings.len()).sum();
                     println!(
-                        "  端口指纹：{} 台在线主机 × {} 个端口 · 发现 {} 个开放端口",
-                        fps.len(),
-                        cfg.ports.len(),
-                        open_total
+                        "{}",
+                        i18n::render(
+                            self.args.lang,
+                            Key::InfoFpSummary,
+                            &[
+                                &fps.len().to_string(),
+                                &cfg.ports.len().to_string(),
+                                &open_total.to_string(),
+                            ]
+                        )
                     );
                 }
                 fps
@@ -605,10 +729,14 @@ impl Session {
             outcome.changes.clone(),
         )
         .with_fingerprints(outcome.fingerprints.clone());
+        // 渲染/写盘失败都用**当前语言**的句子报出来：
+        // `render` 的错误是核心层的 `CoreError`，走 `localized`；
+        // 写盘失败来自操作系统，外层框架本地化、底层细节原样透传。
         let bytes = report
             .render(format, &ColorConfig::default())
-            .map_err(|e| e.to_string())?;
-        std::fs::write(path, bytes).map_err(|e| e.to_string())
+            .map_err(|e| e.localized(self.args.lang))?;
+        std::fs::write(path, bytes)
+            .map_err(|e| i18n::render(self.args.lang, Key::ErrWriteFile, &[path, &e.to_string()]))
     }
 
     /// M14：写出可用率报表。格式由扩展名决定（参数解析阶段已限定 .csv/.html）。
@@ -619,7 +747,8 @@ impl Session {
         } else {
             cping_core::report_csv(&report)
         };
-        std::fs::write(path, bytes).map_err(|e| format!("写入 {path} 失败：{e}"))
+        std::fs::write(path, bytes)
+            .map_err(|e| i18n::render(self.args.lang, Key::ErrWriteFile, &[path, &e.to_string()]))
     }
 
     // ------------------------------------------------------------------
@@ -651,18 +780,34 @@ impl Session {
         if !self.args.quiet {
             if events.is_empty() {
                 if self.round > 1 {
-                    println!("  告警：无");
+                    println!("{}", i18n::text(self.args.lang, Key::InfoAlertsNone));
                 }
             } else {
-                println!("  告警 {} 条：", events.len());
+                println!(
+                    "{}",
+                    i18n::render(
+                        self.args.lang,
+                        Key::InfoAlertsCount,
+                        &[&events.len().to_string()]
+                    )
+                );
                 for e in &events {
+                    // 严重度标签与事件正文都由核心层产出（核心层只提供中文），
+                    // 这里原样透传——见 i18n.rs 顶部「核心层只有中文的摘要」一节。
                     println!("    [{}] {}", e.severity.label_zh(), e.message);
                 }
             }
             let cd = engine.suppressed_by_cooldown();
             let mu = engine.suppressed_by_mute();
             if cd + mu > 0 {
-                println!("     （已按冷却/静音抑制：冷却 {cd} 条 · 静音 {mu} 条）");
+                println!(
+                    "{}",
+                    i18n::render(
+                        self.args.lang,
+                        Key::InfoAlertsSuppressed,
+                        &[&cd.to_string(), &mu.to_string()]
+                    )
+                );
             }
         }
 
@@ -673,16 +818,21 @@ impl Session {
 
     /// 收尾：落盘告警状态、等通知投递完、如实汇报每个通道的结果。
     fn finish_alerts(&mut self) {
+        let lang = self.args.lang;
         if let (Some(engine), Some(path)) = (&self.alerts, &self.args.alert_state) {
             match engine.save_to_path(path) {
                 Ok(()) if !self.args.quiet => {
                     println!(
-                        "告警状态 → {path}（{} 台主机的冷却记录）",
-                        engine.seen_hosts()
+                        "{}",
+                        i18n::render(
+                            lang,
+                            Key::InfoAlertStateSaved,
+                            &[path, &engine.seen_hosts().to_string()]
+                        )
                     );
                 }
                 Ok(()) => {}
-                Err(e) => eprintln!("告警状态写入失败：{e}"),
+                Err(e) => eprintln!("{}", i18n::render(lang, Key::ErrAlertStateWrite, &[&e])),
             }
         }
 
@@ -693,27 +843,41 @@ impl Session {
         let dropped = sink.dropped();
         let outcomes = sink.finish();
         if dropped > 0 {
-            eprintln!("警告：通知队列满，有 {dropped} 批未投递（投递速度跟不上告警速度）");
+            eprintln!(
+                "{}",
+                i18n::render(lang, Key::WarnNotifyQueueFull, &[&dropped.to_string()])
+            );
         }
         // 通道失败必须可见——哪怕在 --quiet 下
         let failed = outcomes.iter().filter(|o| !o.ok).count();
         if !self.args.quiet {
             if outcomes.is_empty() {
-                println!("通知：{posted} 批已投递（未配置任何通道）");
+                println!(
+                    "{}",
+                    i18n::render(lang, Key::InfoNotifyNoChannels, &[&posted.to_string()])
+                );
             } else {
-                println!("通知：{posted} 批 · 通道结果：");
+                println!(
+                    "{}",
+                    i18n::render(lang, Key::InfoNotifyResults, &[&posted.to_string()])
+                );
                 for o in &outcomes {
                     println!(
-                        "  {} {}：{}",
-                        if o.ok { "✓" } else { "✗" },
-                        o.channel,
-                        o.detail
+                        "{}",
+                        i18n::render(
+                            lang,
+                            Key::InfoNotifyLine,
+                            &[if o.ok { "✓" } else { "✗" }, o.channel, &o.detail]
+                        )
                     );
                 }
             }
         }
         for o in outcomes.iter().filter(|o| !o.ok) {
-            eprintln!("通知通道 {} 失败：{}", o.channel, o.detail);
+            eprintln!(
+                "{}",
+                i18n::render(lang, Key::ErrNotifyChannelFailed, &[o.channel, &o.detail])
+            );
         }
         if failed > 0
             && self
@@ -722,7 +886,8 @@ impl Session {
                 .is_some_and(|e| e.log().total_seen() > 0)
         {
             eprintln!(
-                "提示：有 {failed} 个通知通道未能送达（告警本身已记录，见 --notify-list 查能力）"
+                "{}",
+                i18n::render(lang, Key::HintNotifyUndelivered, &[&failed.to_string()])
             );
         }
     }
@@ -745,20 +910,34 @@ struct RoundOutcome {
 /// 与 `--list-backends` 同一套思路：**不可用的通道也打出来，并写明原因**。
 /// 「webhook 不支持 https」是用户需要知道的事实，藏起来只会让人对着
 /// 一个没反应的通知通道猜半天。
-fn print_notify_channels() {
+fn print_notify_channels(lang: Lang) {
     println!(
-        "cping-cli {} · {} · 通知通道",
-        cping_core::VERSION,
-        std::env::consts::OS
+        "{}",
+        i18n::render(
+            lang,
+            Key::NotifyHeader,
+            &[cping_core::VERSION, std::env::consts::OS]
+        )
     );
     println!();
-    println!("{:<10} {:<6} 说明", "通道", "可用");
+    println!(
+        "{:<10} {:<6} {}",
+        i18n::text(lang, Key::ColChannel),
+        i18n::text(lang, Key::ColAvailable),
+        i18n::text(lang, Key::ColNote)
+    );
     for (key, ok, note) in cping_core::notifications_available() {
-        println!("{:<10} {:<6} {}", key, if ok { "是" } else { "否" }, note);
+        let yes_no = if ok {
+            i18n::text(lang, Key::BoolYes)
+        } else {
+            i18n::text(lang, Key::BoolNo)
+        };
+        // `note` 由核心层给出（目前只有中文），原样透传。
+        println!("{:<10} {:<6} {}", key, yes_no, note);
     }
     println!();
-    println!("提示：通道失败一定会被打印出来——告警系统静默失败比不装还糟。");
-    println!("      https 的 webhook 请走 --notify-cmd 调 curl 等自带 TLS 的工具。");
+    println!("{}", i18n::text(lang, Key::NotifyHintSilentFail));
+    println!("{}", i18n::text(lang, Key::NotifyHintHttps));
 }
 
 // ---------------------------------------------------------------------------
@@ -777,7 +956,7 @@ fn print_config_notes(args: &Args) {
     if args.quiet || args.config_notes.is_empty() {
         return;
     }
-    println!("配置来源：");
+    println!("{}", i18n::text(args.lang, Key::NoteConfigHeader));
     for note in &args.config_notes {
         println!("  · {note}");
     }
@@ -790,53 +969,69 @@ fn print_config_notes(args: &Args) {
 /// 用户不必去读 TOML 就知道 `--profile` 该填哪个。目标规格解析不出来时
 /// 写「目标规格无法解析」而**不猜一个数字**——猜出来的数量会让用户以为配置是对的。
 fn print_profiles(args: &Args) -> Result<(), String> {
+    let lang = args.lang;
     // `apply_config` 已保证 `--list-profiles` 一定伴随 `--config`，
     // 这里仍然用 `ok_or_else` 而不是 `unwrap`：入口多了一条，就没有 unwrap 的理由。
     let doc = args
         .config_doc
         .as_ref()
-        .ok_or_else(|| "--list-profiles 需要同时给 --config".to_string())?;
+        .ok_or_else(|| i18n::text(lang, Key::ErrListProfilesNeedsConfig).to_string())?;
     let path = args.config.as_deref().unwrap_or("");
 
     println!(
-        "cping-cli {} · {} · 模板（{path}）",
-        cping_core::VERSION,
-        std::env::consts::OS
+        "{}",
+        i18n::render(
+            lang,
+            Key::ProfilesHeader,
+            &[cping_core::VERSION, std::env::consts::OS, path]
+        )
     );
     println!();
     if doc.profiles.is_empty() {
-        println!("这份配置里没有任何模板。");
+        println!("{}", i18n::text(lang, Key::ProfilesEmpty));
         println!();
-        println!("加一份（注意是**双方括号**，写成 [profiles] 会被明确拒绝）：");
+        println!("{}", i18n::text(lang, Key::ProfilesEmptyAdd));
         println!("  [[profiles]]");
         println!("  name  = \"lan\"");
         println!("  spec  = \"192.168.1\"");
-        println!("  note  = \"办公网段\"");
+        println!("  note  = \"office-lan\"");
         return Ok(());
     }
 
     // 不给 --profile 时会用 default_profile 那一份，标出来省得用户去猜
     let auto = doc.default_profile.as_deref().unwrap_or("");
-    println!("{:<14} {:<24} 说明", "模板", "目标规格");
+    println!(
+        "{:<14} {:<24} {}",
+        i18n::text(lang, Key::ColProfile),
+        i18n::text(lang, Key::ColTargetSpec),
+        i18n::text(lang, Key::ColNote)
+    );
     for p in &doc.profiles {
         let tag = if !auto.is_empty() && p.name.eq_ignore_ascii_case(auto) {
             "  ← default_profile"
         } else {
             ""
         };
+        // `ScanProfile::describe()` 由核心层给出（目前只有中文），原样透传。
         println!("{}{tag}", p.describe());
     }
     println!();
-    println!("用法：--config {path} --profile <模板名>");
+    println!("{}", i18n::render(lang, Key::ProfilesUsage, &[path]));
     if auto.is_empty() {
-        println!("     配置里没写 default_profile，必须显式给 --profile");
+        println!("{}", i18n::text(lang, Key::ProfilesNoDefault));
     } else {
-        println!("     不给 --profile 时用 default_profile = {auto:?} 那一份");
+        println!(
+            "{}",
+            i18n::render(lang, Key::ProfilesUseDefault, &[&format!("{auto:?}")])
+        );
     }
     if !doc.unknown_entries().is_empty() {
         // 「不认识的键被保留了」是用户需要知道的事实：他不会以为被吃掉了
         let n = doc.unknown_entries().len();
-        println!("     另有 {n} 个本程序不认识的键，已原样保留（写回时不变）");
+        println!(
+            "{}",
+            i18n::render(lang, Key::ProfilesUnknownKeys, &[&n.to_string()])
+        );
     }
     Ok(())
 }
@@ -866,11 +1061,11 @@ fn write_effective_config(args: &Args, path: &str) -> Result<(), String> {
     // 没有目标：导出成一份只含 [probe] 的配置。这不是错误——
     // 「把探测参数固化下来、目标每次从命令行给」是合理用法。
     if args.target_spec.trim().is_empty() {
-        doc.validate().map_err(|e| e.to_string())?;
-        doc.save_to_path(path).map_err(|e| e.to_string())?;
+        doc.validate().map_err(|e| e.localized(args.lang))?;
+        doc.save_to_path(path).map_err(|e| e.localized(args.lang))?;
         if !args.quiet {
-            println!("已写出配置（只含 [probe]，没有目标规格）→ {path}");
-            println!("提示：目标规格不在 [probe] 里（装不下 CIDR/多网段），请每次用 --target 指定");
+            println!("{}", i18n::render(args.lang, Key::DumpProbeOnly, &[path]));
+            println!("{}", i18n::text(args.lang, Key::DumpProbeOnlyHint));
         }
         return Ok(());
     }
@@ -895,22 +1090,33 @@ fn write_effective_config(args: &Args, path: &str) -> Result<(), String> {
     // 指向刚写的那一份，这样 `--config <path>` 单独一条就能复现
     doc.default_profile = Some(name.clone());
 
-    doc.validate().map_err(|e| e.to_string())?;
-    doc.save_to_path(path).map_err(|e| e.to_string())?;
+    doc.validate().map_err(|e| e.localized(args.lang))?;
+    doc.save_to_path(path).map_err(|e| e.localized(args.lang))?;
 
     if !args.quiet {
+        let lang = args.lang;
         let count = parse_spec(&args.target_spec, args.range)
             .ok()
-            .map(|s| format!("{} 个目标", s.len()))
-            .unwrap_or_else(|| "目标规格无法解析".to_string());
-        println!("已写出配置 → {path}");
-        println!("  模板 {name}：{}（{count}）", args.target_spec);
-        println!("  已设为 default_profile：下次直接 cping-cli --config {path}");
+            .map(|s| i18n::render(lang, Key::DumpCountTargets, &[&s.len().to_string()]))
+            .unwrap_or_else(|| i18n::text(lang, Key::DumpCountUnparsable).to_string());
+        println!("{}", i18n::render(lang, Key::DumpWritten, &[path]));
+        println!(
+            "{}",
+            i18n::render(
+                lang,
+                Key::DumpProfileLine,
+                &[&name, &args.target_spec, &count]
+            )
+        );
+        println!("{}", i18n::render(lang, Key::DumpDefaultSet, &[path]));
         // 覆盖了原值就必须说出来——这是唯一会让人丢东西的地方
         if !old_spec.is_empty() && old_spec != args.target_spec {
-            println!("  注意：模板 {name} 原有的目标规格 {old_spec:?} 已被当前生效值覆盖");
+            println!(
+                "{}",
+                i18n::render(lang, Key::DumpOverwrote, &[&name, &format!("{old_spec:?}")])
+            );
         }
-        println!("  未写入（刻意不属模板）：--out / --json / --history / --report /");
+        println!("{}", i18n::text(lang, Key::DumpNotWritten));
         println!("                          --alert-* / --notify-*");
     }
     Ok(())
@@ -923,41 +1129,64 @@ fn print_round(
     outcome: &RoundOutcome,
     changes: &[Change],
 ) {
+    let lang = args.lang;
     let stats = &outcome.stats;
+    // `render_template` 只认 `{}`，所以秒数先格式化好再当参数传进去。
+    let secs = format!("{:.3}", outcome.elapsed_ms as f64 / 1000.0);
+    let cancelled = if outcome.cancelled {
+        i18n::text(lang, Key::RoundCancelled)
+    } else {
+        ""
+    };
     println!(
-        "第 {round} 轮 · {} · {} · 用时 {:.3} s{}",
-        args.mode.describe(),
-        spec.summary(),
-        outcome.elapsed_ms as f64 / 1000.0,
-        if outcome.cancelled {
-            "（已取消）"
-        } else {
-            ""
-        }
+        "{}",
+        i18n::render(
+            lang,
+            Key::RoundHeader,
+            &[
+                &round.to_string(),
+                &args.mode.describe(),
+                // `TargetSpec::summary()` 由核心层给出（目前只有中文），原样透传。
+                &spec.summary(),
+                &secs,
+                cancelled,
+            ]
+        )
     );
     println!(
-        "  目标 {} · 在线 {} · 超时 {} · 不可达 {} · 权限 {} · 不支持 {} · 错误 {}",
-        stats.total,
-        stats.online,
-        stats.timeout,
-        stats.unreachable,
-        stats.permission_denied,
-        stats.unsupported,
-        stats.error
+        "{}",
+        i18n::render(
+            lang,
+            Key::RoundStats,
+            &[
+                &stats.total.to_string(),
+                &stats.online.to_string(),
+                &stats.timeout.to_string(),
+                &stats.unreachable.to_string(),
+                &stats.permission_denied.to_string(),
+                &stats.unsupported.to_string(),
+                &stats.error.to_string(),
+            ]
+        )
     );
 
     if !changes.is_empty() {
-        println!("  变化 {} 项：", changes.len());
+        println!(
+            "{}",
+            i18n::render(lang, Key::RoundChanges, &[&changes.len().to_string()])
+        );
         for c in changes.iter().take(20) {
+            // `Change::summary()` 由核心层给出（目前只有中文），原样透传。
             println!("    {}", c.summary());
         }
         if changes.len() > 20 {
-            println!("    … 另有 {} 项，见导出文件", changes.len() - 20);
+            let more = (changes.len() - 20).to_string();
+            println!("{}", i18n::render(lang, Key::RoundChangesMore, &[&more]));
         }
     }
 
     if stats.online > 0 {
-        println!("  在线主机：");
+        println!("{}", i18n::text(lang, Key::RoundOnlineHosts));
         for r in outcome.results.iter().filter(|r| r.status.is_online()) {
             let rtt = r.status.rtt_ms().unwrap_or(0);
             let vendor = if r.vendor_or_empty().is_empty() {
@@ -970,6 +1199,8 @@ fn print_round(
             } else {
                 format!("  {}", r.hostname_or_empty())
             };
+            // 这一行的格式串是纯 ASCII，不该进字典；状态标签由核心层给出
+            // （`ProbeMode::status_label` 目前只有中文），原样透传。
             println!(
                 "    {:<15} {:>6} ms  {}{}{}",
                 r.ip,
@@ -983,12 +1214,16 @@ fn print_round(
 
     // M13：端口指纹单独一段，标题写明与在线判定无关
     if !outcome.fingerprints.is_empty() {
-        println!("  端口指纹（附加信息，与上面的在线判定相互独立）：");
+        println!("{}", i18n::text(lang, Key::RoundFpHeader));
         for fp in &outcome.fingerprints {
             if !fp.has_open_ports() {
-                println!("    {:<15} 无开放端口", fp.ip());
+                println!(
+                    "{}",
+                    i18n::render(lang, Key::RoundFpNoPorts, &[&format!("{:<15}", fp.ip())])
+                );
                 continue;
             }
+            // 端口列表与设备摘要由核心层给出（目前只有中文），原样透传。
             println!("    {:<15} {}", fp.ip(), fp.open_ports_summary());
             for f in &fp.report.findings {
                 if let Some(banner) = &f.banner {
@@ -1005,7 +1240,7 @@ fn print_round(
 /// M12：列出本平台的后端能力。
 /// 刻意把**不可用**的后端也打出来（并写明原因）：「ICMPv6 未实装」是用户需要
 /// 知道的事实，藏起来只会让人对着清一色的「不支持」猜原因。
-fn print_backends() {
+fn print_backends(lang: Lang) {
     let reg = cping_core::BackendRegistry::new();
     println!(
         "cping-cli {} · {} · {}",
@@ -1013,28 +1248,39 @@ fn print_backends() {
         std::env::consts::OS,
         std::env::consts::ARCH
     );
+    // `summary_zh()` 由核心层给出（目前只有中文），原样透传。
     println!("{}", reg.summary_zh());
     println!();
     println!(
-        "{:<8} {:<22} {:<8} {:<14} 说明",
-        "ID", "名称", "可用", "地址族"
+        "{:<8} {:<22} {:<8} {:<14} {}",
+        "ID",
+        i18n::text(lang, Key::ColName),
+        i18n::text(lang, Key::ColAvailable),
+        i18n::text(lang, Key::ColFamily),
+        i18n::text(lang, Key::ColNote)
     );
     for caps in reg.caps() {
         let family = match (caps.ipv4, caps.ipv6) {
             (true, true) => "IPv4+IPv6",
-            (true, false) => "仅 IPv4",
-            (false, true) => "仅 IPv6",
+            (true, false) => i18n::text(lang, Key::FamilyV4Only),
+            (false, true) => i18n::text(lang, Key::FamilyV6Only),
             (false, false) => "—",
+        };
+        let yes_no = if caps.available {
+            i18n::text(lang, Key::BoolYes)
+        } else {
+            i18n::text(lang, Key::BoolNo)
         };
         println!(
             "{:<8} {:<22} {:<8} {:<14} {}",
             caps.id.key(),
+            // 后端名与备注由核心层给出（目前只有中文），原样透传。
             caps.id.label_zh(),
-            if caps.available { "是" } else { "否" },
+            yes_no,
             family,
             if caps.note.is_empty() {
                 if caps.needs_privilege {
-                    "需要原始套接字权限"
+                    i18n::text(lang, Key::BackendsNeedsPrivilege)
                 } else {
                     "—"
                 }
@@ -1044,7 +1290,7 @@ fn print_backends() {
         );
     }
     println!();
-    println!("提示：IPv6 目标目前请用 --mode tcp（ICMPv6 尚未实装）。");
+    println!("{}", i18n::text(lang, Key::BackendsHint));
 }
 
 fn now_text() -> String {
@@ -1119,6 +1365,11 @@ mod tests {
         items.iter().map(|s| s.to_string()).collect()
     }
 
+    /// 测试统一以中文为兜底解析（见 `args.rs` 里同名 helper 的说明）。
+    fn parse(items: &[String]) -> Result<Args, String> {
+        Args::parse_with(items, Lang::Zh)
+    }
+
     fn m16_dir() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join("cping_cli_m16_dump_test");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1131,7 +1382,7 @@ mod tests {
         let path = dir.join("nightly.toml");
         let p = path.to_str().unwrap();
 
-        let args = Args::parse(&argv(&[
+        let args = parse(&argv(&[
             "-t",
             "10.7.0.0/30",
             "-c",
@@ -1153,7 +1404,7 @@ mod tests {
         assert_eq!(prof.concurrency, 9);
 
         // 再走一遍命令行合并，结果应与首次一致
-        let again = Args::parse(&argv(&["--config", p])).unwrap();
+        let again = parse(&argv(&["--config", p])).unwrap();
         assert_eq!(again.target_spec, "10.7.0.0/30");
         assert_eq!(again.timeout_ms, 1500);
         assert_eq!(again.concurrency, 9);
@@ -1174,7 +1425,7 @@ mod tests {
         let dst = dir.join("kept.toml");
         let d = dst.to_str().unwrap();
 
-        let args = Args::parse(&argv(&[
+        let args = parse(&argv(&[
             "--config",
             src.to_str().unwrap(),
             "-t",
@@ -1201,7 +1452,7 @@ mod tests {
         let dir = m16_dir();
         let path = dir.join("probe-only.toml");
         let p = path.to_str().unwrap();
-        let args = Args::parse(&argv(&["-c", "64", "--timeout", "2500"])).unwrap();
+        let args = parse(&argv(&["-c", "64", "--timeout", "2500"])).unwrap();
         write_effective_config(&args, p).unwrap();
 
         let (doc, _) = cping_core::ConfigDocument::load_from_path(p).unwrap();
@@ -1218,7 +1469,7 @@ mod tests {
         let blocker = dir.join("blocker-file");
         std::fs::write(&blocker, "").unwrap();
         let bad = blocker.join("x.toml");
-        let args = Args::parse(&argv(&["-t", "127.0.0.1"])).unwrap();
+        let args = parse(&argv(&["-t", "127.0.0.1"])).unwrap();
         assert!(
             write_effective_config(&args, bad.to_str().unwrap()).is_err(),
             "写不出去必须报错——安静地什么都不写是最坏的结果"

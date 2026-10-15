@@ -1,0 +1,300 @@
+import type { Dict } from './index'
+
+/**
+ * 英文词条。
+ *
+ * 这里的类型标注 `Dict` 是本项目的「键无遗漏」保证：`Dict` 由 `zh` 派生
+ * （`Record<keyof typeof zh, string>`），所以这里少一个键、多一个键、
+ * 或值不是 string，`vue-tsc` 都会直接编译不过——前端没有测试框架，
+ * 就用类型系统守住这条底线。
+ *
+ * 写作约束（与 zh.ts 相同，为了 check-i18n.mjs 能稳定解析）：
+ * 每条一行、值用单引号、值内不出现单引号（用 "do not" 代替 "don't"）。
+ * 另外英文值里不得出现任何中日韩字符——check-i18n.mjs 会逐条断言。
+ */
+export const en: Dict = {
+  // ---- App name and shared ----
+  'app.title': 'CPing Network Scanner',
+  'common.unknown': 'unknown',
+  'common.available': 'Available',
+  'common.unavailable': 'Unavailable',
+  'common.onlineOnly': 'Online only',
+  'common.elapsed': 'Elapsed {}',
+  'common.localIp': 'Local {}',
+  'unit.seconds': '{} s',
+  'round.n': 'Round {}',
+  'lang.title': 'Language',
+
+  // ---- Run state (StatusBar) ----
+  'state.running': 'Probing',
+  'state.cancelled': 'Cancelled',
+  'state.done': 'Completed',
+  'state.idle': 'Idle',
+  'state.monitoring': 'Monitoring · every {}s',
+  'state.monitoringRescan': 'Monitoring · rescan in {}s',
+  'status.label': 'Status: ',
+  'status.mode': 'Mode: ',
+  'status.online': 'Online hosts: ',
+  'status.changes': 'Changes: ',
+  'status.changeTotal': '/ total {}',
+  'status.mac': 'MAC resolved: ',
+  'status.vendor': 'Vendors: ',
+  'status.hostname': 'Hostnames: ',
+  'status.elapsed': 'Elapsed: ',
+  'status.backend': 'Backend: ',
+  'status.notStarted': 'not started',
+  'status.localIp': 'Local IP: ',
+  'status.ready': 'Ready',
+
+  // ---- Status messages (stores/ping.ts) ----
+  'status.noResults': 'No completed results yet',
+  'status.starting': 'Starting…',
+  'status.scanStarted': 'Scan started {} ({})',
+  'status.startFailed': 'Failed to start: {}',
+  'status.cancelRequested': 'Cancellation requested',
+  'status.cancelFailed': 'Cancel failed: {}',
+  'status.modeChanged': 'Probe mode: {} (takes effect on next scan)',
+  'status.scanDone': 'Scan complete: {} targets, {} online',
+  'status.cancelledDone': 'Cancelled: {}/{} completed, finished results kept',
+  'status.scanDoneInfo': '{}; resolved MAC {}, vendor {}{}',
+  'status.diffSuffix': '; {}',
+  'status.resyncFailed': 'Result resync failed: {}',
+  'status.fpBusy': 'A fingerprint scan is already running',
+  'status.fpDone': 'Fingerprint: {} hosts · {} open ports ({} hosts with open ports)',
+  'status.fpFailed': 'Fingerprint failed: {}',
+  'status.fpCleared': 'Port fingerprints cleared',
+  'status.trendFailed': 'Failed to load trend: {}',
+  'status.trendCleared': 'Trend history cleared ({} data points)',
+  'status.trendClearFailed': 'Failed to clear trend: {}',
+  'status.trendExportFailed': 'Failed to export uptime report: {}',
+  'status.alertsFailed': 'Failed to load alert state: {}',
+  'status.alertsOn': 'Alerts enabled (default rules: new host / offline / latency > 200ms / uptime < 90%)',
+  'status.alertsOff': 'Alerts disabled (rules are no longer evaluated; cooldowns and baseline kept)',
+  'status.mutedOn': 'Alerts muted: rules are still evaluated, notifications are suppressed',
+  'status.mutedOff': 'Alerts unmuted',
+  'status.alertRulesUpdated': 'Alert rules updated',
+  'status.alertsCleared': 'Alert log cleared (baseline and cooldowns kept)',
+  'status.alertsClearFailed': 'Failed to clear alerts: {}',
+  'status.alertToggleFailed': 'Failed to toggle alerts: {}',
+  'status.muteToggleFailed': 'Failed to toggle mute: {}',
+  'status.monitorOn': 'Continuous monitoring enabled, rescanning every {} s',
+  'status.monitorOff': 'Continuous monitoring disabled',
+  'status.monitorIntervalChanged': 'Monitoring interval changed to {} s',
+  'status.configSaved': 'Settings saved',
+  'status.configSaveFailed': 'Failed to save settings: {}',
+  'status.exportFailed': 'Export failed: {}',
+  'status.exportDiffFailed': 'Failed to export diff: {}',
+  'status.savedTo': 'Saved: {}',
+  'status.enrichFailed': 'Enrich failed: {}',
+  'status.noReverseDns': '{} has no reverse DNS record',
+  'status.hostnameLookupFailed': 'Hostname lookup failed: {}',
+  'status.checkPendingFailed': 'Failed to check previous results: {}',
+  'status.restored': 'Restored {} results ({}, {} targets in total)',
+  'status.restoreFailed': 'Restore failed: {}',
+  'status.dismissFailed': 'Failed to dismiss previous results: {}',
+  'status.snapshotSaved': 'Snapshot saved: {} results ({} targets) → {}',
+  'status.snapshotSavedApp': 'Snapshot saved: {} results → {}',
+  'status.snapshotSaveFailed': 'Failed to save snapshot: {}',
+  'status.capDetail': '{} ({}): {} · {}',
+  'status.specUnparsable': 'Target cannot be parsed',
+
+  // ---- Buttons ----
+  'btn.start': 'Start',
+  'btn.stop': 'Stop',
+  'btn.export': 'Export',
+  'btn.settings': 'Settings',
+  'btn.refresh': 'Refresh',
+  'btn.clear': 'Clear',
+  'btn.clearRecords': 'Clear log',
+  'btn.apply': 'Apply',
+  'btn.saveResults': 'Save results (CSV / TXT / JSON / HTML)',
+  'btn.exportDiff': 'Export round diff (CSV)',
+  'btn.enrich': 'Resolve MAC / vendor',
+  'btn.saveSnapshot': 'Save snapshot',
+  'btn.saveSnapshotShort': 'Save snapshot',
+  'btn.fingerprint': 'Port fingerprint (does not affect online status)',
+  'btn.trend': 'Uptime trend',
+  'btn.alertsWithCount': 'Alerts ({})',
+  'btn.alertsOff': 'Alerts (off by default)',
+  'btn.exportCsv': 'Export CSV',
+  'btn.exportHtml': 'Export HTML',
+  'btn.lookup': 'Look up hostname',
+  'btn.lookupBusy': 'Looking up…',
+  'btn.lookupShort': 'Lookup',
+  'btn.discard': 'Discard',
+  'btn.notNow': 'Not now',
+  'btn.restore': 'Restore',
+  'btn.saveConfig': 'Save settings',
+  'btn.findLastResult': 'Find previous results',
+
+  // ---- Form labels and placeholders ----
+  'label.target': 'Target (subnet / single host / CIDR; separate several with commas)',
+  'label.targetShort': 'Target (subnet / single host / CIDR)',
+  'label.specRange': 'Range: {}',
+  'label.segments': '({} segments)',
+  'label.mode': 'Probe mode',
+  'label.timeout': 'Timeout (ms)',
+  'label.concurrency': 'Max concurrency',
+  'label.port': 'Port',
+  'label.exportFormat': 'Export format',
+  'placeholder.target': '192.168.1 or 192.168.1.0/24, 10.0.0.1',
+  'placeholder.targetShort': '192.168.1 or 192.168.1.10',
+
+  // ---- Boundary hints ----
+  'hint.tcp': 'A successful TCP connect only means the port is open, not that ICMP is reachable; the status column shows TCP-OPEN.',
+  'hint.icmp': 'ICMP needs administrator/root privileges; without them it is recorded as permission denied rather than offline.',
+  'hint.tcpMobile': 'TCP only reflects whether the port is open; the status shows TCP-OPEN, which is not the same as ICMP reachability.',
+  'hint.icmpMobile': 'On Android, ICMP is usually denied by the system and recorded as permission denied.',
+  'hint.ipv6Icmp': 'The current target contains IPv6 addresses, but ICMPv6 is not implemented yet; switch to TCP mode.',
+  'hint.async': 'This build has the async scheduler enabled (async feature)',
+
+  // ---- Progress ----
+  'progress.completed': 'Completed {} / {}',
+  'progress.completedShort': 'Completed {}/{}',
+  'progress.online': 'Online {}',
+  'progress.detail': 'Timeout {} · Unreachable {} · Error {}',
+
+  // ---- Recognition stats and recent files ----
+  'recognized.summary': 'MAC {} · vendor {} · hostname {}',
+  'last.export': 'Last export: {}',
+  'last.snapshot': 'Last snapshot: {}',
+
+  // ---- Tabs ----
+  'tab.matrix': 'Matrix',
+  'tab.table': 'Table',
+  'tab.changes': 'Changes ({})',
+  'tab.assets': 'Assets ({})',
+  'tab.trend': 'Trend ({} rounds)',
+  'tab.alerts': 'Alerts ({})',
+  'tab.list': 'List',
+  'tab.matrixShort': 'Matrix',
+  'tab.trendShort': 'Trend ({})',
+  'tab.onlineOnly': 'Online',
+
+  // ---- Matrix view limit ----
+  'matrix.overflow': 'There are {} targets, more than the matrix view limit of 256 (one cell per last IP octet), so the matrix cannot cover them all. Switch to Table to see every result.',
+  'matrix.overflowMobile': '{} targets exceed the matrix limit of 256; use the list view.',
+
+  // ---- Continuous monitoring ----
+  'monitor.title': 'Continuous monitoring',
+  'monitor.interval': 'Interval',
+  'monitor.status': 'Round {} · {} changes · {} total',
+  'monitor.rescanIn': '· rescan in {}s',
+  'monitor.hint': 'When enabled, rescans automatically at the interval; the first round only builds a baseline and reports no changes.',
+  'monitor.mobileStatus': 'Round {} · {} changes',
+
+  // ---- Change panel ----
+  'change.fallback': 'changed',
+  'change.appeared': 'appeared',
+  'change.disappeared': 'disappeared',
+  'change.rttClassChanged': 'latency tier change',
+  'change.statusChanged': 'status change',
+  'change.head': '{} changes in total · {} rounds done',
+  'change.empty': 'No change records yet',
+  'change.emptyHint': 'The first scan only builds a baseline and produces no change records. Turn on Continuous monitoring and finish a second round, and appearances / disappearances / latency tier changes / status changes will be recorded here.',
+
+  // ---- Alert panel ----
+  'alert.titleShort': 'Alerts',
+  'alert.enabled': 'enabled',
+  'alert.disabled': 'disabled',
+  'alert.activeRules': 'active rules {}',
+  'alert.total': '{} alerts in total',
+  'alert.suppressedCooldown': '{} suppressed by cooldown',
+  'alert.suppressedMute': '{} suppressed by mute',
+  'alert.on': 'Alerts on',
+  'alert.off': 'Alerts off',
+  'alert.muted': 'Muted',
+  'alert.unmuted': 'Sound on',
+  'alert.summary': '{} alerts',
+  'alert.summaryMuted': '{} alerts (muted)',
+  'alert.note': 'Rule matching is a <b>pure function</b>: a decision only looks at the facts of this round and the previous one. The first round only builds a baseline and <b>does not report new hosts</b> — otherwise scanning a /24 would dump 255 alerts at once. Thresholds use <b>strict inequality</b>, so a value exactly equal to the threshold does not alert. <b>Muting does not change decisions</b>: rules are still evaluated and cooldowns still advance, so unmuting will not replay a backlog of alerts.',
+  'alert.thresholdTip': 'Current threshold (edit it in the form below)',
+  'alert.noThreshold': 'No threshold',
+  'alert.cooldown': 'Cooldown {}s',
+  'alert.latencyThreshold': 'Latency threshold (ms)',
+  'alert.uptimeThreshold': 'Uptime threshold (%)',
+  'alert.cooldownLabel': 'Cooldown (s)',
+  'alert.dirty': 'Unapplied changes',
+  'alert.empty': 'No alerts yet',
+  'alert.emptyHint': 'Turn on the Alerts switch above, then run a scan. Keep Continuous monitoring running for a few rounds to see whether latency is getting worse or a host starts dropping off.',
+  'alert.valueUptime': '{}% (threshold {}%)',
+  'alert.valueLatency': '{} ms (threshold {} ms)',
+
+  // ---- Assets (port fingerprint) ----
+  'fp.head': '{} hosts scanned · {} open ports ({} hosts with open ports)',
+  'fp.perScan': '· {} ports per scan',
+  'fp.banner': 'Grab service banners',
+  'fp.scanAll': 'Scan all online hosts',
+  'fp.note': 'A port fingerprint is a probe <b>independent of the online check</b>: all ports closed does not turn a host offline, and open ports do not turn an offline host online. Banners only read bytes the peer sends voluntarily; no protocol request is sent. The device type is an <b>inference</b> from vendor plus ports, and is left blank when it cannot be identified.',
+  'fp.empty': 'No port fingerprints yet',
+  'fp.emptyHint': 'First scan for online hosts, then click Scan all online hosts above (or press F). Only port-scan networks where you have **explicit authorization**.',
+  'fp.notePlain': 'Port fingerprint (extra information, independent of the online check)',
+  'fp.emptyLine': 'No fingerprint results yet: click Port fingerprint or press F to start',
+  'fp.noOpenPortsLine': '{}  no open ports',
+  'fp.noOpenPorts': 'No open ports (online status unaffected)',
+  'fp.inference': 'Inferred',
+
+  // ---- Result table ----
+  'table.ip': 'IP address',
+  'table.status': 'Status',
+  'table.mac': 'MAC address',
+  'table.vendor': 'Vendor',
+  'table.hostname': 'Hostname',
+  'table.class': 'Class',
+
+  // ---- Latency colors ----
+  'color.title': 'Latency colors',
+  'color.note': 'Color is not the only cue; each class also has its own symbol.',
+  'class.low': 'Low latency',
+  'class.mid': 'Medium latency',
+  'class.high': 'High latency',
+  'class.offline': 'No response',
+  'class.error': 'Error',
+  'class.waiting': 'Waiting',
+
+  // ---- Trend ----
+  'trend.title': 'Uptime history',
+  'trend.head': 'Span {} hours · {} points · {} rounds · kept for {} days',
+  'trend.note': 'Uptime = online rounds ÷ observed rounds. <b>For a host that has never been online, RTT shows as "-" rather than 0</b> — 0 would be read as extremely fast. Gaps in the curve mean the host <b>was not measured</b> in that round, not that it was offline. History is accumulated by this process; to keep it across sessions, use <code>cping-cli --history</code> (both ends share the same time-series core).',
+  'trend.empty': 'No uptime data yet',
+  'trend.emptyHint': 'Run a scan first; turn on Continuous monitoring in the top right and let it run a few rounds, and every host will show its uptime, latency and jitter here, along with an online-rate curve.',
+  'stat.onlineSamples': 'Online/observed',
+  'stat.avgRtt': 'Avg RTT (ms)',
+  'stat.worstRtt': 'Worst RTT (ms)',
+  'stat.jitter': 'Jitter (ms)',
+
+  // ---- Result list (mobile) ----
+  'list.empty': 'No data (turn off the Online only filter to see more)',
+
+  // ---- Matrix cells ----
+  'grid.untested': '{}: not probed',
+  'grid.tested': '{}: {}',
+  'grid.changedNote': ' · changed this round: {}',
+  'aria.matrix': 'Probe result matrix',
+
+  // ---- Restore snapshot dialog ----
+  'restore.title': 'Unfinished scan results found from last time',
+  'restore.scanTime': 'Scan time: {}',
+  'restore.prefix': 'Range: {}',
+  'restore.rows': 'Results: {} / {} targets',
+  'restore.elapsed': 'Elapsed: {}',
+  'restore.unreadable': 'This snapshot cannot be read and cannot be restored.',
+  'restore.file': 'File: {}',
+
+  // ---- File dialog filters ----
+  'filter.csv': 'CSV file',
+  'filter.txt': 'Text file',
+  'filter.json': 'JSON file',
+  'filter.html': 'HTML report',
+  'filter.snapshot': 'CPing snapshot',
+
+  // ---- Misc messages ----
+  'msg.exportExt': 'Use a .csv / .txt / .json / .html extension',
+  'msg.noDiffBaseline': 'No previous round to compare with (finish at least two scans)',
+  'msg.noOnlineForFp': 'No online hosts to fingerprint',
+  'msg.noScanResults': 'No scan results yet',
+  'msg.taskRunning': 'A task is already running; stop it first',
+  'msg.noRestore': 'No previous results to restore',
+  'msg.discarded': 'Previous results discarded',
+  'msg.ignored': 'Ignored; you will not be prompted again on next launch',
+}

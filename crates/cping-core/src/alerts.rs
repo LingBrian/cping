@@ -30,6 +30,7 @@
 //! 否则每轮开头都会刷出一片「主机离线」。
 
 use crate::classify::Thresholds;
+use crate::i18n::{self, Key, Lang};
 use crate::result::{ProbeResult, ProbeStatus};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::IpAddr;
@@ -72,13 +73,25 @@ impl AlertKind {
         }
     }
 
+    /// 中文标签（等价于 `label_in(Lang::Zh)`）。
+    ///
+    /// 核心层内部的报表与导出仍在用它——**产物内容是数据契约**：
+    /// 同一份 CSV / HTML 在中英文机器上必须一致；只有界面跟着语言变。
     pub fn label_zh(&self) -> &'static str {
-        match self {
-            AlertKind::Appeared => "新增主机",
-            AlertKind::Disappeared => "主机离线",
-            AlertKind::LatencyAbove => "延迟超阈",
-            AlertKind::UptimeBelow => "可用率偏低",
-        }
+        self.label_in(Lang::Zh)
+    }
+
+    /// 按语言渲染的标签。
+    pub fn label_in(&self, lang: Lang) -> &'static str {
+        i18n::text(
+            lang,
+            match self {
+                AlertKind::Appeared => Key::LabelAlertAppeared,
+                AlertKind::Disappeared => Key::LabelAlertDisappeared,
+                AlertKind::LatencyAbove => Key::LabelAlertLatencyAbove,
+                AlertKind::UptimeBelow => Key::LabelAlertUptimeBelow,
+            },
+        )
     }
 
     /// CLI 里 `--alert-kinds` 接受的名字。
@@ -115,12 +128,24 @@ impl Severity {
         }
     }
 
+    /// 中文标签（等价于 `label_in(Lang::Zh)`）。
+    ///
+    /// 核心层内部的报表与导出仍在用它——**产物内容是数据契约**：
+    /// 同一份 CSV / HTML 在中英文机器上必须一致；只有界面跟着语言变。
     pub fn label_zh(&self) -> &'static str {
-        match self {
-            Severity::Info => "提示",
-            Severity::Warning => "警告",
-            Severity::Critical => "严重",
-        }
+        self.label_in(Lang::Zh)
+    }
+
+    /// 按语言渲染的标签。
+    pub fn label_in(&self, lang: Lang) -> &'static str {
+        i18n::text(
+            lang,
+            match self {
+                Severity::Info => Key::LabelSeverityInfo,
+                Severity::Warning => Key::LabelSeverityWarning,
+                Severity::Critical => Key::LabelSeverityCritical,
+            },
+        )
     }
 }
 

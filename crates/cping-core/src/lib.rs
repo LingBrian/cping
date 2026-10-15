@@ -20,6 +20,8 @@ pub mod fingerprint;
 pub mod history;
 pub mod hostname;
 pub mod html;
+/// M18：国际化（中 / 英）。核心层产出「键 + 参数」，界面负责渲染。
+pub mod i18n;
 pub mod json;
 pub mod local_ip;
 pub mod monitor;
@@ -79,6 +81,7 @@ pub use hostname::{
     normalize_ptr_name, reverse_lookup, reverse_lookup_default, DEFAULT_TIMEOUT as HOSTNAME_TIMEOUT,
 };
 pub use html::render_report as render_html_report;
+pub use i18n::{render as i18n_render, text as i18n_text, Key as I18nKey, Lang};
 pub use json::{escape as json_escape, is_balanced as json_is_balanced, Json};
 pub use local_ip::{LocalAddress, LocalAddressProvider};
 pub use monitor::{
@@ -105,9 +108,9 @@ pub use notify::{
 };
 pub use oui::{entry_counts, mac_to_string, parse_mac, vendor_of, DATA_SOURCE};
 pub use policy::{
-    machine_name, operator_name, reserved_reason, AuditEvent, AuditLog, AuditRecord, Bucket,
-    RateLimiter, ScanPolicy, AUDIT_FORMAT, AUDIT_FORMAT_VERSION, CONSENT_VERSION, DEFAULT_MAX_PPS,
-    MAX_PPS_LIMIT,
+    machine_name, operator_name, reserved_kind, reserved_reason, AuditEvent, AuditLog, AuditRecord,
+    Bucket, RateLimiter, ReservedKind, ScanPolicy, ALL_RESERVED_KINDS, AUDIT_FORMAT,
+    AUDIT_FORMAT_VERSION, CONSENT_VERSION, DEFAULT_MAX_PPS, MAX_PPS_LIMIT,
 };
 pub use probe::{
     MockBackend, MockPolicy, MockResponse, ProbeBackend, ProbeOutcome, RecordingBackend,

@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue'
 import { NAlert, NButton, NEmpty, NStatistic, NTag, useMessage } from 'naive-ui'
 import { save } from '@tauri-apps/plugin-dialog'
+import { t } from '../i18n'
 import { usePingStore } from '../stores/ping'
 
 const props = withDefaults(
@@ -35,8 +36,8 @@ async function onExport(kind: 'csv' | 'html') {
     defaultPath: `uptime-${store.prefix || 'report'}.${kind}`.replace(/[^\w.\-]/g, '_'),
     filters:
       kind === 'csv'
-        ? [{ name: 'CSV 文件', extensions: ['csv'] }]
-        : [{ name: 'HTML 报告', extensions: ['html'] }],
+        ? [{ name: t('filter.csv'), extensions: ['csv'] }]
+        : [{ name: t('filter.html'), extensions: ['html'] }],
   })
   if (!path) return
   const msg = await store.exportTrend(path)
@@ -54,20 +55,26 @@ async function onClear() {
   <div ref="rootEl" class="trend-panel">
     <div class="trend-panel__head">
       <span v-if="store.trend">
-        时间跨度 <b>{{ store.trend.spanHours.toFixed(1) }}</b> 小时 ·
-        <b>{{ store.trend.points }}</b> 个时间点 · 累计 <b>{{ store.trend.rounds }}</b> 轮 ·
-        保留 {{ store.trend.retentionDays }} 天
+        {{
+          t(
+            'trend.head',
+            store.trend.spanHours.toFixed(1),
+            store.trend.points,
+            store.trend.rounds,
+            store.trend.retentionDays,
+          )
+        }}
       </span>
-      <span v-else>趋势历史</span>
+      <span v-else>{{ t('trend.title') }}</span>
       <div class="trend-panel__actions">
-        <NButton size="tiny" :loading="store.trendBusy" @click="refresh">刷新</NButton>
+        <NButton size="tiny" :loading="store.trendBusy" @click="refresh">{{ t('btn.refresh') }}</NButton>
         <NButton
           v-if="exportable"
           size="tiny"
           :disabled="!store.trend || store.trend.rows.length === 0"
           @click="onExport('csv')"
         >
-          导出 CSV
+          {{ t('btn.exportCsv') }}
         </NButton>
         <NButton
           v-if="exportable"
@@ -75,7 +82,7 @@ async function onClear() {
           :disabled="!store.trend || store.trend.rows.length === 0"
           @click="onExport('html')"
         >
-          导出 HTML
+          {{ t('btn.exportHtml') }}
         </NButton>
         <NButton
           size="tiny"
@@ -83,28 +90,22 @@ async function onClear() {
           :disabled="!store.trend || store.trend.points === 0"
           @click="onClear"
         >
-          清空
+          {{ t('btn.clear') }}
         </NButton>
       </div>
     </div>
 
-    <!-- 两条边界必须写清楚，否则这张表很容易被读错 -->
-    <div class="trend-panel__note">
-      可用率 = 在线轮数 ÷ 观测轮数。<b>从未在线的主机，RTT 显示为「-」而不是 0</b>——
-      0 会被读成「极快」。曲线断开的那些点表示该轮<b>没测到</b>这台主机，不是「离线」。
-      历史由本进程累积；需要跨会话长期保留，请用 <code>cping-cli --history</code>
-      （两端共用同一套时序核心）。
-    </div>
+    <!-- 两条边界必须写清楚，否则这张表很容易被读错（内容静态，用 v-html 保留 <b>/<code> 强调） -->
+    <div class="trend-panel__note" v-html="t('trend.note')" />
 
     <NAlert v-if="store.trend?.emptyHint" type="info" :bordered="false" style="margin-bottom: 12px">
       {{ store.trend.emptyHint }}
     </NAlert>
 
-    <NEmpty v-if="!store.trend || store.trend.rows.length === 0" description="还没有可用率数据">
+    <NEmpty v-if="!store.trend || store.trend.rows.length === 0" :description="t('trend.empty')">
       <template #extra>
         <div style="font-size: 12px; color: #6b7280; max-width: 420px; line-height: 1.6">
-          先做一次扫描；打开右上角的「持续监控」连续跑几轮，这里就会出现每台主机的
-          可用率、延迟与抖动，以及一条在线率曲线。
+          {{ t('trend.emptyHint') }}
         </div>
       </template>
     </NEmpty>
@@ -127,10 +128,10 @@ async function onClear() {
         -->
         <div class="trend-panel__spark" v-html="r.sparkline" />
         <div class="trend-panel__nums">
-          <NStatistic size="small" label="在线/观测" :value="`${r.online}/${r.samples}`" />
-          <NStatistic size="small" label="平均 RTT (ms)" :value="r.avgRttText" />
-          <NStatistic size="small" label="最差 RTT (ms)" :value="r.worstRttText" />
-          <NStatistic size="small" label="抖动 (ms)" :value="r.jitterText" />
+          <NStatistic size="small" :label="t('stat.onlineSamples')" :value="`${r.online}/${r.samples}`" />
+          <NStatistic size="small" :label="t('stat.avgRtt')" :value="r.avgRttText" />
+          <NStatistic size="small" :label="t('stat.worstRtt')" :value="r.worstRttText" />
+          <NStatistic size="small" :label="t('stat.jitter')" :value="r.jitterText" />
         </div>
       </div>
     </div>

@@ -33,6 +33,42 @@
 
 ## [未发布]
 
+### 新增
+
+- **国际化（i18n）：中 / 英双语**（M18 第一步：机制 + 三端界面文案）
+  - 核心层新增 `cping-core::i18n`：`Lang`（`zh` / `en`）+ `Key` + 双语字典 +
+    `render_template`。**键是枚举、不是字符串**——`t("typo")` 会在运行期静默
+    显示成键名本身，而 `Key::Typo` 直接编译不过
+  - **「漏译」是红灯，不是等用户截图**：`english_has_no_cjk`（英文条目里出现
+    中日韩字符即失败）、`placeholders_match`（中英条目的 `{}` 个数必须相同）、
+    `table_covers_every_key`（`TABLE` 与 `ordinal` 必须是双射）、
+    `enum_labels_are_localized_both_ways`（从枚举一路走到渲染结果，
+    抓「映射到了错的条目」）
+  - **错误有两份表示**：稳定的错误码（`CoreError::code()` / `ProbeError::kind()`）
+    与渲染后的句子（`localized(lang)`）。`Display` 就等于 `localized(Lang::Zh)`
+    ——**共用一处实现**，不会出现「改了中文忘了改另一处」
+  - 核心层 14 个枚举（结果类别、探测状态、变更种类、告警种类与严重级、后端、
+    目标范围、审计事件、设备置信度……）统一加 `label_in(lang)`，
+    `label_zh()` 变成它的转发——**中文只有一个来源**，
+    不再散落在 14 个各自的 `match` 里各自漂移
+  - 三端各自的字典（键空间是分开的：核心层说「逻辑发生了什么」，
+    界面说「这个界面在说什么」）：CLI 148 键、TUI 225 键、GUI 241 键。
+    GUI 用 TypeScript 类型（`Dict = Record<keyof typeof zh, string>`）
+    + 零依赖校验脚本 `scripts/check-i18n.mjs` 双保险
+  - **语言来源**：`--lang`（CLI / TUI）或设置面板（GUI）→ `CPING_LANG` →
+    `LC_ALL` → `LC_MESSAGES` → `LANG` → 默认中文。
+    `C` / `POSIX` 视为「没有偏好」而**不是**「请用英文」
+    ——服务器的默认 locale 不该决定用户看到什么
+  - `--lang` 取值非法**报错**（CLI 退出码 2）而不是静默忽略：
+    「静默忽略用户显式给的参数」是本项目最不能接受的一类 bug。
+    唯一的例外是 TUI：它是交互式程序，启动后用户还能在状态栏看到告警并修正，
+    沿用该程序既有的「参数告警不退出」惯例
+  - **刻意不翻译的东西**：CSV / JSON 的列名与字段名（**数据契约**——同一份报表
+    在中英文机器上必须一致，下游脚本依赖它）、快照与时序的文件格式、
+    TUI / GUI 的状态符号（`#` `+` `*` `-` `!` `.`）、命令行参数名、
+    来自操作系统的原始错误详情（`No such file (os error 2)` 翻了反而更难搜）、
+    **以及代码注释**
+
 ### 修正
 
 - **CI 与全新克隆无法构建：仓库内 `.cargo/config.toml` 硬编码了 `[net] offline = true`**

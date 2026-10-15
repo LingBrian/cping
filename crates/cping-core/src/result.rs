@@ -2,6 +2,7 @@
 //!
 //! 这是 GUI 与 TUI **唯一**共享的结果模型：两侧都不得自行定义状态或统计口径。
 
+use crate::i18n::{self, Key, Lang};
 use std::net::IpAddr;
 
 /// 任务标识：每个探测任务一个唯一 `task_id`。
@@ -57,16 +58,28 @@ impl ProbeStatus {
     }
 
     /// 界面显示用中文标签。
+    /// 中文标签（等价于 `label_in(Lang::Zh)`）。
+    ///
+    /// 核心层内部的报表与导出仍在用它——**产物内容是数据契约**：
+    /// 同一份 CSV / HTML 在中英文机器上必须一致；只有界面跟着语言变。
     pub fn label_zh(&self) -> &'static str {
-        match self {
-            ProbeStatus::Pending => "等待",
-            ProbeStatus::Online { .. } => "在线",
-            ProbeStatus::Timeout => "超时",
-            ProbeStatus::Unreachable => "不可达",
-            ProbeStatus::PermissionDenied => "权限不足",
-            ProbeStatus::Unsupported => "不支持",
-            ProbeStatus::Error(_) => "错误",
-        }
+        self.label_in(Lang::Zh)
+    }
+
+    /// 按语言渲染的标签。
+    pub fn label_in(&self, lang: Lang) -> &'static str {
+        i18n::text(
+            lang,
+            match self {
+                ProbeStatus::Pending => Key::LabelStatusPending,
+                ProbeStatus::Online { .. } => Key::LabelStatusOnline,
+                ProbeStatus::Timeout => Key::LabelStatusTimeout,
+                ProbeStatus::Unreachable => Key::LabelStatusUnreachable,
+                ProbeStatus::PermissionDenied => Key::LabelStatusPermissionDenied,
+                ProbeStatus::Unsupported => Key::LabelStatusUnsupported,
+                ProbeStatus::Error(_) => Key::LabelStatusError,
+            },
+        )
     }
 
     /// 备注字段：仅在需要解释失败原因时返回内容。

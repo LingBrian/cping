@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted } from 'vue'
 import { NButton, NEmpty } from 'naive-ui'
+import { t } from '../i18n'
 import { usePingStore } from '../stores/ping'
 
 const store = usePingStore()
@@ -19,19 +20,18 @@ function kindClass(kind: string): string {
   <div class="change-panel">
     <div class="change-panel__head">
       <span>
-        累计 <b>{{ store.changeTotal }}</b> 条变化 · 已完成 <b>{{ store.round }}</b> 轮
+        {{ t('change.head', store.changeTotal, store.round) }}
       </span>
       <span v-if="store.diffSummary" class="change-panel__diff">{{ store.diffSummary }}</span>
-      <NButton size="tiny" quaternary @click="store.loadChanges()">刷新</NButton>
+      <NButton size="tiny" quaternary @click="store.loadChanges()">{{ t('btn.refresh') }}</NButton>
     </div>
 
     <!-- 空态要解释清楚「为什么没有变化」，否则用户会以为功能坏了 -->
     <div v-if="store.changeFeed.length === 0" class="change-panel__empty">
-      <NEmpty description="还没有变化记录">
+      <NEmpty :description="t('change.empty')">
         <template #extra>
           <div style="font-size: 12px; color: #6b7280; max-width: 320px; line-height: 1.6">
-            首轮扫描只建立基线，不会产生变化记录。开启「持续监控」完成第二轮后，
-            上线 / 离线 / 延迟档位变化 / 状态变化都会记在这里。
+            {{ t('change.emptyHint') }}
           </div>
         </template>
       </NEmpty>
@@ -39,7 +39,7 @@ function kindClass(kind: string): string {
 
     <ul v-else class="change-panel__list">
       <li v-for="(c, i) in store.changeFeed" :key="`${c.round}-${c.index}-${i}`" class="change-panel__item">
-        <span class="change-panel__round">第 {{ c.round }} 轮</span>
+        <span class="change-panel__round">{{ t('round.n', c.round) }}</span>
         <span :class="kindClass(c.kind)">{{ c.kindLabel }}</span>
         <span class="change-panel__ip cping-mono">{{ c.ip }}</span>
         <span class="change-panel__summary">{{ c.summary }}</span>

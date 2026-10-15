@@ -14,6 +14,7 @@
 //!
 //! 指纹规则表是纯数据（常量数组），匹配是纯函数，全部可离线单测。
 
+use crate::i18n::{self, Key, Lang};
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
@@ -356,11 +357,23 @@ pub enum Confidence {
 }
 
 impl Confidence {
+    /// 中文标签（等价于 `label_in(Lang::Zh)`）。
+    ///
+    /// 核心层内部的报表与导出仍在用它——**产物内容是数据契约**：
+    /// 同一份 CSV / HTML 在中英文机器上必须一致；只有界面跟着语言变。
     pub fn label_zh(&self) -> &'static str {
-        match self {
-            Confidence::Low => "低",
-            Confidence::Medium => "中",
-        }
+        self.label_in(Lang::Zh)
+    }
+
+    /// 按语言渲染的标签。
+    pub fn label_in(&self, lang: Lang) -> &'static str {
+        i18n::text(
+            lang,
+            match self {
+                Confidence::Low => Key::LabelConfidenceLow,
+                Confidence::Medium => Key::LabelConfidenceMedium,
+            },
+        )
     }
 }
 

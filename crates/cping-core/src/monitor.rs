@@ -10,6 +10,7 @@
 //!   [`crate::classify`] 的阈值，**不在这里另立一套分档**。
 
 use crate::classify::{classify_rtt, LatencyClass, Thresholds};
+use crate::i18n::{self, Key, Lang};
 use crate::result::{ProbeResult, ProbeStatus};
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
@@ -99,13 +100,25 @@ impl ChangeKind {
         }
     }
 
-    pub const fn label_zh(self) -> &'static str {
-        match self {
-            ChangeKind::Appeared => "上线",
-            ChangeKind::Disappeared => "离线",
-            ChangeKind::RttClassChanged => "延迟变化",
-            ChangeKind::StatusChanged => "状态变化",
-        }
+    /// 中文标签（等价于 `label_in(Lang::Zh)`）。
+    ///
+    /// 核心层内部的报表与导出仍在用它——**产物内容是数据契约**：
+    /// 同一份 CSV / HTML 在中英文机器上必须一致；只有界面跟着语言变。
+    pub fn label_zh(self) -> &'static str {
+        self.label_in(Lang::Zh)
+    }
+
+    /// 按语言渲染的标签。
+    pub fn label_in(self, lang: Lang) -> &'static str {
+        i18n::text(
+            lang,
+            match self {
+                ChangeKind::Appeared => Key::LabelChangeAppeared,
+                ChangeKind::Disappeared => Key::LabelChangeDisappeared,
+                ChangeKind::RttClassChanged => Key::LabelChangeRttClassChanged,
+                ChangeKind::StatusChanged => Key::LabelChangeStatusChanged,
+            },
+        )
     }
 
     pub const ALL: [ChangeKind; 4] = [

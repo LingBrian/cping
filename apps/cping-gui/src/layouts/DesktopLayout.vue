@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import {
   NButton,
   NInputNumber,
@@ -13,6 +13,7 @@ import { save } from '@tauri-apps/plugin-dialog'
 import ChangePanel from '../components/ChangePanel.vue'
 import ColorSettings from '../components/ColorSettings.vue'
 import FingerprintPanel from '../components/FingerprintPanel.vue'
+import LanguageSettings from '../components/LanguageSettings.vue'
 import PrefixForm from '../components/PrefixForm.vue'
 import ProgressSummary from '../components/ProgressSummary.vue'
 import ResultGrid from '../components/ResultGrid.vue'
@@ -20,6 +21,7 @@ import ResultTable from '../components/ResultTable.vue'
 import StatusBar from '../components/StatusBar.vue'
 import AlertPanel from '../components/AlertPanel.vue'
 import TrendPanel from '../components/TrendPanel.vue'
+import { t } from '../i18n'
 import { MONITOR_INTERVALS, type ExportFormatKey } from '../shared/types'
 import { usePingStore } from '../stores/ping'
 
@@ -38,15 +40,21 @@ watch(tab, (v) => {
   if (v === 'alerts') void store.loadAlerts()
 })
 
-const monitorOptions = MONITOR_INTERVALS.map((s) => ({ label: `${s} 秒`, value: s }))
+// 用 computed 而不是常量：语言切换后下拉选项里的「秒 / s」要立刻跟着变
+const monitorOptions = computed(() =>
+  MONITOR_INTERVALS.map((s) => ({ label: t('unit.seconds', s), value: s })),
+)
 
-/** 导出格式由扩展名决定，和 Rust 侧的 `ExportFormat::from_path` 一一对应。 */
-const EXPORT_FILTERS = [
-  { name: 'CSV 文件', extensions: ['csv'] },
-  { name: '文本文件', extensions: ['txt'] },
-  { name: 'JSON 文件', extensions: ['json'] },
-  { name: 'HTML 报告', extensions: ['html'] },
-]
+/**
+ * 导出格式由扩展名决定，和 Rust 侧的 `ExportFormat::from_path` 一一对应。
+ * 这里的 name 只是文件对话框里的过滤器标题（给人看的），扩展名才是契约。
+ */
+const exportFilters = computed(() => [
+  { name: t('filter.csv'), extensions: ['csv'] },
+  { name: t('filter.txt'), extensions: ['txt'] },
+  { name: t('filter.json'), extensions: ['json'] },
+  { name: t('filter.html'), extensions: ['html'] },
+])
 
 function formatOf(path: string): ExportFormatKey | null {
   const lower = path.toLowerCase()
@@ -65,20 +73,22 @@ function fileStem(): string {
 
 async function onExport() {
   if (store.stats.completed === 0) {
-    message.warning('还没有已完成的结果')
+    message.warning(t('status.noResults'))
     return
   }
   const path = await save({
     defaultPath: `${fileStem()}.csv`,
-    filters: EXPORT_FILTERS,
+    filters: exportFilters.value,
   })
   if (!path) return
   const fmt = formatOf(path)
   if (!fmt) {
-    message.error('请用 .csv / .txt / .json / .html 扩展名')
+    message.error(t('msg.exportExt'))
     return
   }
   await store.exportTo(path)
+  // 导出成功的提示是**后端**返回的成品文案，这里只能按它的中文前缀判断成败。
+  // 该判断与界面语言无关（后端文案不随前端语言变化），所以保持原样，避免改动行为。
   if (store.status.startsWith('已导出')) message.success(store.status)
   else message.error(store.status)
 }
@@ -86,12 +96,12 @@ async function onExport() {
 /** M10：导出「上一轮 → 本轮」差异（只有 .csv）。 */
 async function onExportDiff() {
   if (!store.diffSummary) {
-    message.warning('还没有可对比的上一轮结果（至少完成两轮扫描）')
+    message.warning(t('msg.noDiffBaseline'))
     return
   }
   const path = await save({
     defaultPath: `${fileStem()}-diff.csv`,
-    filters: [{ name: 'CSV 文件', extensions: ['csv'] }],
+    filters: [{ name: t('filter.csv'), extensions: ['csv'] }],
   })
   if (!path) return
   if (await store.exportDiffTo(path)) message.success(store.status)
@@ -101,7 +111,7 @@ async function onExportDiff() {
 /** M7：读本机邻居表回填 MAC，并据 IEEE 注册数据补厂商。 */
 async function onEnrich() {
   if (store.stats.completed === 0) {
-    message.warning('还没有已完成的结果')
+    message.warning(t('status.noResults'))
     return
   }
   const msg = await store.enrich()
@@ -112,7 +122,7 @@ async function onEnrich() {
 /** M13：对在线主机做端口指纹。**不动 results**：端口全关的主机照样是在线。 */
 async function onFingerprint() {
   if (store.stats.online === 0) {
-    message.warning('没有在线主机可做端口指纹')
+    message.warning(t('msg.noOnlineForFp'))
     return
   }
   const msg = await store.runFingerprint(null)
@@ -139,12 +149,12 @@ async function onShowAlerts() {
 /** M7：把当前结果存成快照，下次启动可以直接恢复。 */
 async function onSaveSnapshot() {
   if (store.targets.length === 0) {
-    message.warning('还没有扫描结果')
+    message.warning(t('msg.noScanResults'))
     return
   }
   const path = await save({
     defaultPath: `${fileStem()}.snap`,
-    filters: [{ name: 'CPing 快照', extensions: ['snap'] }],
+    filters: [{ name: t('filter.snapshot'), extensions: ['snap'] }],
   })
   if (!path) return
   const saved = await store.saveSnapshot(path)
@@ -162,11 +172,11 @@ async function onSaveSnapshot() {
       <!-- M8：持续监控。间隔用下拉而不是输入框，避免随手填出 1 秒把网段打满。 -->
       <div class="cping-panel">
         <div style="display: flex; align-items: center; justify-content: space-between">
-          <span style="font-size: 13px">持续监控</span>
+          <span style="font-size: 13px">{{ t('monitor.title') }}</span>
           <NSwitch :value="store.monitorEnabled" size="small" @update:value="store.toggleMonitor()" />
         </div>
         <div style="display: flex; align-items: center; gap: 8px; margin-top: 8px">
-          <span style="font-size: 12px; color: #6b7280">间隔</span>
+          <span style="font-size: 12px; color: #6b7280">{{ t('monitor.interval') }}</span>
           <NSelect
             :value="store.monitorInterval"
             size="small"
@@ -187,26 +197,26 @@ async function onSaveSnapshot() {
         </div>
         <div style="font-size: 11px; color: #6b7280; margin-top: 6px">
           <template v-if="store.monitorEnabled">
-            第 {{ store.round }} 轮 · 变化 {{ store.changes.length }} 条 · 累计
-            {{ store.changeTotal }} 条
+            {{ t('monitor.status', store.round, store.changes.length, store.changeTotal) }}
             <template v-if="store.secondsToNextRound != null">
-              · {{ store.secondsToNextRound }}s 后重扫
+              {{ t('monitor.rescanIn', store.secondsToNextRound) }}
             </template>
           </template>
           <template v-else>
-            开启后按间隔自动重扫；首轮只建立基线，不报变化。
+            {{ t('monitor.hint') }}
           </template>
         </div>
       </div>
 
       <ColorSettings />
+      <LanguageSettings />
       <div class="cping-panel">
         <div style="display: flex; align-items: center; justify-content: space-between">
-          <span style="font-size: 13px">仅显示在线</span>
+          <span style="font-size: 13px">{{ t('common.onlineOnly') }}</span>
           <NSwitch v-model:value="store.hideOffline" size="small" />
         </div>
         <NButton style="width: 100%; margin-top: 8px" @click="onExport">
-          保存结果（CSV / TXT / JSON / HTML）
+          {{ t('btn.saveResults') }}
         </NButton>
         <!-- M10：差异报告 -->
         <NButton
@@ -214,7 +224,7 @@ async function onSaveSnapshot() {
           :disabled="!store.diffSummary"
           @click="onExportDiff"
         >
-          导出本轮差异（CSV）
+          {{ t('btn.exportDiff') }}
         </NButton>
         <!-- M7：目标信息补全 与 快照 -->
         <NButton
@@ -222,14 +232,14 @@ async function onSaveSnapshot() {
           :disabled="store.stats.completed === 0"
           @click="onEnrich"
         >
-          补全 MAC / 厂商
+          {{ t('btn.enrich') }}
         </NButton>
         <NButton
           style="width: 100%; margin-top: 8px"
           :disabled="store.targets.length === 0"
           @click="onSaveSnapshot"
         >
-          保存快照
+          {{ t('btn.saveSnapshot') }}
         </NButton>
         <!-- M13：资产识别。按钮文案直说边界，避免被误读成「再扫一遍在线」。 -->
         <NButton
@@ -238,19 +248,18 @@ async function onSaveSnapshot() {
           :disabled="store.stats.online === 0"
           @click="onFingerprint"
         >
-          端口指纹（不影响在线判定）
+          {{ t('btn.fingerprint') }}
         </NButton>
         <!-- M14：历史与趋势。没有历史也允许打开——空状态会说明怎么攒数据。 -->
         <NButton style="width: 100%; margin-top: 8px" @click="onShowTrend">
-          可用率趋势
+          {{ t('btn.trend') }}
         </NButton>
         <!-- M15：告警。文案直接写明「默认关闭」——不问就发通知比不装还糟。 -->
         <NButton style="width: 100%; margin-top: 8px" @click="onShowAlerts">
-          告警{{ store.alertCount > 0 ? `（${store.alertCount} 条）` : '（默认关闭）' }}
+          {{ store.alertCount > 0 ? t('btn.alertsWithCount', store.alertCount) : t('btn.alertsOff') }}
         </NButton>
         <div style="font-size: 11px; color: #6b7280; margin-top: 6px">
-          已识别 MAC {{ store.recognized.mac }} · 厂商 {{ store.recognized.vendor }} · 主机名
-          {{ store.recognized.hostname }}
+          {{ t('recognized.summary', store.recognized.mac, store.recognized.vendor, store.recognized.hostname) }}
         </div>
         <div
           v-if="store.lastExport"
@@ -264,7 +273,7 @@ async function onSaveSnapshot() {
           "
           :title="store.lastExport"
         >
-          上次导出：{{ store.lastExport }}
+          {{ t('last.export', store.lastExport) }}
         </div>
         <div
           v-if="store.lastSnapshot"
@@ -278,31 +287,30 @@ async function onSaveSnapshot() {
           "
           :title="store.lastSnapshot"
         >
-          上次快照：{{ store.lastSnapshot }}
+          {{ t('last.snapshot', store.lastSnapshot) }}
         </div>
       </div>
     </div>
 
     <div class="desktop__main">
       <NTabs v-model:value="tab" type="line" animated style="height: 100%">
-        <NTabPane name="matrix" tab="图形显示" display-directive="show">
+        <NTabPane name="matrix" :tab="t('tab.matrix')" display-directive="show">
           <div style="height: 100%; padding-top: 8px; min-height: 0">
             <!-- M9：目标超过 256 个时矩阵无法表示（一格一 IP 末段），
                  这时明确说明并让用户走表格，而不是悄悄少显示。 -->
             <div v-if="!store.canUseMatrix" class="cping-panel" style="font-size: 12px">
-              当前目标 {{ store.stats.total }} 个，超过矩阵视图上限 256 个（一格对应一个 IP 末段），
-              无法用图形显示完整覆盖。请切到「表单显示」查看全部结果。
+              {{ t('matrix.overflow', store.stats.total) }}
             </div>
             <ResultGrid v-else />
           </div>
         </NTabPane>
-        <NTabPane name="table" tab="表单显示" display-directive="show">
+        <NTabPane name="table" :tab="t('tab.table')" display-directive="show">
           <div style="height: 100%; padding-top: 8px; min-height: 0">
             <ResultTable />
           </div>
         </NTabPane>
         <!-- M8：变化页签。标签上直接带条数，不涨用户来回切换才知道有没有变化。 -->
-        <NTabPane name="changes" :tab="`变化 (${store.changes.length})`" display-directive="show">
+        <NTabPane name="changes" :tab="t('tab.changes', store.changes.length)" display-directive="show">
           <div style="height: 100%; padding-top: 8px; min-height: 0">
             <ChangePanel />
           </div>
@@ -310,7 +318,7 @@ async function onSaveSnapshot() {
         <!-- M13：资产识别。标签带主机数，与「变化」页签同一套提示逻辑。 -->
         <NTabPane
           name="assets"
-          :tab="`资产 (${store.fingerprintedHosts})`"
+          :tab="t('tab.assets', store.fingerprintedHosts)"
           display-directive="show"
         >
           <div style="height: 100%; padding-top: 8px; min-height: 0">
@@ -320,7 +328,7 @@ async function onSaveSnapshot() {
         <!-- M14：历史与趋势。标签带轮数——用户一眼能看出「攒了多少账」。 -->
         <NTabPane
           name="trend"
-          :tab="`趋势 (${store.trend?.rounds ?? 0} 轮)`"
+          :tab="t('tab.trend', store.trend?.rounds ?? 0)"
           display-directive="show"
         >
           <div style="height: 100%; padding-top: 8px; min-height: 0">
@@ -330,7 +338,7 @@ async function onSaveSnapshot() {
         <!-- M15：告警。标签带条数——攒下的告警一眼可见。 -->
         <NTabPane
           name="alerts"
-          :tab="`告警 (${store.alertCount})`"
+          :tab="t('tab.alerts', store.alertCount)"
           display-directive="show"
         >
           <div style="height: 100%; padding-top: 8px; min-height: 0">

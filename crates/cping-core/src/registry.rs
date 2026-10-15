@@ -26,6 +26,7 @@
 //! | `tcp` | TCP | ✅ | ✅ | TCP 握手，无特权即可运行；IPv6 的完整路径 |
 //! | `mock` | — | ✅ | ✅ | 仅测试用，不出现在选择列表里 |
 
+use crate::i18n::{self, Key, Lang};
 use crate::probe::ProbeBackend;
 use crate::spec::ProbeMode;
 use std::net::IpAddr;
@@ -54,13 +55,25 @@ impl BackendId {
         }
     }
 
-    pub const fn label_zh(self) -> &'static str {
-        match self {
-            BackendId::Icmp4 => "原生 ICMP（IPv4）",
-            BackendId::Icmp6 => "原生 ICMP（IPv6）",
-            BackendId::Tcp => "TCP 连接",
-            BackendId::Mock => "模拟（测试）",
-        }
+    /// 中文标签（等价于 `label_in(Lang::Zh)`）。
+    ///
+    /// 核心层内部的报表与导出仍在用它——**产物内容是数据契约**：
+    /// 同一份 CSV / HTML 在中英文机器上必须一致；只有界面跟着语言变。
+    pub fn label_zh(self) -> &'static str {
+        self.label_in(Lang::Zh)
+    }
+
+    /// 按语言渲染的标签。
+    pub fn label_in(self, lang: Lang) -> &'static str {
+        i18n::text(
+            lang,
+            match self {
+                BackendId::Icmp4 => Key::LabelBackendIcmp4,
+                BackendId::Icmp6 => Key::LabelBackendIcmp6,
+                BackendId::Tcp => Key::LabelBackendTcp,
+                BackendId::Mock => Key::LabelBackendMock,
+            },
+        )
     }
 
     pub const ALL: [BackendId; 4] = [
@@ -215,27 +228,36 @@ impl BackendRegistry {
 
     /// 面向界面的一行能力摘要，例如：
     /// `ICMP 需要权限（仅 IPv4）；IPv6 目标请用 TCP`。
+    /// 中文摘要（等价于 `summary_in(Lang::Zh)`）。
     pub fn summary_zh(&self) -> String {
+        self.summary_in(Lang::Zh)
+    }
+
+    /// 按语言渲染的能力摘要。
+    ///
+    /// 连**分隔符**也要跟着语言走：中文用全角分号，英文用 `"; "`。
+    /// 把中文标点留在英文句子里，读起来是「一眼假」的机器翻译味。
+    pub fn summary_in(&self, lang: Lang) -> String {
         let icmp = self.caps_of(BackendId::Icmp4);
         let tcp = self.caps_of(BackendId::Tcp);
         let mut parts = Vec::new();
         if icmp.available {
             parts.push(if icmp.needs_privilege {
-                "ICMP 可用（需要原始套接字权限，仅 IPv4）".to_string()
+                i18n::text(lang, Key::RegistryIcmpAvailablePrivileged).to_string()
             } else {
-                "ICMP 可用（仅 IPv4）".to_string()
+                i18n::text(lang, Key::RegistryIcmpAvailable).to_string()
             });
         } else {
-            parts.push("ICMP 不可用".to_string());
+            parts.push(i18n::text(lang, Key::RegistryIcmpUnavailable).to_string());
         }
         if tcp.available && tcp.ipv6 {
-            parts.push("TCP 可用（IPv4 + IPv6）".to_string());
+            parts.push(i18n::text(lang, Key::RegistryTcpAvailable).to_string());
         }
         let icmp6 = self.caps_of(BackendId::Icmp6);
         if !icmp6.available {
-            parts.push("ICMPv6 未实装，IPv6 目标请用 TCP".to_string());
+            parts.push(i18n::text(lang, Key::RegistryIcmp6Missing).to_string());
         }
-        parts.join("；")
+        parts.join(i18n::text(lang, Key::RegistrySeparator))
     }
 }
 

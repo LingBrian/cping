@@ -13,6 +13,7 @@
 use crate::classify::{classify_rtt, LatencyClass, Thresholds};
 use crate::error::CoreResult;
 use crate::export::csv_escape;
+use crate::i18n::{self, Key, Lang};
 use crate::result::{ProbeResult, ProbeStatus};
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -55,15 +56,27 @@ impl DiffKind {
         }
     }
 
-    pub const fn label_zh(self) -> &'static str {
-        match self {
-            DiffKind::Appeared => "新上线",
-            DiffKind::Disappeared => "已离线",
-            DiffKind::LatencyChanged => "延迟变化",
-            DiffKind::StatusChanged => "状态变化",
-            DiffKind::OnlyInBase => "仅旧结果",
-            DiffKind::OnlyInNext => "仅新结果",
-        }
+    /// 中文标签（等价于 `label_in(Lang::Zh)`）。
+    ///
+    /// 核心层内部的报表与导出仍在用它——**产物内容是数据契约**：
+    /// 同一份 CSV / HTML 在中英文机器上必须一致；只有界面跟着语言变。
+    pub fn label_zh(self) -> &'static str {
+        self.label_in(Lang::Zh)
+    }
+
+    /// 按语言渲染的标签。
+    pub fn label_in(self, lang: Lang) -> &'static str {
+        i18n::text(
+            lang,
+            match self {
+                DiffKind::Appeared => Key::LabelDiffAppeared,
+                DiffKind::Disappeared => Key::LabelDiffDisappeared,
+                DiffKind::LatencyChanged => Key::LabelDiffLatencyChanged,
+                DiffKind::StatusChanged => Key::LabelDiffStatusChanged,
+                DiffKind::OnlyInBase => Key::LabelDiffOnlyInBase,
+                DiffKind::OnlyInNext => Key::LabelDiffOnlyInNext,
+            },
+        )
     }
 
     /// 是否是「值得关注」的变化（用于统计与高亮）。

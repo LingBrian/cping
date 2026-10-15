@@ -171,11 +171,18 @@ export const MONITOR_INTERVALS = [5, 10, 30, 60, 300, 900] as const
 /** M9：常用 TCP 端口 */
 export const COMMON_TCP_PORTS = [22, 23, 80, 135, 139, 443, 445, 3389] as const
 
-export const CHANGE_LABELS: Record<ChangeKindKey, string> = {
-  appeared: '上线',
-  disappeared: '离线',
-  rtt_class_changed: '延迟变化',
-  status_changed: '状态变化',
+/**
+ * 变化种类的**标签**：这里只保留「种类 → i18n 键」的映射，真正的文案在
+ * `src/i18n/zh.ts` / `en.ts` 的 `change.*` 下。
+ *
+ * 为什么不直接把中文写在这里：这里是 DTO 定义，被服务层和 store 共用，
+ * 一旦内嵌中文就跟着界面语言变不了。改成键映射后，取文案统一走 `t()`。
+ */
+export const CHANGE_LABEL_KEYS: Record<ChangeKindKey, string> = {
+  appeared: 'change.appeared',
+  disappeared: 'change.disappeared',
+  rtt_class_changed: 'change.rttClassChanged',
+  status_changed: 'change.statusChanged',
 }
 
 export type ProbeEventDto =
@@ -243,12 +250,16 @@ export const DEFAULT_COLORS: ColorConfigDto = {
   error: '#FF6B6B',
 }
 
-export const CLASS_LABELS: Record<ResultClassKey, string> = {
-  low: '低延迟',
-  mid: '中延迟',
-  high: '高延迟',
-  offline: '无回应',
-  error: '错误',
+/**
+ * 时延类别（low/mid/high/offline/error）的**标签**同样只留键映射，
+ * 文案在 `src/i18n/*.ts` 的 `class.*` 下。符号表则与语言无关，保持原样。
+ */
+export const CLASS_LABEL_KEYS: Record<ResultClassKey, string> = {
+  low: 'class.low',
+  mid: 'class.mid',
+  high: 'class.high',
+  offline: 'class.offline',
+  error: 'class.error',
 }
 
 /** 无颜色时也必须可区分：每个类别有自己的符号 */

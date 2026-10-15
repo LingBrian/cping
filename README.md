@@ -8,7 +8,7 @@ Rust 核心 · TUI（ratatui）· 桌面 GUI（Tauri 2 + Vue 3）· Android
 
 [![Release](https://img.shields.io/badge/release-v2.5.0-111827)](../../releases)
 [![CI](https://github.com/LingBrian/cping/actions/workflows/ci.yml/badge.svg)](https://github.com/LingBrian/cping/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-460%20passed-brightgreen)](docs/testing.md)
+[![Tests](https://img.shields.io/badge/tests-507%20passed-brightgreen)](docs/testing.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20Android-lightgrey)](docs/platform-compatibility.md)
 
@@ -79,6 +79,7 @@ cping/
 │   ├── timefmt                         M15：时间算法（三端共用，同一处实现）
 │   ├── profile                         M16：配置文件 · 命名模板 · schema 版本与迁移 · 未知键保留
 │   ├── policy                          M17：令牌桶限速 · 保留网段守卫 · 审计日志 · 首次授权告知
+│   ├── i18n                            M18：中英双语字典 · 语言协商 · 漏译自动检查
 │   ├── oui/neighbor/hostname/enrich    M7：厂商识别 · ARP 取 MAC · 反查主机名 · 信息补全
 │   ├── snapshot                        结果快照落盘与恢复（严格解析，坏数据宁可报错）
 │   ├── data/                           IEEE OUI 三表（54,190 条，编译期嵌入）
@@ -151,9 +152,24 @@ cping-cli -t 10.0.0.0/24 -c 64 --dump-config nightly.toml   # 把生效参数固
 cping-cli -t 192.168.1 --max-pps 200 --max-targets 512      # 速率上限（pps）/ 目标数上限
 cping-cli -t 192.168.1 --watch 30 --audit scan-audit.jsonl  # 追加审计记录（JSONL，可导出自证）
 cping-cli -t 192.0.2.5 --allow-reserved                     # 显式放行保留网段（默认拒绝）
+# M18：中英双语（不给 --lang 则跟随 CPING_LANG / LC_ALL / LC_MESSAGES / LANG）
+cping-cli --lang en --help                                  # 英文帮助与英文报错
+CPING_LANG=en cping-cli -t 192.168.1                        # 也可以用环境变量
 ```
 
 退出码：`0` 全部在线 / `1` 存在离线 / `2` 参数错误 / `3` 权限不足或后端不可用。
+
+> **双语（M18）**：三端都能说中英两种话。核心层产出的是**键 + 参数**
+> （错误还额外有稳定的 `code()`，脚本判断错误类别时用它，
+> **不要匹配消息文本**——那句话随时会因为改措辞而变化），句子在界面侧渲染。
+> 字典漏译是**红灯而不是等用户截图**：英文条目里出现中日韩字符、
+> 中英条目 `{}` 个数不等、`TABLE` 与键序号不是双射，任何一条都会让测试失败。
+> **刻意不翻译**的是：CSV / JSON 的列名与字段名、快照与时序的文件格式、
+> 状态符号（`#` `+` `*` `-` `!` `.`）、命令行参数名、操作系统的原始错误详情，
+> 以及代码注释——前几项是**数据契约**，同一份报表在中英文机器上必须一致。
+> `--lang` 给了不认识的值会**报错退出**（退出码 2），不会静默退回中文；
+> 环境变量里的 `LC_ALL=C` / `POSIX` 表示「没有偏好」，
+> 按默认中文处理，而**不是**当成「请用英文」。
 
 > 一次任务**只用一种探测方式**：ICMP 的「在线」与 TCP 的「开放」（`TCP-OPEN`）
 > 不会混进同一列统计。IPv6 目标目前请用 TCP（ICMPv6 未实装，如实登记为不可用）。
@@ -204,6 +220,7 @@ cping-cli -t 192.0.2.5 --allow-reserved                     # 显式放行保留
 cping-tui                # 交互式启动
 cping-tui --prefix 192.168.1
 cping-tui --max-pps 200 --max-targets 512   # M17：限速与目标数上限（取值不合法只警告不崩）
+cping-tui --lang en                         # M18：英文界面（TUI 是交互式的，非法值只告警）
 ```
 
 | 键 | 功能 | 键 | 功能 |
@@ -345,6 +362,16 @@ TUI 与 CLI 共用同一套安全策略（M17）：默认限速、默认拒绝�
   `MANIFEST.json` 自证清单；官方构建的 Android release APK 目前仍是 **debug 密钥**
   签名；Linux 产物是未签名 tar.gz / zip + `SHA256SUMS`。**不把 SHA-256 说成签名，
   也不用自签证书冒充正式签名**——补签方法见 [`docs/signing.md`](docs/signing.md)。
+- **双语目前覆盖到「界面自有文案」为止**（M18 第一步）：核心层的枚举标签
+  （探测状态、结果类别、变更种类、告警种类、后端名、目标范围……）与三端自己的
+  界面文案都已双语，但核心层的**自由文本**（目标规格摘要、变更描述、告警正文、
+  资产摘要、后端能力说明、时序报表文案）仍只有中文——**GUI 里这些位置切到英文
+  也还是中文**，因为它们走的是 Rust 侧生成的字符串。第二步会把 `lang`
+  一路传进这些产出点。
+- **语言协商顺序**：`--lang` → `CPING_LANG` → `LC_ALL` → `LC_MESSAGES` → `LANG`
+  → 默认中文。`LC_ALL=C` / `POSIX` 表示「没有偏好」，按中文处理而**不是**英文。
+  `--lang` 给不认识的值时 CLI 报错退出（退出码 2），TUI 只在状态栏告警
+  （交互式程序，用户还能当场改）。
 - **仅用于你拥有或获授权管理的网络**；并发、速率与目标数均有上限。
 
 ## License

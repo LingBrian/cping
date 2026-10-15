@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 import {
-  CLASS_LABELS,
+  CLASS_LABEL_KEYS,
   DEFAULT_COLORS,
   MATRIX_CELLS,
   MONITOR_INTERVALS,
@@ -24,6 +24,7 @@ import {
   type TrendDto,
 } from '../shared/types'
 import * as svc from '../services/ping'
+import { t } from '../i18n'
 
 const EMPTY_STATS: ScanStatsDto = {
   total: 0,
@@ -57,8 +58,11 @@ export const usePingStore = defineStore('ping', () => {
   const view = ref<'matrix' | 'table'>('matrix')
   const hideOffline = ref(false)
   const colors = ref<ColorConfigDto>({ ...DEFAULT_COLORS })
-  const localIp = ref('未知')
-  const status = ref('就绪')
+  // 初始文案在 store 创建时取一次词条。注意：`status` 里的内容是「事件日志」——
+  // 记录事件发生那一刻的语言，切换语言后不会回溯改写（它本身就是一句历史记录，
+  // 而不是需要跟着界面重排的标签）。界面标签一律走模板里的 `t()`，是响应式的。
+  const localIp = ref(t('common.unknown'))
+  const status = ref(t('status.ready'))
   const lastExport = ref<string | null>(null)
 
   // ---- M7 ----
@@ -177,10 +181,19 @@ export const usePingStore = defineStore('ping', () => {
   /**
    * M12：后端能力明细（一行一个），给能力提示做悬停说明。
    * `backendCaps` 是核心给的事实数据，这里只负责展示拼装，不做任何推断。
+   * 注意 `c.label` / `c.describe` 是**后端产出的原文**，按约定原样透传，不在此翻译。
    */
   const backendCapDetails = computed(() =>
     backendCaps.value
-      .map((c) => `${c.label}（${c.id}）：${c.available ? '可用' : '不可用'} · ${c.describe}`)
+      .map((c) =>
+        t(
+          'status.capDetail',
+          c.label,
+          c.id,
+          c.available ? t('common.available') : t('common.unavailable'),
+          c.describe,
+        ),
+      )
       .join('\n'),
   )
 
@@ -204,7 +217,7 @@ export const usePingStore = defineStore('ping', () => {
   }
 
   function labelOf(key: ResultClassKey | null): string {
-    return key ? CLASS_LABELS[key] : '等待'
+    return key ? t(CLASS_LABEL_KEYS[key]) : t('class.waiting')
   }
 
   /** 某一行的变化说明（没有变化则返回空串）。 */
@@ -340,18 +353,18 @@ export const usePingStore = defineStore('ping', () => {
       if (withInfo) {
         const n = recognized.value
         const base = cancelled.value
-          ? `已取消：完成 ${stats.value.completed}/${stats.value.total}，已完成结果保留`
-          : `扫描完成：${stats.value.total} 个目标，${stats.value.online} 在线`
-        const tail = diffSummary.value ? `；${diffSummary.value}` : ''
-        status.value = `${base}；识别 MAC ${n.mac}、厂商 ${n.vendor}${tail}`
+          ? t('status.cancelledDone', stats.value.completed, stats.value.total)
+          : t('status.scanDone', stats.value.total, stats.value.online)
+        const tail = diffSummary.value ? t('status.diffSuffix', diffSummary.value) : ''
+        status.value = t('status.scanDoneInfo', base, n.mac, n.vendor, tail)
       }
     } catch (e) {
-      status.value = `结果校准失败：${String(e)}`
+      status.value = t('status.resyncFailed', String(e))
     }
   }
 
   async function start() {
-    status.value = '正在启动…'
+    status.value = t('status.starting')
     try {
       // 方式随请求一起发出去：一次任务只有一种方式，后端据此新建调度器。
       const id = await svc.startScan(
@@ -371,9 +384,9 @@ export const usePingStore = defineStore('ping', () => {
       lastExport.value = null
       await refreshSnapshot()
       running.value = true
-      status.value = `开始探测 ${specSummary.value || prefix.value}（${modeLabel.value}）`
+      status.value = t('status.scanStarted', specSummary.value || prefix.value, modeLabel.value)
     } catch (e) {
-      status.value = `无法启动：${String(e)}`
+      status.value = t('status.startFailed', String(e))
     }
   }
 
@@ -381,9 +394,9 @@ export const usePingStore = defineStore('ping', () => {
     try {
       await svc.cancelScan()
       await refreshSnapshot()
-      status.value = '已请求取消'
+      status.value = t('status.cancelRequested')
     } catch (e) {
-      status.value = `取消失败：${String(e)}`
+      status.value = t('status.cancelFailed', String(e))
     }
   }
 
@@ -437,7 +450,7 @@ export const usePingStore = defineStore('ping', () => {
   function setMode(key: ProbeModeKey) {
     if (mode.value === key) return
     mode.value = key
-    status.value = `探测方式：${modeLabel.value}（下次探测生效）`
+    status.value = t('status.modeChanged', modeLabel.value)
   }
 
   // -------------------------------------------------------------------------
@@ -461,7 +474,7 @@ export const usePingStore = defineStore('ping', () => {
    */
   async function runFingerprint(indices: number[] | null = null): Promise<string | null> {
     if (fingerprintBusy.value) {
-      status.value = '已有一次指纹探测在进行中'
+      status.value = t('status.fpBusy')
       return null
     }
     fingerprintBusy.value = true
@@ -472,11 +485,11 @@ export const usePingStore = defineStore('ping', () => {
       showFingerprints.value = true
       const openTotal = list.reduce((n, f) => n + f.openPorts.length, 0)
       const withOpen = list.filter((f) => f.openPorts.length > 0).length
-      const msg = `端口指纹：${list.length} 台主机 · ${openTotal} 个开放端口（${withOpen} 台有开放端口）`
+      const msg = t('status.fpDone', list.length, openTotal, withOpen)
       status.value = msg
       return msg
     } catch (e) {
-      status.value = `端口指纹失败：${String(e)}`
+      status.value = t('status.fpFailed', String(e))
       return null
     } finally {
       fingerprintBusy.value = false
@@ -493,21 +506,22 @@ export const usePingStore = defineStore('ping', () => {
     fingerprints.value = []
     fingerprintPorts.value = 0
     showFingerprints.value = false
-    status.value = '已清空端口指纹'
+    status.value = t('status.fpCleared')
   }
 
   /** 指纹面板里的一行行文本（与界面同源，便于测试）。 */
   const fingerprintLines = computed<string[]>(() => {
-    const lines: string[] = ['端口指纹（附加信息，与在线判定相互独立）']
+    const lines: string[] = [t('fp.notePlain')]
     if (fingerprints.value.length === 0) {
-      lines.push('还没有指纹结果：点「端口指纹」或按 F 开始')
+      lines.push(t('fp.emptyLine'))
       return lines
     }
     for (const f of fingerprints.value) {
       if (f.openPorts.length === 0) {
-        lines.push(`${f.ip}  无开放端口`)
+        lines.push(t('fp.noOpenPortsLine', f.ip))
         continue
       }
+      // 这两行是「IP + 端口摘要 / 设备摘要」，摘要文本来自后端，原样透传
       lines.push(`${f.ip}  ${f.openPortsSummary}`)
       for (const p of f.openPorts) {
         if (p.banner) lines.push(`    :${p.port} ${p.banner}`)
@@ -534,7 +548,7 @@ export const usePingStore = defineStore('ping', () => {
     try {
       trend.value = await svc.trendState(chartWidth)
     } catch (e) {
-      status.value = `趋势读取失败：${String(e)}`
+      status.value = t('status.trendFailed', String(e))
     } finally {
       trendBusy.value = false
     }
@@ -545,9 +559,9 @@ export const usePingStore = defineStore('ping', () => {
     try {
       const removed = await svc.clearTrend()
       trend.value = null
-      status.value = `已清空趋势历史（${removed} 个时间点）`
+      status.value = t('status.trendCleared', removed)
     } catch (e) {
-      status.value = `清空趋势失败：${String(e)}`
+      status.value = t('status.trendClearFailed', String(e))
     }
   }
 
@@ -558,7 +572,7 @@ export const usePingStore = defineStore('ping', () => {
       status.value = msg
       return msg
     } catch (e) {
-      status.value = `导出可用率报表失败：${String(e)}`
+      status.value = t('status.trendExportFailed', String(e))
       return null
     }
   }
@@ -584,7 +598,7 @@ export const usePingStore = defineStore('ping', () => {
     try {
       alerts.value = await svc.alertState()
     } catch (e) {
-      status.value = `告警状态读取失败：${String(e)}`
+      status.value = t('status.alertsFailed', String(e))
     } finally {
       alertsBusy.value = false
     }
@@ -599,11 +613,9 @@ export const usePingStore = defineStore('ping', () => {
   async function setAlertsEnabled(enabled: boolean): Promise<void> {
     try {
       alerts.value = await svc.setAlertsEnabled(enabled)
-      status.value = enabled
-        ? '告警已启用（默认规则：新增主机 / 离线 / 延迟>200ms / 可用率<90%）'
-        : '告警已关闭（规则不再求值；已积累的冷却记录与基线保留）'
+      status.value = enabled ? t('status.alertsOn') : t('status.alertsOff')
     } catch (e) {
-      status.value = `切换告警失败：${String(e)}`
+      status.value = t('status.alertToggleFailed', String(e))
     }
   }
 
@@ -611,9 +623,9 @@ export const usePingStore = defineStore('ping', () => {
   async function setAlertMuted(muted: boolean): Promise<void> {
     try {
       alerts.value = await svc.setAlertMuted(muted)
-      status.value = muted ? '告警已静音：规则照常求值，只是不通知' : '告警已解除静音'
+      status.value = muted ? t('status.mutedOn') : t('status.mutedOff')
     } catch (e) {
-      status.value = `切换静音失败：${String(e)}`
+      status.value = t('status.muteToggleFailed', String(e))
     }
   }
 
@@ -626,10 +638,10 @@ export const usePingStore = defineStore('ping', () => {
   }): Promise<boolean> {
     try {
       alerts.value = await svc.updateAlertRules(patch)
-      status.value = '告警规则已更新'
+      status.value = t('status.alertRulesUpdated')
       return true
     } catch (e) {
-      // 后端给的是可直接展示的中文原因，不要再包一层
+      // 后端给的是可直接展示的原因原文（可能是中文），不要再包一层
       status.value = String(e)
       return false
     }
@@ -639,9 +651,9 @@ export const usePingStore = defineStore('ping', () => {
   async function dropAlerts(): Promise<void> {
     try {
       alerts.value = await svc.clearAlerts()
-      status.value = '已清空告警记录（基线与冷却记录保留）'
+      status.value = t('status.alertsCleared')
     } catch (e) {
-      status.value = `清空告警失败：${String(e)}`
+      status.value = t('status.alertsClearFailed', String(e))
     }
   }
 
@@ -649,7 +661,7 @@ export const usePingStore = defineStore('ping', () => {
   const alertNote = computed(() => {
     const a = alerts.value
     if (!a || a.total === 0) return ''
-    return `告警 ${a.total} 条${a.muted ? '（已静音）' : ''}`
+    return a.muted ? t('alert.summaryMuted', a.total) : t('alert.summary', a.total)
   })
 
   const alertCount = computed(() => alerts.value?.total ?? 0)
@@ -658,7 +670,7 @@ export const usePingStore = defineStore('ping', () => {
     if (!Number.isFinite(port) || port <= 0 || port > 65535) return
     tcpPort.value = Math.floor(port)
     if (mode.value !== 'tcp') setMode('tcp')
-    else status.value = `探测方式：${modeLabel.value}（下次探测生效）`
+    else status.value = t('status.modeChanged', modeLabel.value)
   }
 
   /** 在常用端口之间轮换（`T` 之外的鼠标友好路径）。 */
@@ -734,10 +746,10 @@ export const usePingStore = defineStore('ping', () => {
         nextRoundAt = 0
         tickMonitor()
       }
-      status.value = `已开启持续监控，每 ${monitorInterval.value} 秒重扫一次`
+      status.value = t('status.monitorOn', monitorInterval.value)
     } else {
       stopMonitorTimer()
-      status.value = '已关闭持续监控'
+      status.value = t('status.monitorOff')
     }
   }
 
@@ -748,7 +760,7 @@ export const usePingStore = defineStore('ping', () => {
     nextRoundAt = 0
     if (monitorEnabled.value) {
       countdown.value = monitorInterval.value
-      status.value = `持续监控间隔已改为 ${monitorInterval.value} 秒`
+      status.value = t('status.monitorIntervalChanged', monitorInterval.value)
     }
   }
 
@@ -835,9 +847,9 @@ export const usePingStore = defineStore('ping', () => {
     }
     try {
       await svc.saveConfig(cfg)
-      status.value = '设置已保存'
+      status.value = t('status.configSaved')
     } catch (e) {
-      status.value = `保存设置失败：${String(e)}`
+      status.value = t('status.configSaveFailed', String(e))
     }
   }
 
@@ -848,11 +860,12 @@ export const usePingStore = defineStore('ping', () => {
   /** 按扩展名导出（CSV / TXT / JSON / HTML 由后端决定格式）。 */
   async function exportTo(path: string) {
     try {
+      // 后端返回的是一句成品提示（含文件路径），原样展示
       const msg = await svc.exportResults(path)
       lastExport.value = path
       status.value = msg
     } catch (e) {
-      status.value = `导出失败：${String(e)}`
+      status.value = t('status.exportFailed', String(e))
     }
   }
 
@@ -861,10 +874,10 @@ export const usePingStore = defineStore('ping', () => {
     try {
       const path = await svc.exportToAppDir(format)
       lastExport.value = path
-      status.value = `已保存：${path}`
+      status.value = t('status.savedTo', path)
       return path
     } catch (e) {
-      status.value = `导出失败：${String(e)}`
+      status.value = t('status.exportFailed', String(e))
       return null
     }
   }
@@ -875,7 +888,7 @@ export const usePingStore = defineStore('ping', () => {
       status.value = await svc.exportDiff(path)
       return true
     } catch (e) {
-      status.value = `导出差异失败：${String(e)}`
+      status.value = t('status.exportDiffFailed', String(e))
       return false
     }
   }
@@ -883,9 +896,9 @@ export const usePingStore = defineStore('ping', () => {
   async function loadLocalAddresses() {
     try {
       const list = await svc.localAddresses()
-      localIp.value = list.length > 0 ? list.join(', ') : '未知'
+      localIp.value = list.length > 0 ? list.join(', ') : t('common.unknown')
     } catch {
-      localIp.value = '未知'
+      localIp.value = t('common.unknown')
     }
   }
 
@@ -900,17 +913,18 @@ export const usePingStore = defineStore('ping', () => {
   /** 读邻居表回填 MAC / 厂商；返回给调用方一句可直接提示的话。 */
   async function enrich(): Promise<string | null> {
     if (stats.value.completed === 0) {
-      status.value = '还没有已完成的结果'
+      status.value = t('status.noResults')
       return null
     }
     try {
       const report = await svc.enrichResults()
+      // report.message 由后端拼好，原样展示
       enrichNote.value = report.message
       status.value = report.message
       await refreshSnapshot()
       return report.message
     } catch (e) {
-      status.value = `补全失败：${String(e)}`
+      status.value = t('status.enrichFailed', String(e))
       return null
     }
   }
@@ -922,11 +936,11 @@ export const usePingStore = defineStore('ping', () => {
       const r = await svc.lookupHostnameFor(index, timeoutMs)
       const row = results.value[index]
       if (row) results.value[index] = { ...row, hostname: r.hostname }
-      const msg = r.hostname ? `${r.ip} → ${r.hostname}` : `${r.ip} 没有反向解析记录`
+      const msg = r.hostname ? `${r.ip} → ${r.hostname}` : t('status.noReverseDns', r.ip)
       status.value = msg
       return msg
     } catch (e) {
-      status.value = `主机名反查失败：${String(e)}`
+      status.value = t('status.hostnameLookupFailed', String(e))
       return null
     } finally {
       hostnameBusy.value = null
@@ -942,7 +956,7 @@ export const usePingStore = defineStore('ping', () => {
     try {
       pendingRestore.value = await svc.pendingSnapshot()
     } catch (e) {
-      status.value = `检查历史结果失败：${String(e)}`
+      status.value = t('status.checkPendingFailed', String(e))
     }
   }
 
@@ -952,10 +966,10 @@ export const usePingStore = defineStore('ping', () => {
       const snap = await svc.restoreSnapshot(path)
       applySnapshot(snap)
       pendingRestore.value = null
-      status.value = `已恢复 ${snap.results.length} 条结果（${snap.specSummary}，共 ${snap.total} 个目标）`
+      status.value = t('status.restored', snap.results.length, snap.specSummary, snap.total)
       return true
     } catch (e) {
-      status.value = `恢复失败：${String(e)}`
+      status.value = t('status.restoreFailed', String(e))
       return false
     }
   }
@@ -964,7 +978,7 @@ export const usePingStore = defineStore('ping', () => {
     try {
       await svc.dismissSnapshot(deleteFile)
     } catch (e) {
-      status.value = `忽略历史结果失败：${String(e)}`
+      status.value = t('status.dismissFailed', String(e))
     } finally {
       pendingRestore.value = null
     }
@@ -974,10 +988,10 @@ export const usePingStore = defineStore('ping', () => {
     try {
       const saved = await svc.saveSnapshot(path)
       lastSnapshot.value = saved.path
-      status.value = `已保存快照：${saved.rows} 条结果（共 ${saved.total} 个目标）→ ${saved.path}`
+      status.value = t('status.snapshotSaved', saved.rows, saved.total, saved.path)
       return saved.path
     } catch (e) {
-      status.value = `保存快照失败：${String(e)}`
+      status.value = t('status.snapshotSaveFailed', String(e))
       return null
     }
   }
@@ -987,10 +1001,10 @@ export const usePingStore = defineStore('ping', () => {
     try {
       const saved = await svc.saveSnapshotToAppDir()
       lastSnapshot.value = saved.path
-      status.value = `已保存快照：${saved.rows} 条结果 → ${saved.path}`
+      status.value = t('status.snapshotSavedApp', saved.rows, saved.path)
       return saved.path
     } catch (e) {
-      status.value = `保存快照失败：${String(e)}`
+      status.value = t('status.snapshotSaveFailed', String(e))
       return null
     }
   }

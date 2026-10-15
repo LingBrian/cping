@@ -1,0 +1,141 @@
+CPing headless command line -- batch PING with exportable results and scriptable exit codes
+
+Usage:
+  cping-cli --target <spec> [options]
+
+Target specs (the three forms can be mixed; separate with commas, spaces or newlines):
+  192.168.1             first three octets of a class C range (original form, .1-.255, 255 targets)
+  192.168.1.7           a single address
+  192.168.1.0/24        CIDR (the network address must be written; host bits set is an error)
+  10.0.0.0/30, 192.168.1
+
+Options:
+  -t, --target <spec>     target spec (required unless --target-file is set)
+      --target-file <f>   read target specs from a file (one per line or comma separated)
+      --range <r>         standard | full | hosts_only (default standard)
+      --mode <m>          icmp | tcp (default icmp; tcp on Android)
+  -p, --port <n>          TCP mode port (default 80)
+      --timeout <ms>      per-target timeout (default 1000, max 60000)
+  -c, --concurrency <n>   concurrency (default 32, max 256)
+      --enrich            fill in MAC and vendor after the scan (local neighbour table, offline OUI DB)
+      --fingerprint       port fingerprint + device type inference for online hosts (M13)
+      --fp-ports <list>   ports to fingerprint, e.g. 22,80,443-445 (default: built-in common set)
+      --no-banner         do NOT grab service banners while fingerprinting (default: grab, read-only)
+      --fp-timeout <ms>   per-port timeout for fingerprinting (default 800, max 60000)
+  -w, --watch <secs>      keep monitoring: rescan every N seconds and print the changes
+  -n, --rounds <n>        total rounds in watch mode (default: run until Ctrl+C)
+      --history <path>    append every round to a long-term series file (accumulates across sessions, kept 7 days)
+      --report <path>     write an uptime report when finished (.csv or .html)
+      --keep-days <days>  days to keep in the series (default 7; only with --history)
+      --alert             enable threshold alerts (appeared/offline/latency/uptime)
+      --alert-kinds <list> which kinds to enable: appeared,disappeared,latency,uptime (default all)
+      --alert-latency <ms> latency threshold (default 200; strictly greater triggers)
+      --alert-uptime <pct> uptime threshold (default 90; strictly less triggers, 0-100)
+      --alert-cooldown <s> cooldown window for the same host and kind (default 300)
+      --alert-state <path> dedup state file for alerts (keeps cooldowns across sessions)
+      --mute-alerts       mute: rules are still evaluated and state still advances, nothing is sent
+      --notify <list>     notification channels: console,system,webhook,command,smtp (default console)
+      --notify-webhook <url> webhook URL (**http:// only**; this build has no TLS)
+      --notify-cmd <tpl>  notification command template, repeatable; {title}/{body}/{json}/{count} placeholders
+      --notify-smtp <host[:port]> plain-text SMTP relay (no TLS, no auth)
+      --notify-mail-from <addr>   mail sender
+      --notify-mail-to <addr,..>  mail recipients
+      --notify-list       list the availability of each notification channel on this platform, then exit
+      --out <path>        export results; the format comes from the extension (.csv/.txt/.json/.html)
+      --json <path>       same as --out but forces JSON
+  -q, --quiet             do not print the human-readable summary (only files and the exit code)
+      --list-backends     list the probe backends and capabilities on this platform (including unavailable ones), then exit
+      --config <path>     read a config file (templates + [probe]/[colors]/[ui]/[monitor])
+      --profile <name>    which template to use from the config (case-insensitive)
+      --list-profiles     list every template in the config, then exit (requires --config)
+      --dump-config <path> write the **effective** parameters of this run as a config file, then exit
+      --max-pps <n>       global rate limit (probe packets/second, default 500; 0 = unlimited)
+      --max-targets <n>   per-run target limit (can only be stricter than the structural 65536)
+      --allow-reserved    allow multicast / reserved ranges (refused by default)
+      --audit <path>      audit log (append-only JSONL; who/when/params/result counts)
+      --lang <zh|en>      UI language (default from CPING_LANG / LC_ALL / LC_MESSAGES / LANG; Chinese if unset)
+  -h, --help              show this help
+  -V, --version           show the version
+
+Exit codes:
+  0  every target is online
+  1  some target is offline (timeout/unreachable/port closed)
+  2  argument or configuration error
+  3  probe backend unavailable (insufficient privileges / unsupported platform)
+
+Examples:
+  cping-cli -t 192.168.1
+  cping-cli -t 192.168.1.0/24 --mode tcp --port 445 --out scan.csv
+  cping-cli -t 10.0.0.0/30 --json report.json --enrich
+  cping-cli -t 192.168.1 --fingerprint --out assets.csv
+  cping-cli -t 192.168.1 --watch 30 --out rounds.json
+  cping-cli -t 192.168.1 --watch 60 --history net.ts --report uptime.html
+  cping-cli -t 192.168.1 --watch 30 --alert --notify console,system
+  cping-cli -t 192.168.1 --watch 30 --alert --notify webhook \
+            --notify-webhook http://10.0.0.5:9000/cping
+  cping-cli -t 192.168.1 --alert --notify-cmd "curl -s -d {json} https://example.com/h"
+  cping-cli --config prod.toml --profile dmz --out dmz.csv
+  cping-cli --config prod.toml --list-profiles
+  cping-cli -t 10.0.0.0/24 -c 64 --dump-config nightly.toml
+
+About --config / --profile:
+  A config file freezes "what to scan and how" into named templates that CI and
+  inspection scripts can share: write [[profiles]] sections (**double brackets**;
+  writing [profiles] is rejected explicitly rather than ignored).
+  Merge priority **high to low**: command line, then template, then config [probe].
+  A template only fills gaps and never overrides a value you typed on the command
+  line; every run prints which field came from which layer.
+  A --profile naming a template that does not exist is an **error**, not a silent
+  fallback to default_profile.
+  Config files carry a schema_version: older files (the v1 [probe] form) are
+  migrated automatically, newer ones are **refused** (guessing would swallow
+  entries you do not recognise). Unknown keys are kept verbatim, but **comments
+  are not** (the subset parser builds no AST).
+  --dump-config only writes "what to scan and how": export paths, --history,
+  notification channels and alert rules are deliberately left out; otherwise
+  switching templates would switch notifications too.
+
+About --max-pps / --max-targets / --allow-reserved / --audit (M17):
+  These four are the **compliance policy of this machine** and deliberately live on
+  the command line only: a template copied from elsewhere must not be able to turn
+  the rate limit into "unlimited", which would be a back door around compliance.
+  The rate limit is on by default (500 pps) and three kinds of special range are
+  refused: multicast (one probe disturbs the whole group), reserved ranges
+  (including the 255.255.255.255 broadcast) and documentation ranges (never routed,
+  so scanning them always fails).
+  **Private ranges and loopback are not blocked** (10/8, 172.16/12, 192.168/16,
+  127/8): they are exactly what this tool is for. A refusal states the reason and
+  the way out instead of a vague "argument error".
+  Out-of-range values are errors, never silently clamped: --max-pps caps at 100000
+  and --max-targets can only be stricter than 65536 (the structural limit of the
+  result slots, which no argument can exceed).
+  --audit writes JSONL (first line `CPING-AUDIT 1`) recording only who, when, which
+  spec and the result counts; **no** per-host detail, MAC, vendor or resolved host
+  name.
+
+About --fingerprint:
+  Port fingerprinting is a **second pass independent of the online verdict** and
+  only runs against online hosts: all ports closed does not make a host offline, and
+  an open port does not make an offline host online.
+  A service banner is only the first 256 bytes the peer sends on its own; **no
+  protocol request is sent**. The device type is an **inference** from "vendor plus
+  open ports" and is left empty when it cannot be told.
+
+About --history / --report:
+  Series files carry a format version (first line CPING-TS <version>); a mismatch is
+  **refused** with exit code 2 and never overwrites your history with guessed data.
+  Every round is flushed immediately, so Ctrl+C does not lose completed rounds.
+  Report numbers reconcile back to the raw records: downsampling only sums like with
+  like, and observed rounds and RTT sums are conserved. Note that a host that was
+  never online records its RTT as -, not 0 (0 would read as "extremely fast").
+
+About --alert / --notify:
+  Rule matching is pure: the first round only establishes a baseline (no "host
+  appeared" event, otherwise scanning a /24 would fire 255 of them); thresholds use
+  strict comparisons, so a value exactly on the threshold does not alert. Channel
+  failures are **visible**: every channel reports success or the reason it failed,
+  one broken channel does not affect the others and never blocks the scan (delivery
+  runs on a background thread; a full queue drops and counts).
+  webhooks support http:// only -- this build has no TLS and will not silently
+  downgrade an alert to plain text; for https, use --notify-cmd to call curl or
+  another tool that brings its own TLS.

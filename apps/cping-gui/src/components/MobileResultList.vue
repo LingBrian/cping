@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t } from '../i18n'
 import { usePingStore } from '../stores/ping'
 import { CLASS_SYMBOLS } from '../shared/types'
 
@@ -8,7 +9,7 @@ const store = usePingStore()
 <template>
   <div class="mobile-list">
     <div v-if="store.visibleRows.length === 0" class="cping-panel" style="text-align: center; color: #6b7280">
-      暂无数据（可关闭「仅在线」过滤后查看）
+      {{ t('list.empty') }}
     </div>
     <div
       v-for="row in store.visibleRows"
@@ -21,7 +22,7 @@ const store = usePingStore()
         <span>
           <!-- 不用颜色单独表意：符号 + 文字同时给出 -->
           <span class="badge">{{ row.result?.classKey ? CLASS_SYMBOLS[row.result.classKey] : '·' }}</span>
-          {{ row.result ? row.result.statusLabel : '等待' }}
+          {{ row.result ? row.result.statusLabel : t('class.waiting') }}
         </span>
         <span class="mobile-list__rtt">
           {{ row.result?.rttMs != null ? `${row.result.rttMs} ms` : '--' }}
@@ -29,7 +30,7 @@ const store = usePingStore()
       </div>
       <!-- M8：本轮变化单独一行，触控下比挤在状态里更容易读 -->
       <div v-if="store.isChanged(row.index)" class="mobile-list__change">
-        <span class="badge badge--change">{{ store.changeMap.get(row.index)?.kindLabel ?? '变化' }}</span>
+        <span class="badge badge--change">{{ store.changeMap.get(row.index)?.kindLabel ?? t('change.fallback') }}</span>
         {{ store.changeNoteOf(row.index) }}
       </div>
       <!-- M7：MAC / 厂商 / 主机名。触控下多占一行比挤在一行更容易读。 -->
@@ -45,7 +46,7 @@ const store = usePingStore()
           :disabled="store.hostnameBusy !== null"
           @click="store.lookupHostname(row.index)"
         >
-          {{ store.hostnameBusy === row.index ? '反查中…' : '查主机名' }}
+          {{ store.hostnameBusy === row.index ? t('btn.lookupBusy') : t('btn.lookup') }}
         </button>
       </div>
     </div>

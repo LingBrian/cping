@@ -1,12 +1,25 @@
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
-import { NConfigProvider, NMessageProvider, dateZhCN, zhCN } from 'naive-ui'
+import {
+  NConfigProvider,
+  NMessageProvider,
+  dateEnUS,
+  dateZhCN,
+  enUS,
+  zhCN,
+} from 'naive-ui'
 import DesktopLayout from './layouts/DesktopLayout.vue'
 import MobileLayout from './layouts/MobileLayout.vue'
 import RestoreSnapshotDialog from './components/RestoreSnapshotDialog.vue'
+import { lang } from './i18n'
 import { usePingStore } from './stores/ping'
 
 const store = usePingStore()
+
+// Naive UI 自带组件的内置文案（日期、分页、空态等）也要跟着界面语言走，
+// 否则会出现「外壳是英文、抽屉里的日期选择器还是中文」这种半截状态。
+const naiveLocale = computed(() => (lang.value === 'en' ? enUS : zhCN))
+const naiveDateLocale = computed(() => (lang.value === 'en' ? dateEnUS : dateZhCN))
 
 /**
  * Android 使用独立的移动布局：不缩小桌面界面，而是列表优先的触控界面。
@@ -46,8 +59,8 @@ onMounted(async () => {
        窗口一矮整页就会滚动、底部状态栏被挤出可视区 -->
   <n-config-provider
     class="app-shell"
-    :locale="zhCN"
-    :date-locale="dateZhCN"
+    :locale="naiveLocale"
+    :date-locale="naiveDateLocale"
     :theme-overrides="themeOverrides"
   >
     <n-message-provider class="app-shell">

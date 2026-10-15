@@ -6,6 +6,7 @@
 //! 由于原版目标范围是 `.1`–`.255`，`格号 0`（对应 `.0`）**没有目标**，恒为空。
 
 use crate::error::{CoreError, CoreResult};
+use crate::i18n::{self, Key, Lang};
 use std::net::{IpAddr, Ipv4Addr};
 use std::ops::RangeInclusive;
 
@@ -91,12 +92,24 @@ impl TargetRange {
         }
     }
 
-    pub const fn label_zh(self) -> &'static str {
-        match self {
-            TargetRange::Standard => "标准（.1–.255，255 个）",
-            TargetRange::Full => "全段（.0–.255，256 个）",
-            TargetRange::HostsOnly => "仅主机（.1–.254，254 个）",
-        }
+    /// 中文标签（等价于 `label_in(Lang::Zh)`）。
+    ///
+    /// 核心层内部的报表与导出仍在用它——**产物内容是数据契约**：
+    /// 同一份 CSV / HTML 在中英文机器上必须一致；只有界面跟着语言变。
+    pub fn label_zh(self) -> &'static str {
+        self.label_in(Lang::Zh)
+    }
+
+    /// 按语言渲染的标签。
+    pub fn label_in(self, lang: Lang) -> &'static str {
+        i18n::text(
+            lang,
+            match self {
+                TargetRange::Standard => Key::LabelRangeStandard,
+                TargetRange::Full => Key::LabelRangeFull,
+                TargetRange::HostsOnly => Key::LabelRangeHostsOnly,
+            },
+        )
     }
 }
 

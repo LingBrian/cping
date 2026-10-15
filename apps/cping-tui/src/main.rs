@@ -5,11 +5,14 @@
 
 mod app;
 mod events;
+mod i18n;
 mod input;
 mod ui;
 
 use std::io;
 use std::panic;
+
+use cping_core::i18n::Lang;
 
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{DisableMouseCapture, EnableMouseCapture};
@@ -23,13 +26,17 @@ fn main() -> io::Result<()> {
     let options = app::Options::from_args(std::env::args().skip(1));
 
     if options.help {
-        print_help();
+        print_help(options.lang);
         return Ok(());
     }
 
     // M17：首次运行的授权提示。必须打印在进入备用屏幕**之前**——
     // 进了全屏就看不见了。TUI 里不做确认交互（同 CLI 的理由）。
-    app::print_authorization_notice();
+    //
+    // M18：语言从**命令行选项**里取。这里还没有 App 实例（App 要等进入备用
+    // 屏幕之后才建），所以不能从 `self.lang` 拿——语言状态必须由 Options 一路带过来，
+    // 否则这句提示会永远停在中文。
+    app::print_authorization_notice(options.lang);
 
     // panic 也要恢复终端，否则用户的 shell 会卡在 raw mode
     let hook = panic::take_hook();
@@ -61,66 +68,26 @@ fn restore_terminal() -> io::Result<()> {
     Ok(())
 }
 
-fn print_help() {
+/// 打印 `--help`。整份文本按语言从 TUI 字典里取（见 `i18n::Key::CliHelp*`）。
+///
+/// 为什么不把帮助文本写死在 `main`：它是最常被用户复制到 issue 里的一段，
+/// 中英混排会让人分不清「程序说了什么」和「用户看到什么」。
+fn print_help(lang: Lang) {
+    let t = |key: i18n::Key| i18n::text(lang, key);
+    println!("{}", t(i18n::Key::CliHelpTop));
+    println!();
+    println!("{}", t(i18n::Key::CliHelpOptions));
+    println!();
+    println!("{}", t(i18n::Key::CliHelpBackend));
+    println!();
+    println!("{}", t(i18n::Key::CliHelpTargets));
+    println!();
     println!(
-        "cping-tui —— C网群PING工具（终端版）
-
-用法:
-  cping-tui [选项]
-
-选项:
-  --prefix <前三段>   初始网段前缀，例如 192.168.1
-  --no-color          禁用颜色（无颜色终端下自动降级为符号标识）
-  --hide-offline      启动时即隐藏不在线目标
-  --view <matrix|table>  初始视图
-  --mock              使用模拟探测数据（演示 / UI 调试，不发真实报文）
-  --snapshot-dir <目录>  结果快照的存放目录（默认当前目录）
-  --alert             启动即启用告警（也可在界面里按 A 就地启用）
-  --alert-kinds <列表>  启用哪几类：appeared,disappeared,latency,uptime
-  --alert-latency <ms>  延迟阈值（默认 200；严格大于才报）
-  --alert-uptime <百分比> 可用率阈值（默认 90；严格小于才报）
-  --alert-cooldown <秒> 同一主机同一类告警的冷却窗口（默认 300）
-  --mute-alerts       启动即静音（规则照常求值，只是不通知）
-  --max-pps <n>       全局速率上限（探测包/秒，默认 500；写 0 = 不限速）
-  --max-targets <n>   目标数上限（只能比结构上限 65536 更严）
-  --allow-reserved    放行组播 / 保留段等特殊网段（默认拒绝）
-  --help              显示本帮助
-
-探测后端:
-  默认使用当前平台的原生 ICMP。若平台拿不到权限（Android 普通应用常见），
-  状态栏会显示相应错误，而不会被当成「探测成功」。
-
-目标信息（M7）:
-  扫描结束后会自动读取本机邻居表（ARP）回填 MAC，并据 IEEE 注册数据查厂商；
-  主机名走 DNS 反查，只在按 n 时对当前行发起，查不到就留空——不猜。
-
-结果快照:
-  每轮扫描结束后会把结果写入 {} （默认当前目录），
-  下次启动若发现该文件会先问是否恢复，默认**不**恢复。
-
-仅对你有权探测的网络使用本工具。并发与目标数量都有限制。
-
-交互快捷键:
-  Enter   开始探测（编辑输入框时表示确认）
-  i       进入/退出前缀编辑
-  Esc     取消当前探测 / 关闭弹窗
-  g       矩阵视图
-  t       表格视图
-  f       过滤不在线目标
-  s       导出 CSV
-  S       导出 TXT
-  m       读邻居表回填 MAC / 厂商
-  n       反查当前行的主机名
-  F       端口指纹
-  U       可用率趋势
-  A       告警记录（首次按即启用告警）
-  !       告警静音开关
-  w       保存快照
-  l       从快照恢复
-  ↑/↓ PgUp/PgDn  表格滚动
-  ?或F1   帮助
-  q       退出（运行中需再按一次确认）
-  Ctrl+C  退出（退出前恢复终端）",
-        app::AUTOSAVE_FILE
+        "{}",
+        i18n::render(lang, i18n::Key::CliHelpSnapshot, &[app::AUTOSAVE_FILE])
     );
+    println!();
+    println!("{}", t(i18n::Key::CliHelpWarning));
+    println!();
+    println!("{}", t(i18n::Key::CliHelpKeys));
 }

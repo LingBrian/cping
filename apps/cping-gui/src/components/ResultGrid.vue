@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { t } from '../i18n'
 import { usePingStore } from '../stores/ping'
 import { CLASS_SYMBOLS, MATRIX_CELLS } from '../shared/types'
 
@@ -52,15 +53,15 @@ const cells = computed<Cell[]>(() => {
 })
 
 function titleOf(c: Cell): string {
-  const head = c.pending ? `${c.ip} —— 未探测` : `${c.ip} —— ${c.label}`
+  const head = c.pending ? t('grid.untested', c.ip) : t('grid.tested', c.ip, c.label)
   const rtt = c.rtt === null ? '' : ` / ${c.rtt} ms`
-  const note = c.changed ? ` · 本轮${c.changeLabel}` : ''
+  const note = c.changed ? t('grid.changedNote', c.changeLabel) : ''
   return `${head}${rtt}${note}`
 }
 </script>
 
 <template>
-  <div class="grid-matrix" role="grid" aria-label="探测结果矩阵">
+  <div class="grid-matrix" role="grid" :aria-label="t('aria.matrix')">
     <button
       v-for="c in cells"
       :key="c.host"

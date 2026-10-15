@@ -18,6 +18,7 @@
 //! 提示打一次、记一次，就够起到告知作用。
 
 use crate::error::{CoreError, CoreResult};
+use crate::i18n::{self, Key, Lang};
 use crate::json::Json;
 use crate::target::MAX_TARGETS;
 use std::net::IpAddr;
@@ -60,50 +61,141 @@ pub const CONSENT_VERSION: u32 = 1;
 /// - **一定会失败**：文档示例网段（`192.0.2/24` 等，公网不路由它们）
 ///
 /// 返回 `Some(原因)` 表示应拒绝；`None` 表示可以扫。
+///
+/// 这是**中文快捷方式**，等价于 `reserved_kind(ip).map(|k| k.reason(Lang::Zh))`；
+/// 需要别的语言请直接用 [`reserved_kind`]。
 pub fn reserved_reason(ip: IpAddr) -> Option<&'static str> {
+    reserved_kind(ip).map(|k| k.reason(Lang::Zh))
+}
+
+/// 保留网段的**类别**。
+///
+/// 返回类别而不是直接返回句子，有两个理由：同一句原因要被翻成不同语言；
+/// 而类别本身是稳定的——写进审计、文档与脚本判断都该用它，
+/// 句子措辞随时可以改。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReservedKind {
+    /// IPv4 组播 `224.0.0.0/4`。
+    MulticastV4,
+    /// IPv4 保留段 `240.0.0.0/4`（含 `255.255.255.255` 有限广播）。
+    ReservedRangeV4,
+    /// `0.0.0.0/8`，「本网络」。
+    ThisNetwork,
+    /// 文档示例网段 `192.0.2.0/24`（TEST-NET-1）。
+    TestNet1,
+    /// 文档示例网段 `198.51.100.0/24`（TEST-NET-2）。
+    TestNet2,
+    /// 文档示例网段 `203.0.113.0/24`（TEST-NET-3）。
+    TestNet3,
+    /// 基准测试网段 `198.18.0.0/15`（RFC 2544）。
+    BenchmarkNet,
+    /// IPv6 未指定地址 `::`。
+    UnspecifiedV6,
+    /// IPv6 组播 `ff00::/8`。
+    MulticastV6,
+    /// 文档示例网段 `2001:db8::/32`（RFC 3849）。
+    DocNetV6,
+}
+
+/// 全部类别。供测试穷举，也供界面生成「哪些网段会被拒绝」的说明表。
+pub const ALL_RESERVED_KINDS: [ReservedKind; 10] = [
+    ReservedKind::MulticastV4,
+    ReservedKind::ReservedRangeV4,
+    ReservedKind::ThisNetwork,
+    ReservedKind::TestNet1,
+    ReservedKind::TestNet2,
+    ReservedKind::TestNet3,
+    ReservedKind::BenchmarkNet,
+    ReservedKind::UnspecifiedV6,
+    ReservedKind::MulticastV6,
+    ReservedKind::DocNetV6,
+];
+
+impl ReservedKind {
+    /// 稳定的机器可读标识（写进审计、文档与脚本判断；
+    /// **不要**用匹配句子文本来判断类别）。
+    pub const fn code(self) -> &'static str {
+        match self {
+            ReservedKind::MulticastV4 => "multicast_v4",
+            ReservedKind::ReservedRangeV4 => "reserved_range_v4",
+            ReservedKind::ThisNetwork => "this_network",
+            ReservedKind::TestNet1 => "test_net_1",
+            ReservedKind::TestNet2 => "test_net_2",
+            ReservedKind::TestNet3 => "test_net_3",
+            ReservedKind::BenchmarkNet => "benchmark_net",
+            ReservedKind::UnspecifiedV6 => "unspecified_v6",
+            ReservedKind::MulticastV6 => "multicast_v6",
+            ReservedKind::DocNetV6 => "doc_net_v6",
+        }
+    }
+
+    /// 对应的 i18n 键。
+    pub const fn key(self) -> Key {
+        match self {
+            ReservedKind::MulticastV4 => Key::RsrvMulticastV4,
+            ReservedKind::ReservedRangeV4 => Key::RsrvReservedRangeV4,
+            ReservedKind::ThisNetwork => Key::RsrvThisNetwork,
+            ReservedKind::TestNet1 => Key::RsrvTestNet1,
+            ReservedKind::TestNet2 => Key::RsrvTestNet2,
+            ReservedKind::TestNet3 => Key::RsrvTestNet3,
+            ReservedKind::BenchmarkNet => Key::RsrvBenchmarkNet,
+            ReservedKind::UnspecifiedV6 => Key::RsrvUnspecifiedV6,
+            ReservedKind::MulticastV6 => Key::RsrvMulticastV6,
+            ReservedKind::DocNetV6 => Key::RsrvDocNetV6,
+        }
+    }
+
+    /// 按语言渲染成给人看的原因。
+    pub fn reason(self, lang: Lang) -> &'static str {
+        i18n::text(lang, self.key())
+    }
+}
+
+/// 判断地址是否落在保留 / 特殊用途网段，返回**类别**。
+pub fn reserved_kind(ip: IpAddr) -> Option<ReservedKind> {
     match ip {
         IpAddr::V4(v4) => {
             let o = v4.octets();
             // 组播 224.0.0.0/4
             if (224..=239).contains(&o[0]) {
-                return Some("组播地址：一个探测会打扰整组主机");
+                return Some(ReservedKind::MulticastV4);
             }
             // 保留段 240.0.0.0/4（含 255.255.255.255 有限广播）
             if o[0] >= 240 {
-                return Some("保留段（含 255.255.255.255 广播），不属于任何主机");
+                return Some(ReservedKind::ReservedRangeV4);
             }
             // 「本网络」0.0.0.0/8
             if o[0] == 0 {
-                return Some("「本网络」（RFC 1122 §3.2.1.3），不是可探测的目标");
+                return Some(ReservedKind::ThisNetwork);
             }
             // 文档示例网段（RFC 5737）
             if o[0] == 192 && o[1] == 0 && o[2] == 2 {
-                return Some("文档示例网段 TEST-NET-1（RFC 5737），公网不会路由");
+                return Some(ReservedKind::TestNet1);
             }
             if o[0] == 198 && o[1] == 51 && o[2] == 100 {
-                return Some("文档示例网段 TEST-NET-2（RFC 5737），公网不会路由");
+                return Some(ReservedKind::TestNet2);
             }
             if o[0] == 203 && o[1] == 0 && o[2] == 113 {
-                return Some("文档示例网段 TEST-NET-3（RFC 5737），公网不会路由");
+                return Some(ReservedKind::TestNet3);
             }
             // 基准测试网段 198.18.0.0/15（RFC 2544）
             if o[0] == 198 && (o[1] == 18 || o[1] == 19) {
-                return Some("基准测试网段（RFC 2544），公网不会路由");
+                return Some(ReservedKind::BenchmarkNet);
             }
             None
         }
         IpAddr::V6(v6) => {
             if v6.is_unspecified() {
-                return Some("未指定地址 `::`，不是可探测的目标");
+                return Some(ReservedKind::UnspecifiedV6);
             }
             // 组播 ff00::/8
             if v6.octets()[0] == 0xff {
-                return Some("IPv6 组播地址：一个探测会打扰整组主机");
+                return Some(ReservedKind::MulticastV6);
             }
             // 文档示例 2001:db8::/32（RFC 3849）
             let s = v6.segments();
             if s[0] == 0x2001 && s[1] == 0x0db8 {
-                return Some("文档示例网段 2001:db8::/32（RFC 3849），公网不会路由");
+                return Some(ReservedKind::DocNetV6);
             }
             None
         }
@@ -139,33 +231,51 @@ impl Default for ScanPolicy {
 }
 
 impl ScanPolicy {
-    /// 校验策略本身是否自洽。**越界的值一律报错，不静默夹取**——
-    /// 「我明明设了 1000 怎么还是 500」比报错难查得多。
+    /// 校验策略本身是否自洽（中文，等价于 `validate_in(Lang::Zh)`）。
     pub fn validate(&self) -> CoreResult<()> {
+        self.validate_in(Lang::Zh)
+    }
+
+    /// 校验策略本身是否自洽，错误信息按 `lang` 渲染。
+    ///
+    /// **越界的值一律报错，不静默夹取**——「我明明设了 1000 怎么还是 500」
+    /// 比报错难查得多。
+    pub fn validate_in(&self, lang: Lang) -> CoreResult<()> {
         if self.max_pps > MAX_PPS_LIMIT {
-            return Err(CoreError::InvalidConfig(format!(
-                "速率上限 {} 包/秒 超过允许的最大值 {MAX_PPS_LIMIT}（要关闭限速请写 0）",
-                self.max_pps
+            return Err(CoreError::InvalidConfig(i18n::render(
+                lang,
+                Key::PolicyPpsTooHigh,
+                &[&self.max_pps.to_string(), &MAX_PPS_LIMIT.to_string()],
             )));
         }
         if self.max_targets == 0 {
-            return Err(CoreError::InvalidConfig("目标数上限必须大于 0".into()));
+            return Err(CoreError::InvalidConfig(i18n::render(
+                lang,
+                Key::PolicyTargetsZero,
+                &[],
+            )));
         }
         if self.max_targets > MAX_TARGETS {
-            return Err(CoreError::InvalidConfig(format!(
-                "目标数上限 {} 超过本程序的结构上限 {MAX_TARGETS}（只能收紧，不能放宽）",
-                self.max_targets
+            return Err(CoreError::InvalidConfig(i18n::render(
+                lang,
+                Key::PolicyTargetsTooHigh,
+                &[&self.max_targets.to_string(), &MAX_TARGETS.to_string()],
             )));
         }
         Ok(())
     }
 
-    /// 按策略检查目标列表：数量上限 + 保留网段。
+    /// 按策略检查目标列表（中文，等价于 `check_targets_in(.., Lang::Zh)`）。
+    pub fn check_targets(&self, targets: &[IpAddr]) -> CoreResult<()> {
+        self.check_targets_in(targets, Lang::Zh)
+    }
+
+    /// 按策略检查目标列表：数量上限 + 保留网段，提示按 `lang` 渲染。
     ///
     /// 保留网段**只报第一个**命中的地址并附原因。把 255 条都列出来不会让人
     /// 更快地修好配置，只会把真正的那一句淹掉。
-    pub fn check_targets(&self, targets: &[IpAddr]) -> CoreResult<()> {
-        self.validate()?;
+    pub fn check_targets_in(&self, targets: &[IpAddr], lang: Lang) -> CoreResult<()> {
+        self.validate_in(lang)?;
         if targets.len() > self.max_targets {
             return Err(CoreError::TooManyTargets {
                 actual: targets.len(),
@@ -176,32 +286,41 @@ impl ScanPolicy {
             return Ok(());
         }
         for ip in targets {
-            if let Some(reason) = reserved_reason(*ip) {
+            if let Some(kind) = reserved_kind(*ip) {
                 return Err(CoreError::ReservedTarget {
                     ip: ip.to_string(),
-                    reason: reason.to_string(),
+                    // 原因在**这里**就翻好，而不是留到错误类型里翻：
+                    // `CoreError::ReservedTarget` 的 `reason` 是自由文本，
+                    // 它不该知道保留网段有哪几个类别。
+                    reason: kind.reason(lang).to_string(),
                 });
             }
         }
         Ok(())
     }
 
-    /// 一行摘要，供界面与审计记录使用。
+    /// 一行摘要，供界面与审计记录使用（中文）。
     pub fn describe(&self) -> String {
+        self.describe_in(Lang::Zh)
+    }
+
+    /// 一行摘要，按 `lang` 渲染。
+    pub fn describe_in(&self, lang: Lang) -> String {
         let pps = if self.max_pps == 0 {
-            "不限速".to_string()
+            i18n::text(lang, Key::PolicyPpsUnlimited).to_string()
         } else {
-            format!("{} 包/秒", self.max_pps)
+            i18n::render(lang, Key::PolicyPpsValue, &[&self.max_pps.to_string()])
         };
-        format!(
-            "限速 {pps} · 目标上限 {}{}",
-            self.max_targets,
-            if self.allow_reserved {
-                " · 允许保留网段"
-            } else {
-                ""
-            }
-        )
+        let mut s = i18n::render(
+            lang,
+            Key::PolicyDescribe,
+            &[&pps, &self.max_targets.to_string()],
+        );
+        if self.allow_reserved {
+            // 单独拼一段而不是塞进模板：不显示时不能留下一个悬空的连接符。
+            s.push_str(i18n::text(lang, Key::PolicyDescribeReserved));
+        }
+        s
     }
 }
 
@@ -362,12 +481,24 @@ impl AuditEvent {
         }
     }
 
-    pub const fn label_zh(self) -> &'static str {
-        match self {
-            AuditEvent::SessionStart => "会话开始",
-            AuditEvent::Round => "轮次结束",
-            AuditEvent::SessionEnd => "会话结束",
-        }
+    /// 中文标签（等价于 `label_in(Lang::Zh)`）。
+    ///
+    /// 核心层内部的报表与导出仍在用它——**产物内容是数据契约**：
+    /// 同一份 CSV / HTML 在中英文机器上必须一致；只有界面跟着语言变。
+    pub fn label_zh(self) -> &'static str {
+        self.label_in(Lang::Zh)
+    }
+
+    /// 按语言渲染的标签。
+    pub fn label_in(self, lang: Lang) -> &'static str {
+        i18n::text(
+            lang,
+            match self {
+                AuditEvent::SessionStart => Key::LabelAuditSessionStart,
+                AuditEvent::Round => Key::LabelAuditRound,
+                AuditEvent::SessionEnd => Key::LabelAuditSessionEnd,
+            },
+        )
     }
 }
 
@@ -648,12 +779,32 @@ pub mod consent {
         std::fs::write(path, text).is_ok()
     }
 
-    /// 「仅用于获授权网络」的提示正文（三端共用同一份文案）。
-    pub fn notice_text() -> &'static str {
-        "CPing 只会向你**拥有或获授权管理**的网络发起探测。\n\
-         未经授权的端口扫描与主机探测在多数司法辖区是违法的。\n\
-         默认已开启速率上限，并对组播 / 保留段做了拒绝；请勿为了「快一点」而关掉它们。\n\
-         继续使用即表示你确认自己对所扫描的网络拥有授权。"
+    /// 「仅用于获授权网络」的提示正文（中文，三端共用同一份文案）。
+    ///
+    /// M18 起支持英文；这里保留中文签名是为了让既有调用点不用改。
+    pub fn notice_text() -> String {
+        notice_text_in(Lang::Zh)
+    }
+
+    /// 提示正文，按 `lang` 渲染。
+    ///
+    /// 原来文案里的 `**加粗**` 标记在 M18 去掉了：终端里它是**字面星号**，
+    /// 只会让这几句话更难读。要强调的部分改由界面自己排版。
+    pub fn notice_text_in(lang: Lang) -> String {
+        notice_lines_in(lang).join("\n")
+    }
+
+    /// 按行取提示正文，便于界面自行排版（TUI 的弹窗需要按行绘制）。
+    pub fn notice_lines_in(lang: Lang) -> Vec<&'static str> {
+        [
+            Key::ConsentLine1,
+            Key::ConsentLine2,
+            Key::ConsentLine3,
+            Key::ConsentLine4,
+        ]
+        .into_iter()
+        .map(|k| i18n::text(lang, k))
+        .collect()
     }
 }
 
@@ -1074,5 +1225,147 @@ mod tests {
         let text = open.describe();
         assert!(text.contains("不限速"), "{text}");
         assert!(text.contains("允许保留网段"), "{text}");
+    }
+
+    // -----------------------------------------------------------------------
+    // M18：本地化
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn reserved_kinds_have_unique_codes_and_are_all_reachable() {
+        // 每个类别都要能被某个真实地址命中——「定义了却判不出来」的类别
+        // 意味着某条规则的位置写错了。
+        let samples = [
+            ("224.0.0.1", ReservedKind::MulticastV4),
+            ("240.0.0.1", ReservedKind::ReservedRangeV4),
+            ("0.1.2.3", ReservedKind::ThisNetwork),
+            ("192.0.2.7", ReservedKind::TestNet1),
+            ("198.51.100.7", ReservedKind::TestNet2),
+            ("203.0.113.7", ReservedKind::TestNet3),
+            ("198.18.0.7", ReservedKind::BenchmarkNet),
+            ("::", ReservedKind::UnspecifiedV6),
+            ("ff02::1", ReservedKind::MulticastV6),
+            ("2001:db8::1", ReservedKind::DocNetV6),
+        ];
+        assert_eq!(samples.len(), ALL_RESERVED_KINDS.len());
+        let mut codes = std::collections::HashSet::new();
+        for (addr, want) in samples {
+            let ip: IpAddr = addr.parse().unwrap();
+            assert_eq!(reserved_kind(ip), Some(want), "{addr}");
+            assert!(codes.insert(want.code()), "{:?} 的 code 重复", want);
+        }
+        assert_eq!(codes.len(), ALL_RESERVED_KINDS.len());
+    }
+
+    #[test]
+    fn reserved_reason_is_the_chinese_rendering() {
+        // 兼容入口必须与显式中文渲染逐字一致。
+        for addr in ["224.0.0.1", "192.0.2.7", "2001:db8::1"] {
+            let ip: IpAddr = addr.parse().unwrap();
+            let kind = reserved_kind(ip).unwrap();
+            assert_eq!(reserved_reason(ip), Some(kind.reason(Lang::Zh)));
+        }
+    }
+
+    #[test]
+    fn reserved_reasons_are_english_when_asked() {
+        for kind in ALL_RESERVED_KINDS {
+            let zh = kind.reason(Lang::Zh);
+            let en = kind.reason(Lang::En);
+            assert_ne!(zh, en, "{:?} 的中英原因相同，说明漏译了", kind);
+            assert!(en.is_ascii(), "{:?} 的英文原因含非 ASCII 字符：{en}", kind);
+        }
+    }
+
+    #[test]
+    fn policy_validation_messages_are_localized() {
+        let bad_pps = ScanPolicy {
+            max_pps: MAX_PPS_LIMIT + 1,
+            ..ScanPolicy::default()
+        };
+        let e = bad_pps.validate_in(Lang::En).unwrap_err();
+        let s = e.localized(Lang::En);
+        assert!(s.contains("rate limit"), "{s}");
+        assert!(s.contains(&(MAX_PPS_LIMIT + 1).to_string()), "{s}");
+
+        let zero = ScanPolicy {
+            max_targets: 0,
+            ..ScanPolicy::default()
+        };
+        let s = zero.validate_in(Lang::En).unwrap_err().localized(Lang::En);
+        assert!(s.contains("greater than 0"), "{s}");
+
+        let too_big = ScanPolicy {
+            max_targets: MAX_TARGETS + 1,
+            ..ScanPolicy::default()
+        };
+        let s = too_big
+            .validate_in(Lang::En)
+            .unwrap_err()
+            .localized(Lang::En);
+        assert!(s.contains("structural maximum"), "{s}");
+
+        // 中文路径逐字不变（M17 的行为不能被 M18 改掉）。
+        assert!(bad_pps
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("速率上限"));
+    }
+
+    #[test]
+    fn reserved_target_error_follows_the_requested_language() {
+        let targets: Vec<IpAddr> = vec!["224.0.0.1".parse().unwrap()];
+        let e = ScanPolicy::default()
+            .check_targets_in(&targets, Lang::En)
+            .unwrap_err();
+        assert_eq!(e.code(), "reserved_target");
+        let s = e.localized(Lang::En);
+        assert!(
+            s.starts_with("target 224.0.0.1 is in a reserved range:"),
+            "{s}"
+        );
+        assert!(!s.contains("组播"), "{s}");
+
+        // 中文调用点（`check_targets`）仍然给出中文原因。
+        let e = ScanPolicy::default().check_targets(&targets).unwrap_err();
+        assert!(e.to_string().contains("组播"), "{e}");
+    }
+
+    #[test]
+    fn policy_describe_is_localized() {
+        let p = ScanPolicy::default();
+        assert_eq!(p.describe_in(Lang::Zh), p.describe());
+        let en = p.describe_in(Lang::En);
+        assert!(en.contains("rate limit 500 pps"), "{en}");
+        assert!(en.contains("target limit 65536"), "{en}");
+        assert!(!en.contains("不限速"), "{en}");
+
+        let open = ScanPolicy {
+            max_pps: 0,
+            allow_reserved: true,
+            ..ScanPolicy::default()
+        };
+        let en = open.describe_in(Lang::En);
+        assert!(en.contains("unlimited"), "{en}");
+        assert!(en.contains("reserved ranges allowed"), "{en}");
+    }
+
+    #[test]
+    fn consent_notice_is_localized_line_by_line() {
+        assert_eq!(consent::notice_text(), consent::notice_text_in(Lang::Zh));
+        let zh = consent::notice_lines_in(Lang::Zh);
+        let en = consent::notice_lines_in(Lang::En);
+        assert_eq!(zh.len(), 4);
+        assert_eq!(en.len(), 4);
+        for (a, b) in zh.iter().zip(en.iter()) {
+            assert_ne!(a, b, "有一行没有翻译：{a}");
+            assert!(b.is_ascii(), "英文提示含非 ASCII 字符：{b}");
+        }
+        // 英文版也必须说清「授权」「违法」「限速」这三件事。
+        let joined = en.join(" ");
+        for needle in ["authorised", "illegal", "rate limit"] {
+            assert!(joined.contains(needle), "英文提示缺少 {needle}：{joined}");
+        }
     }
 }

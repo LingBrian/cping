@@ -4,8 +4,10 @@
 //! 而 CLI 需要的参数面很小。手写解析配上全覆盖单测，比拉一个 3 万行的
 //! 参数库更划算，也更容易保证「非法输入一定报错而不是被忽略」。
 
+use crate::i18n::{self, Key};
 use cping_core::config::{MAX_CONCURRENCY, MAX_TIMEOUT_MS};
 use cping_core::export::ExportFormat;
+use cping_core::i18n::Lang;
 use cping_core::spec::ProbeMode;
 use cping_core::target::TargetRange;
 
@@ -21,130 +23,52 @@ pub const EXIT_BACKEND: i32 = 3;
 /// M14：时序默认保留天数。`--keep-days` 的默认值，也是「有没有被显式改过」的判据。
 pub const DEFAULT_KEEP_DAYS: u64 = 7;
 
-pub const HELP: &str = r#"CPing 无头命令行 —— 批量 PING，结果可导出，退出码可判
+/// 帮助文本（按语言取）。
+///
+/// 中英两份正文放在同目录的 `help_zh.txt` / `help_en.txt` 里，用 `include_str!`
+/// 在编译期嵌入：帮助文本很长，直接写进 `i18n.rs` 的字典表会把它挤得没法读。
+/// 它们仍然是 `&'static str` 条目，一样受「英文不得含中日韩字符」那条测试约束。
+pub fn help(lang: Lang) -> &'static str {
+    i18n::text(lang, Key::Help)
+}
 
-用法：
-  cping-cli --target <规格> [选项]
+/// 决定本次运行的语言：`--lang` 优先，否则用调用方给的兜底（通常是环境推断）。
+///
+/// 单独扫一遍 argv 而不是塞进主循环，是因为语言决定了**后面所有**错误信息
+/// 用哪种语言渲染——包括「`--lang` 自己取值非法」这一条。多次给 `--lang` 时
+/// **最后一次生效**（与主循环保持一致），非法取值一律报错、绝不静默忽略。
+pub fn resolve_lang(argv: &[String], fallback: Lang) -> Result<Lang, String> {
+    let mut found: Option<Lang> = None;
+    let mut i = 0;
+    while i < argv.len() {
+        let raw = argv[i].as_str();
+        let (flag, inline) = match raw.split_once('=') {
+            Some((k, v)) if k.starts_with("--") => (k, Some(v)),
+            _ => (raw, None),
+        };
+        if flag == "--lang" {
+            let value = match inline {
+                Some(v) => v.to_string(),
+                None => {
+                    i += 1;
+                    argv.get(i)
+                        .cloned()
+                        .ok_or_else(|| i18n::render(fallback, Key::ErrMissingValue, &["--lang"]))?
+                }
+            };
+            found = Some(parse_lang_value(fallback, &value)?);
+        }
+        i += 1;
+    }
+    Ok(found.unwrap_or(fallback))
+}
 
-目标规格（三者可混用，逗号/空格/换行分隔）：
-  192.168.1             C 类网段前三段（原版写法，默认 .1–.255 共 255 个）
-  192.168.1.7           单个地址
-  192.168.1.0/24        CIDR（必须写网络号；主机位非 0 会报错）
-  10.0.0.0/30, 192.168.1
-
-选项：
-  -t, --target <规格>     目标规格（必需，除非设置了 --target-file）
-      --target-file <f>   从文件读取目标规格（每行/逗号分隔）
-      --range <r>         standard | full | hosts_only（默认 standard）
-      --mode <m>          icmp | tcp（默认 icmp；Android 上默认 tcp）
-  -p, --port <n>          TCP 模式端口（默认 80）
-      --timeout <ms>      单目标超时（默认 1000，上限 60000）
-  -c, --concurrency <n>   并发数（默认 32，上限 256）
-      --enrich            扫描后补全 MAC 与厂商（读本机邻居表，离线 OUI 库）
-      --fingerprint       对在线主机做端口指纹 + 设备类型推断（M13）
-      --fp-ports <列表>   指纹探测的端口，如 22,80,443-445（默认内置常用集）
-      --no-banner         指纹时**不**抓取服务横幅（默认抓，只读不写）
-      --fp-timeout <ms>   指纹的单端口超时（默认 800，上限 60000）
-  -w, --watch <秒>        持续监控：每 N 秒重扫一轮，并输出变化
-  -n, --rounds <n>        watch 模式总轮数（默认一直跑，Ctrl+C 停止）
-      --history <路径>    把每轮追加到长期时序文件（跨会话累积，默认保留 7 天）
-      --report <路径>     结束时写出可用率报表（.csv 或 .html）
-      --keep-days <天>    时序保留天数（默认 7；仅与 --history 同用）
-      --alert             开启阈值告警（新增/离线/延迟/可用率）
-      --alert-kinds <列表> 启用哪几类：appeared,disappeared,latency,uptime（默认全部）
-      --alert-latency <ms> 延迟阈值（默认 200；严格大于才报）
-      --alert-uptime <百分比> 可用率阈值（默认 90；严格小于才报，0-100）
-      --alert-cooldown <秒> 同一主机同一类告警的冷却窗口（默认 300）
-      --alert-state <路径> 告警去重状态文件（跨会话保留冷却记录）
-      --mute-alerts       静音：规则照常求值、状态照常推进，只是不通知
-      --notify <列表>     通知通道：console,system,webhook,command,smtp（默认 console）
-      --notify-webhook <url> Webhook 地址（**仅 http://**，本构建不含 TLS）
-      --notify-cmd <模板> 通知命令模板，可重复；{title}/{body}/{json}/{count} 占位
-      --notify-smtp <host[:port]> 明文 SMTP 中继（不支持 TLS 与认证）
-      --notify-mail-from <地址>   邮件发件人
-      --notify-mail-to <地址,..>  邮件收件人
-      --notify-list       列出本平台各通知通道的可用性后退出
-      --out <路径>        导出结果；按扩展名决定格式（.csv/.txt/.json/.html）
-      --json <路径>       等价于 --out 且强制 JSON
-  -q, --quiet             不打印人类可读摘要（只输出文件与退出码）
-      --list-backends     列出本平台可用的探测后端与能力（含不可用的），然后退出
-      --config <路径>     读配置文件（模板 + [probe]/[colors]/[ui]/[monitor]）
-      --profile <名>      选用配置里的哪一份模板（名字不区分大小写）
-      --list-profiles     列出配置里的全部模板后退出（需同时给 --config）
-      --dump-config <路径> 把**这次实际生效**的参数写成配置文件后退出
-      --max-pps <n>       全局速率上限（探测包/秒，默认 500；写 0 = 不限速）
-      --max-targets <n>   单次任务的目标数上限（只能比结构上限 65536 更严）
-      --allow-reserved    放行组播 / 保留段等特殊网段（默认拒绝）
-      --audit <路径>      审计日志（JSONL 追加写；含谁/何时/参数/结果计数）
-  -h, --help              显示本帮助
-  -V, --version           显示版本
-
-退出码：
-  0  全部目标在线
-  1  有目标不在线（超时/不可达/端口关闭）
-  2  参数或配置错误
-  3  探测后端不可用（权限不足 / 平台不支持）
-
-示例：
-  cping-cli -t 192.168.1
-  cping-cli -t 192.168.1.0/24 --mode tcp --port 445 --out scan.csv
-  cping-cli -t 10.0.0.0/30 --json report.json --enrich
-  cping-cli -t 192.168.1 --fingerprint --out assets.csv
-  cping-cli -t 192.168.1 --watch 30 --out rounds.json
-  cping-cli -t 192.168.1 --watch 60 --history net.ts --report uptime.html
-  cping-cli -t 192.168.1 --watch 30 --alert --notify console,system
-  cping-cli -t 192.168.1 --watch 30 --alert --notify webhook \
-            --notify-webhook http://10.0.0.5:9000/cping
-  cping-cli -t 192.168.1 --alert --notify-cmd "curl -s -d {json} https://example.com/h"
-  cping-cli --config prod.toml --profile dmz --out dmz.csv
-  cping-cli --config prod.toml --list-profiles
-  cping-cli -t 10.0.0.0/24 -c 64 --dump-config nightly.toml
-
-关于 --config / --profile：
-  配置文件把「扫什么、怎么扫」固化成一份份**命名模板**，CI 与巡检脚本复用同一份：
-  写 [[profiles]] 段（**双方括号**；写成 [profiles] 会明确报错而不是被忽略）。
-  合并优先级**高 → 低**：命令行 → 模板 → 配置的 [probe]。模板只填空缺，
-  绝不覆盖你在命令行上手敲的值；每次都会把「哪些字段来自哪一层」逐条打印出来。
-  --profile 点名的模板不存在会**报错退出**，不会悄悄退回 default_profile。
-  配置文件带 schema_version：低版本的旧文件（v1 的 [probe] 写法）会被自动迁移，
-  高版本会**拒绝读取**（猜着读会吃掉你不认识的项）。不认识的键原样保留，
-  但**注释不保留**（子集解析器不建 AST）。
-  --dump-config 只写「扫什么、怎么扫」：导出路径、--history、通知通道、告警规则
-  刻意不写进去——否则换个模板会把通知一起换掉。
-
-关于 --max-pps / --max-targets / --allow-reserved / --audit（M17）：
-  这四项是**本机的合规策略**，刻意只走命令行、不进配置文件——否则一份从别处
-  拷来的模板就能把限速改成「不限速」，等于留了个绕过合规的暗门。
-  默认已限速（500 包/秒）并拒绝三类特殊网段：组播（会打扰整组主机）、
-  保留段（含 255.255.255.255 广播）、文档示例网段（公网不路由，扫了必失败）。
-  **私有网段与回环不拦**（10/8、172.16/12、192.168/16、127/8）——那正是本
-  工具的正常用途。命中时给出原因与放行方式，而不是笼统的「参数错误」。
-  越界值一律报错，不静默夹取：`--max-pps` 上限 100000、`--max-targets`
-  只能比 65536 更严（那是结果槽位的结构上限，参数突破不了）。
-  --audit 写出的是 JSONL（首行 `CPING-AUDIT 1`）：只记「谁、何时、扫了什么
-  规格、结果计数」，**不记**逐主机明细、MAC、厂商或反查出的主机名。
-
-关于 --fingerprint：
-  端口指纹是**独立于在线判定的第二趟探测**，只对在线主机做：
-  端口全关不会把主机改成离线，端口开放也不会把离线主机变在线。
-  服务横幅只读对方主动送出的前 256 字节，**不发送任何协议请求**；
-  设备类型是「厂商 + 开放端口」的**推断**结论，识别不出就留空。
-
-关于 --history / --report：
-  时序文件带格式版本号（首行 CPING-TS <版本>）；版本不符会**拒绝读取**并退
-  出码 2，绝不用猜出来的数据覆盖你已有的历史。每轮都立即落盘，Ctrl+C 也不
-  丢已跑过的轮次。报表数值可逐条对账回原始记录：降采样只做同类项相加，
-  观测轮数与 RTT 求和在合并前后守恒。注意「从未在线」的主机 RTT 记为 -，
-  而不是 0（0 会被读成「极快」）。
-
-关于 --alert / --notify：
-  规则匹配是纯函数：第一轮只建立基线（不发「新增主机」，否则扫个 /24 会一次
-  刷出 255 条）；阈值用严格不等号，恰好等于阈值不告警。通知通道**失败可见**：
-  每个通道单独汇报成功或失败原因，一个通道挂了不影响其它通道，也绝不阻塞
-  扫描主流程（投递在后台线程，队列满时丢弃并计数）。
-  webhook 只支持 http:// —— 本构建不含 TLS，不会把告警明文降级发出去；
-  需要 https 请用 --notify-cmd 调 curl 等自带 TLS 的工具。
-"#;
+/// 解析 `--lang` 的取值。非法取值用 `fallback` 语言报错（那个值本身不能信）。
+fn parse_lang_value(fallback: Lang, value: &str) -> Result<Lang, String> {
+    // 用 `Debug` 形式裹上引号：空串或带空格的取值在报错里看得见
+    let shown = format!("{value:?}");
+    Lang::parse(value).ok_or_else(|| i18n::render(fallback, Key::ErrInvalidLang, &[&shown]))
+}
 
 /// 解析后的命令行参数。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,6 +153,11 @@ pub struct Args {
     pub config_notes: Vec<String>,
     pub help: bool,
     pub version: bool,
+    /// 本次解析采用的界面语言（`--lang` 显式给，否则由环境推断）。
+    ///
+    /// 放在 `Args` 上而不是每次现算：`describe()` / `validate()` 与解析期的
+    /// 错误信息必须用**同一种**语言，否则同一次调用里会中英混排。
+    pub lang: Lang,
     /// 显式给出的 `--target`；用于判断「什么都没给」与「给了空串」的区别。
     pub target_given: bool,
     /// M16：以下几项是否被命令行**显式**给过（用于「模板只填空缺」）。
@@ -288,6 +217,9 @@ impl Default for Args {
             config_notes: Vec::new(),
             help: false,
             version: false,
+            // 与核心层同样的兜底：没有线索时中文。真正生效的语言在
+            // `parse_with` 里由 `--lang` / 环境决定。
+            lang: Lang::Zh,
             target_given: false,
             seen_range: false,
             seen_mode: false,
@@ -299,8 +231,24 @@ impl Default for Args {
 
 impl Args {
     /// 解析参数（不含程序名）。返回 `Err` 即为用法错误。
+    ///
+    /// 语言按「`--lang` 显式给 → 环境推断」决定（见 [`Lang::from_env`]）。
     pub fn parse(argv: &[String]) -> Result<Self, String> {
-        let mut args = Args::default();
+        Self::parse_with(argv, Lang::from_env())
+    }
+
+    /// 同 [`Args::parse`]，但把「环境推断」这一步的结果作为参数传进来。
+    ///
+    /// 拆出这一层是为了**可测**：测试直接给 `Lang::Zh` / `Lang::En`，
+    /// 就不必读写进程环境变量（cargo test 多线程跑，环境变量会互相污染）。
+    pub fn parse_with(argv: &[String], env_lang: Lang) -> Result<Self, String> {
+        // 语言必须在**任何错误信息产生之前**定下来：包括「--lang 自己取值非法」
+        // 这一条——它只能用环境推断出来的语言（那个非法值不能信）。
+        let mut args = Args {
+            lang: resolve_lang(argv, env_lang)?,
+            ..Args::default()
+        };
+        let lang = args.lang;
         let mut i = 0;
         while i < argv.len() {
             let raw = argv[i].as_str();
@@ -317,7 +265,7 @@ impl Args {
                 i += 1;
                 argv.get(i)
                     .cloned()
-                    .ok_or_else(|| format!("{name} 缺少取值"))
+                    .ok_or_else(|| i18n::render(lang, Key::ErrMissingValue, &[name]))
             };
 
             match flag {
@@ -328,16 +276,27 @@ impl Args {
                 "--enrich" => args.enrich = true,
                 "--fingerprint" | "--fp" => args.fingerprint = true,
                 "--no-banner" => args.fp_grab_banner = false,
+                "--lang" => {
+                    // 取值已在 `resolve_lang` 里校验过；这里再定一次，让
+                    // 「`--lang` 出现多次时最后一次生效」与它保持一致，
+                    // 同时**绝不静默忽略**非法取值。
+                    let v = take_value("--lang")?;
+                    args.lang = parse_lang_value(lang, &v)?;
+                }
                 "--fp-ports" => {
                     let v = take_value("--fp-ports")?;
                     let ports = cping_core::PortScanConfig::parse_ports(&v)
-                        .map_err(|e| format!("--fp-ports 无效：{e}"))?;
+                        .map_err(|e| i18n::render(lang, Key::ErrFpPorts, &[&e]))?;
                     args.fp_ports = ports;
                 }
                 "--fp-timeout" => {
-                    let v = parse_u64("--fp-timeout", &take_value("--fp-timeout")?)?;
+                    let v = parse_u64("--fp-timeout", &take_value("--fp-timeout")?, lang)?;
                     if v == 0 || v > MAX_TIMEOUT_MS {
-                        return Err(format!("--fp-timeout 必须在 1..={MAX_TIMEOUT_MS} 之间"));
+                        return Err(i18n::render(
+                            lang,
+                            Key::ErrFpTimeoutRange,
+                            &[&MAX_TIMEOUT_MS.to_string()],
+                        ));
                     }
                     args.fp_timeout_ms = v;
                 }
@@ -351,8 +310,13 @@ impl Args {
                 }
                 "--target-file" => {
                     let path = take_value("--target-file")?;
-                    let text = std::fs::read_to_string(&path)
-                        .map_err(|e| format!("读取目标文件 {path:?} 失败：{e}"))?;
+                    let text = std::fs::read_to_string(&path).map_err(|e| {
+                        i18n::render(
+                            lang,
+                            Key::ErrTargetFileRead,
+                            &[&format!("{path:?}"), &e.to_string()],
+                        )
+                    })?;
                     let cleaned: String = text
                         .lines()
                         .map(|l| l.trim())
@@ -367,13 +331,16 @@ impl Args {
                 }
                 "--range" => {
                     args.seen_range = true;
-                    args.range = match take_value("--range")?.to_ascii_lowercase().as_str() {
+                    let value = take_value("--range")?.to_ascii_lowercase();
+                    args.range = match value.as_str() {
                         "standard" => TargetRange::Standard,
                         "full" => TargetRange::Full,
                         "hosts_only" | "hosts-only" => TargetRange::HostsOnly,
                         other => {
-                            return Err(format!(
-                                "--range {other:?} 无效，只能是 standard / full / hosts_only"
+                            return Err(i18n::render(
+                                lang,
+                                Key::ErrRangeInvalid,
+                                &[&format!("{other:?}")],
                             ))
                         }
                     };
@@ -387,44 +354,58 @@ impl Args {
                             let port = args.mode.tcp_port().unwrap_or(80);
                             args.mode = ProbeMode::Tcp { port };
                         }
-                        other => return Err(format!("--mode {other:?} 无效，只能是 icmp / tcp")),
+                        other => {
+                            return Err(i18n::render(
+                                lang,
+                                Key::ErrModeInvalid,
+                                &[&format!("{other:?}")],
+                            ))
+                        }
                     }
                 }
                 "-p" | "--port" => {
-                    let port = parse_u16("--port", &take_value("--port")?)?;
+                    let port = parse_u16("--port", &take_value("--port")?, lang)?;
                     if port == 0 {
-                        return Err("--port 不能为 0".into());
+                        return Err(i18n::text(lang, Key::ErrPortZero).to_string());
                     }
                     args.seen_mode = true;
                     args.mode = ProbeMode::Tcp { port };
                 }
                 "--timeout" => {
                     args.seen_timeout = true;
-                    let v = parse_u64("--timeout", &take_value("--timeout")?)?;
+                    let v = parse_u64("--timeout", &take_value("--timeout")?, lang)?;
                     if v == 0 || v > MAX_TIMEOUT_MS {
-                        return Err(format!("--timeout 必须在 1..={MAX_TIMEOUT_MS} 之间"));
+                        return Err(i18n::render(
+                            lang,
+                            Key::ErrTimeoutRange,
+                            &[&MAX_TIMEOUT_MS.to_string()],
+                        ));
                     }
                     args.timeout_ms = v;
                 }
                 "-c" | "--concurrency" => {
                     args.seen_concurrency = true;
-                    let v = parse_u64("--concurrency", &take_value("--concurrency")?)?;
+                    let v = parse_u64("--concurrency", &take_value("--concurrency")?, lang)?;
                     if v == 0 || v > MAX_CONCURRENCY as u64 {
-                        return Err(format!("--concurrency 必须在 1..={MAX_CONCURRENCY} 之间"));
+                        return Err(i18n::render(
+                            lang,
+                            Key::ErrConcurrencyRange,
+                            &[&MAX_CONCURRENCY.to_string()],
+                        ));
                     }
                     args.concurrency = v as usize;
                 }
                 "-w" | "--watch" => {
-                    let v = parse_u64("--watch", &take_value("--watch")?)?;
+                    let v = parse_u64("--watch", &take_value("--watch")?, lang)?;
                     if v == 0 {
-                        return Err("--watch 间隔必须大于 0 秒".into());
+                        return Err(i18n::text(lang, Key::ErrWatchZero).to_string());
                     }
                     args.watch_seconds = Some(v);
                 }
                 "-n" | "--rounds" => {
-                    let v = parse_u64("--rounds", &take_value("--rounds")?)?;
+                    let v = parse_u64("--rounds", &take_value("--rounds")?, lang)?;
                     if v == 0 {
-                        return Err("--rounds 必须大于 0".into());
+                        return Err(i18n::text(lang, Key::ErrRoundsZero).to_string());
                     }
                     args.rounds = Some(v);
                 }
@@ -433,14 +414,14 @@ impl Args {
                     let path = take_value("--report")?;
                     let lower = path.to_ascii_lowercase();
                     if !lower.ends_with(".csv") && !lower.ends_with(".html") {
-                        return Err("--report 只支持 .csv 或 .html".into());
+                        return Err(i18n::text(lang, Key::ErrReportFormat).to_string());
                     }
                     args.report = Some(path);
                 }
                 "--keep-days" => {
-                    let v = parse_u64("--keep-days", &take_value("--keep-days")?)?;
+                    let v = parse_u64("--keep-days", &take_value("--keep-days")?, lang)?;
                     if v == 0 || v > 3650 {
-                        return Err("--keep-days 必须在 1..=3650 之间".into());
+                        return Err(i18n::text(lang, Key::ErrKeepDaysRange).to_string());
                     }
                     args.keep_days = v;
                 }
@@ -454,33 +435,34 @@ impl Args {
                             continue;
                         }
                         // 未知名字必须报错：静默忽略会让人以为规则开了，其实没开
-                        let kind = cping_core::AlertKind::parse_key(part)
-                            .ok_or_else(|| format!("--alert-kinds 不认识 {part:?}（appeared/disappeared/latency/uptime）"))?;
+                        let kind = cping_core::AlertKind::parse_key(part).ok_or_else(|| {
+                            i18n::render(lang, Key::ErrAlertKindsUnknown, &[&format!("{part:?}")])
+                        })?;
                         if !kinds.contains(&kind) {
                             kinds.push(kind);
                         }
                     }
                     if kinds.is_empty() {
-                        return Err("--alert-kinds 至少要给一类".into());
+                        return Err(i18n::text(lang, Key::ErrAlertKindsEmpty).to_string());
                     }
                     args.alert_kinds = kinds;
                     args.alert = true;
                 }
                 "--alert-latency" => {
-                    let v = parse_u32("--alert-latency", &take_value("--alert-latency")?)?;
+                    let v = parse_u32("--alert-latency", &take_value("--alert-latency")?, lang)?;
                     args.alert_latency_ms = v;
                     args.alert = true;
                 }
                 "--alert-uptime" => {
-                    let v = parse_u32("--alert-uptime", &take_value("--alert-uptime")?)?;
+                    let v = parse_u32("--alert-uptime", &take_value("--alert-uptime")?, lang)?;
                     if v > 100 {
-                        return Err("--alert-uptime 是百分数，必须在 0..=100 之间".into());
+                        return Err(i18n::text(lang, Key::ErrAlertUptimeRange).to_string());
                     }
                     args.alert_uptime_pct = v;
                     args.alert = true;
                 }
                 "--alert-cooldown" => {
-                    let v = parse_u64("--alert-cooldown", &take_value("--alert-cooldown")?)?;
+                    let v = parse_u64("--alert-cooldown", &take_value("--alert-cooldown")?, lang)?;
                     args.alert_cooldown_secs = v;
                     args.alert = true;
                 }
@@ -503,8 +485,10 @@ impl Args {
                             p.as_str(),
                             "console" | "system" | "webhook" | "command" | "smtp"
                         ) {
-                            return Err(format!(
-                                "--notify 不认识通道 {p:?}（console/system/webhook/command/smtp）"
+                            return Err(i18n::render(
+                                lang,
+                                Key::ErrNotifyUnknown,
+                                &[&format!("{p:?}")],
                             ));
                         }
                         if !args.notify_channels.contains(&p) {
@@ -541,11 +525,11 @@ impl Args {
                 }
                 "--notify-list" => args.notify_list = true,
                 "--max-pps" => {
-                    args.max_pps = parse_u32("--max-pps", &take_value("--max-pps")?)?;
+                    args.max_pps = parse_u32("--max-pps", &take_value("--max-pps")?, lang)?;
                 }
                 "--max-targets" => {
                     args.max_targets =
-                        parse_u64("--max-targets", &take_value("--max-targets")?)? as usize;
+                        parse_u64("--max-targets", &take_value("--max-targets")?, lang)? as usize;
                 }
                 "--allow-reserved" => args.allow_reserved = true,
                 "--audit" => args.audit = Some(take_value("--audit")?),
@@ -556,7 +540,7 @@ impl Args {
                 "-o" | "--out" => {
                     let path = take_value("--out")?;
                     let format = ExportFormat::from_path(&path).ok_or_else(|| {
-                        format!("--out {path:?} 的扩展名无法识别，请用 .csv / .txt / .json / .html")
+                        i18n::render(lang, Key::ErrOutExtension, &[&format!("{path:?}")])
                     })?;
                     args.out = Some((format, path));
                 }
@@ -564,7 +548,13 @@ impl Args {
                     let path = take_value("--json")?;
                     args.out = Some((ExportFormat::Json, path));
                 }
-                other => return Err(format!("未知参数 {other:?}（用 --help 查看用法）")),
+                other => {
+                    return Err(i18n::render(
+                        lang,
+                        Key::ErrUnknownFlag,
+                        &[&format!("{other:?}")],
+                    ))
+                }
             }
             i += 1;
         }
@@ -580,11 +570,12 @@ impl Args {
     ///
     /// 优先级（高 → 低）：命令行 → 模板 → 配置文件的 `[probe]`。
     fn apply_config(&mut self) -> Result<(), String> {
+        let lang = self.lang;
         if self.list_profiles && self.config.is_none() {
-            return Err("--list-profiles 需要同时给 --config".into());
+            return Err(i18n::text(lang, Key::ErrListProfilesNeedsConfig).to_string());
         }
         if self.profile.is_some() && self.config.is_none() {
-            return Err("--profile 需要同时给 --config（模板来自配置文件）".into());
+            return Err(i18n::text(lang, Key::ErrProfileNeedsConfig).to_string());
         }
         let Some(path) = self.config.clone() else {
             return Ok(());
@@ -594,21 +585,25 @@ impl Args {
             return Ok(());
         }
 
+        // 配置层的错误是核心层产出的：用 `localized` 拿对应语言的句子，
+        // 不在 CLI 里复刻它的判定逻辑。
         let (doc, notes) =
-            cping_core::ConfigDocument::load_from_path(&path).map_err(|e| e.to_string())?;
+            cping_core::ConfigDocument::load_from_path(&path).map_err(|e| e.localized(lang))?;
         self.config_notes.extend(notes);
 
         let selected = doc
             .select_profile(self.profile.as_deref())
-            .map_err(|e| format!("配置 {path}：{e}"))?
+            .map_err(|e| i18n::render(lang, Key::ErrConfigPrefix, &[&path, &e.localized(lang)]))?
             .cloned();
         match &selected {
-            Some(p) => self
-                .config_notes
-                .push(format!("配置 {path}：使用模板 {}（{}）", p.name, p.spec)),
-            None => self.config_notes.push(format!(
-                "配置 {path}：没有选中模板，只取 [probe] 的探测参数"
+            Some(p) => self.config_notes.push(i18n::render(
+                lang,
+                Key::NoteConfigUseProfile,
+                &[&path, &p.name, &p.spec],
             )),
+            None => self
+                .config_notes
+                .push(i18n::render(lang, Key::NoteConfigNoProfile, &[&path])),
         }
 
         // ---- 目标规格：命令行 > 模板 ----
@@ -617,16 +612,20 @@ impl Args {
                 // 值一样就不必打扰——同一件事说两遍会把真正重要的说明淹掉
                 // （与 range/timeout 那几个字段同一套判据）。
                 if self.target_spec.trim() != p.spec.trim() {
-                    self.config_notes.push(format!(
-                        "命令行 --target 盖掉了模板 {} 的目标规格（模板里是 {:?}）",
-                        p.name, p.spec
+                    self.config_notes.push(i18n::render(
+                        lang,
+                        Key::NoteCliTargetOverridesProfile,
+                        &[&p.name, &format!("{:?}", p.spec)],
                     ));
                 }
             } else {
                 self.target_spec = p.spec.clone();
                 self.target_given = true;
-                self.config_notes
-                    .push(format!("目标规格取自模板 {}：{}", p.name, p.spec));
+                self.config_notes.push(i18n::render(
+                    lang,
+                    Key::NoteTargetFromProfile,
+                    &[&p.name, &p.spec],
+                ));
             }
         }
 
@@ -690,24 +689,35 @@ impl Args {
         }
 
         if !from_profile.is_empty() {
-            self.config_notes
-                .push(format!("模板提供：{}", from_profile.join(" / ")));
+            self.config_notes.push(i18n::render(
+                lang,
+                Key::NoteProbeFromProfile,
+                &[&from_profile.join(" / ")],
+            ));
         }
         if !from_app.is_empty() {
-            self.config_notes
-                .push(format!("配置 [probe] 提供：{}", from_app.join(" / ")));
+            self.config_notes.push(i18n::render(
+                lang,
+                Key::NoteProbeFromApp,
+                &[&from_app.join(" / ")],
+            ));
         }
         if !overridden.is_empty() {
-            self.config_notes.push(format!(
-                "命令行 {} 盖掉了配置里的对应值",
-                overridden.join(" / ")
+            self.config_notes.push(i18n::render(
+                lang,
+                Key::NoteCliOverridesConfig,
+                &[&overridden.join(" / ")],
             ));
         }
 
         if let Some(n) = &self.profile {
             if selected.is_none() {
                 // `select_profile` 已经会在找不到时报错，这里只是兜底
-                return Err(format!("配置 {path} 里没有模板 {n:?}"));
+                return Err(i18n::render(
+                    lang,
+                    Key::ErrNoSuchProfile,
+                    &[&path, &format!("{n:?}")],
+                ));
             }
         }
         self.config_doc = Some(doc);
@@ -728,70 +738,108 @@ impl Args {
     }
 
     /// 校验「必需项都在」，返回可执行的配置。
+    ///
+    /// 核心层来的错误一律 `localized(lang)`，**不**在这里复刻判定逻辑。
     pub fn validate(&self) -> Result<(), String> {
+        let lang = self.lang;
         if self.help || self.version {
             return Ok(());
         }
         if !self.target_given || self.target_spec.trim().is_empty() {
-            return Err("缺少目标：请用 --target 指定（例如 --target 192.168.1），\
-                 或用 --config + --profile 选一份带目标的模板"
-                .into());
+            return Err(i18n::text(lang, Key::ErrMissingTarget).to_string());
         }
-        self.mode.validate().map_err(|e| e.to_string())?;
+        self.mode.validate().map_err(|e| e.localized(lang))?;
         // M17：策略越界一律报错，不静默夹取（「我设了 1000 怎么还是 500」
         // 比报错难查得多）。放在这里能让 `--list-profiles` 等早退分支不受影响，
         // 同时保证坏参数走不到发包那一步。
-        self.policy().validate().map_err(|e| e.to_string())?;
+        self.policy()
+            .validate_in(lang)
+            .map_err(|e| e.localized(lang))?;
         // M14：`--keep-days` 只在写时序文件时才有意义。静默忽略会让人以为
         // 「我明明设了 30 天，怎么还在按 7 天裁」——这类参数必须报错。
         if self.history.is_none() && self.keep_days != DEFAULT_KEEP_DAYS {
-            return Err("--keep-days 仅在同时指定 --history 时有意义".into());
+            return Err(i18n::text(lang, Key::ErrKeepDaysNeedsHistory).to_string());
         }
         self.validate_alert_flags()?;
         Ok(())
     }
 
     pub fn describe(&self) -> String {
-        let watch = match self.watch_seconds {
-            Some(s) => format!(" · 每 {s} 秒重扫"),
-            None => String::new(),
-        };
-        let fp = if self.fingerprint {
+        let lang = self.lang;
+        // 头一段（探测方式 / 并发 / 超时）之后逐段拼「 · xxx」后缀。
+        // 用 `push_str` 而不是一个大 `format!`：后缀段落各自由字典渲染，
+        // 顺序与「有没有这一段」都在代码里一眼可见。
+        let mut out = i18n::render(
+            lang,
+            Key::DescSummary,
+            &[
+                &self.mode.describe(),
+                &self.concurrency.to_string(),
+                &self.timeout_ms.to_string(),
+            ],
+        );
+        // M17：只在限速**被改动**时才提一句。默认值写进每一行只会变成噪音，
+        // 而「被关掉限速」是需要摆在明面上的事。
+        if self.max_pps != cping_core::DEFAULT_MAX_PPS || self.allow_reserved {
+            out.push_str(" · ");
+            out.push_str(&self.policy().describe_in(lang));
+        }
+        // M16：把「这次用了哪份模板」写进摘要。模板决定了扫哪个网段，
+        // 不写出来的话，同一份命令行换个默认模板就会扫出完全不同的结果。
+        match (&self.config, &self.profile) {
+            (Some(path), Some(name)) => out.push_str(&i18n::render(
+                lang,
+                Key::DescConfigWithProfile,
+                &[path, name],
+            )),
+            (Some(path), None) => {
+                out.push_str(&i18n::render(lang, Key::DescConfig, &[path]));
+            }
+            (None, _) => {}
+        }
+        if let Some(s) = self.watch_seconds {
+            out.push_str(&i18n::render(lang, Key::DescWatch, &[&s.to_string()]));
+        }
+        if self.fingerprint {
             let ports = if self.fp_ports.is_empty() {
-                format!("{} 个常用端口", cping_core::DEFAULT_FINGERPRINT_PORTS.len())
+                i18n::render(
+                    lang,
+                    Key::DescFpCommonPorts,
+                    &[&cping_core::DEFAULT_FINGERPRINT_PORTS.len().to_string()],
+                )
             } else {
-                format!("{} 个指定端口", self.fp_ports.len())
+                i18n::render(
+                    lang,
+                    Key::DescFpListedPorts,
+                    &[&self.fp_ports.len().to_string()],
+                )
             };
-            format!(
-                " · 端口指纹（{ports}{}）",
-                if self.fp_grab_banner {
-                    "，含横幅"
-                } else {
-                    ""
-                }
-            )
-        } else {
-            String::new()
-        };
+            let banner = if self.fp_grab_banner {
+                i18n::text(lang, Key::DescFpBanner)
+            } else {
+                ""
+            };
+            out.push_str(&i18n::render(lang, Key::DescFp, &[&ports, banner]));
+        }
         // M14：时序与报表
-        let hist = if self.history.is_some() {
-            format!(" · 长期时序（保留 {} 天）", self.keep_days)
-        } else {
-            String::new()
-        };
-        let rep = if self.report.is_some() {
-            " · 结束时出可用率报表"
-        } else {
-            ""
-        };
+        if self.history.is_some() {
+            out.push_str(&i18n::render(
+                lang,
+                Key::DescHistory,
+                &[&self.keep_days.to_string()],
+            ));
+        }
+        if self.report.is_some() {
+            out.push_str(i18n::text(lang, Key::DescReport));
+        }
         // M15：告警与通知
-        let alerts = if self.alert {
+        if self.alert {
             let kinds = if self.alert_kinds.is_empty() {
-                "全部".to_string()
+                i18n::text(lang, Key::AlertKindAll).to_string()
             } else {
                 self.alert_kinds
                     .iter()
-                    .map(|k| k.label_zh())
+                    .map(|k| alert_kind_label(lang, *k))
                     .collect::<Vec<_>>()
                     .join("/")
             };
@@ -800,37 +848,14 @@ impl Args {
             } else {
                 self.notify_channels.join("+")
             };
-            format!(
-                " · 告警（{kinds}）{} · 通知 {ch}",
-                if self.alert_muted {
-                    "［已静音］"
-                } else {
-                    ""
-                }
-            )
-        } else {
-            String::new()
-        };
-        // M16：把「这次用了哪份模板」写进摘要。模板决定了扫哪个网段，
-        // 不写出来的话，同一份命令行换个默认模板就会扫出完全不同的结果。
-        let cfg = match (&self.config, &self.profile) {
-            (Some(path), Some(name)) => format!(" · 配置 {path}［模板 {name}］"),
-            (Some(path), None) => format!(" · 配置 {path}"),
-            (None, _) => String::new(),
-        };
-        // M17：只在限速**被改动**时才提一句。默认值写进每一行只会变成噪音，
-        // 而「被关掉限速」是需要摆在明面上的事。
-        let pol = if self.max_pps != cping_core::DEFAULT_MAX_PPS || self.allow_reserved {
-            format!(" · {}", self.policy().describe())
-        } else {
-            String::new()
-        };
-        format!(
-            "{} · {} 并发 · 超时 {} ms{pol}{cfg}{watch}{fp}{hist}{rep}{alerts}",
-            self.mode.describe(),
-            self.concurrency,
-            self.timeout_ms,
-        )
+            let muted = if self.alert_muted {
+                i18n::text(lang, Key::DescAlertMuted)
+            } else {
+                ""
+            };
+            out.push_str(&i18n::render(lang, Key::DescAlerts, &[&kinds, muted, &ch]));
+        }
+        out
     }
 
     /// M13：把 CLI 参数收敛成一个核心层能直接消费的指纹配置。
@@ -936,36 +961,53 @@ impl Args {
     /// 2. 给了某通道的参数却没在 `--notify` 里选上它（参数被默默丢掉）；
     /// 3. 参数依赖关系缺失（SMTP 没写收件人）。
     fn validate_alert_flags(&self) -> Result<(), String> {
+        let lang = self.lang;
         let explicit = !self.notify_channels.is_empty();
         let wants = |name: &str| self.notify_channels.iter().any(|c| c == name);
         let on = |name: &str| !explicit || wants(name);
 
         if wants("webhook") && self.notify_webhook.is_none() {
-            return Err("--notify webhook 需要同时给 --notify-webhook <http://…>".into());
+            return Err(i18n::text(lang, Key::ErrNotifyWebhookNeedsUrl).to_string());
         }
         if wants("smtp") && self.notify_smtp.is_none() {
-            return Err("--notify smtp 需要同时给 --notify-smtp <host[:port]>".into());
+            return Err(i18n::text(lang, Key::ErrNotifySmtpNeedsHost).to_string());
         }
         if wants("command") && self.notify_cmds.is_empty() {
-            return Err("--notify command 需要同时给 --notify-cmd <模板>".into());
+            return Err(i18n::text(lang, Key::ErrNotifyCommandNeedsCmd).to_string());
         }
         if self.notify_webhook.is_some() && !on("webhook") {
-            return Err("给了 --notify-webhook 却没在 --notify 里选上 webhook".into());
+            return Err(i18n::text(lang, Key::ErrWebhookNotSelected).to_string());
         }
         if self.notify_smtp.is_some() && !on("smtp") {
-            return Err("给了 --notify-smtp 却没在 --notify 里选上 smtp".into());
+            return Err(i18n::text(lang, Key::ErrSmtpNotSelected).to_string());
         }
         if !self.notify_cmds.is_empty() && !on("command") {
-            return Err("给了 --notify-cmd 却没在 --notify 里选上 command".into());
+            return Err(i18n::text(lang, Key::ErrCommandNotSelected).to_string());
         }
         if self.notify_smtp.is_some() && self.notify_mail_to.is_empty() {
-            return Err("--notify-smtp 需要同时给 --notify-mail-to（至少一个收件人）".into());
+            return Err(i18n::text(lang, Key::ErrSmtpNeedsMailTo).to_string());
         }
         if !self.alert && self.alert_state.is_some() {
-            return Err("--alert-state 只在开启告警（--alert 或任一 --alert-*）时有意义".into());
+            return Err(i18n::text(lang, Key::ErrAlertStateNeedsAlert).to_string());
         }
         Ok(())
     }
+}
+
+/// 告警规则类型的**展示名**。
+///
+/// 核心层只提供 `AlertKind::label_zh()`，CLI 面向英文用户需要自己的展示名。
+/// 这里做的只是「键 → 展示名」的映射，**不是**复刻核心层的判定逻辑：
+/// 判定仍然完全在核心层按 [`cping_core::AlertKind`] 走。中文展示名与核心的
+/// `label_zh` 保持一致，避免同一台机器上两个界面说法不同。
+fn alert_kind_label(lang: Lang, kind: cping_core::AlertKind) -> String {
+    let key = match kind {
+        cping_core::AlertKind::Appeared => Key::AlertKindAppeared,
+        cping_core::AlertKind::Disappeared => Key::AlertKindDisappeared,
+        cping_core::AlertKind::LatencyAbove => Key::AlertKindLatency,
+        cping_core::AlertKind::UptimeBelow => Key::AlertKindUptime,
+    };
+    i18n::text(lang, key).to_string()
 }
 
 /// 「命令行给的显式值」与「配置里同一字段的值」是否真的不同。
@@ -1003,24 +1045,28 @@ fn mode_from(
     profile.map(|p| p.mode).unwrap_or(app.mode)
 }
 
-fn parse_u64(name: &str, text: &str) -> Result<u64, String> {
+fn parse_u64(name: &str, text: &str, lang: Lang) -> Result<u64, String> {
     text.trim()
         .parse::<u64>()
-        .map_err(|_| format!("{name} 需要一个非负整数，得到 {text:?}"))
+        .map_err(|_| i18n::render(lang, Key::ErrExpectInteger, &[name, &format!("{text:?}")]))
 }
 
-fn parse_u16(name: &str, text: &str) -> Result<u16, String> {
-    let v = parse_u64(name, text)?;
+fn parse_u16(name: &str, text: &str, lang: Lang) -> Result<u16, String> {
+    let v = parse_u64(name, text, lang)?;
     if v > u16::MAX as u64 {
-        return Err(format!("{name} 超出 0-65535"));
+        return Err(i18n::render(lang, Key::ErrOutOfRange16, &[name]));
     }
     Ok(v as u16)
 }
 
-fn parse_u32(name: &str, text: &str) -> Result<u32, String> {
-    let v = parse_u64(name, text)?;
+fn parse_u32(name: &str, text: &str, lang: Lang) -> Result<u32, String> {
+    let v = parse_u64(name, text, lang)?;
     if v > u32::MAX as u64 {
-        return Err(format!("{name} 超出 0-{}", u32::MAX));
+        return Err(i18n::render(
+            lang,
+            Key::ErrOutOfRange32,
+            &[name, &u32::MAX.to_string()],
+        ));
     }
     Ok(v as u32)
 }
@@ -1033,9 +1079,18 @@ mod tests {
         items.iter().map(|s| s.to_string()).collect()
     }
 
+    /// 测试统一以中文为兜底解析。
+    ///
+    /// 显式固定语言（而不是走 `Args::parse` 的 `from_env`）是为了让断言**确定**：
+    /// 宿主机 `LANG=en` 之类的环境变量不该改变测试结果。要测英文时用
+    /// `Args::parse_with(&argv(...), Lang::Zh)` 并在 argv 里显式给 `--lang en`。
+    fn parse(items: &[String]) -> Result<Args, String> {
+        Args::parse_with(items, Lang::Zh)
+    }
+
     #[test]
     fn defaults_are_the_documented_ones() {
-        let a = Args::parse(&argv(&["-t", "192.168.1"])).unwrap();
+        let a = parse(&argv(&["-t", "192.168.1"])).unwrap();
         assert_eq!(a.range, TargetRange::Standard);
         assert_eq!(a.timeout_ms, 1000);
         assert_eq!(a.concurrency, 32);
@@ -1045,29 +1100,29 @@ mod tests {
 
     #[test]
     fn supports_both_spaced_and_inline_values() {
-        let a = Args::parse(&argv(&["--target=10.0.0.0/30", "--timeout=2500"])).unwrap();
+        let a = parse(&argv(&["--target=10.0.0.0/30", "--timeout=2500"])).unwrap();
         assert_eq!(a.target_spec, "10.0.0.0/30");
         assert_eq!(a.timeout_ms, 2500);
     }
 
     #[test]
     fn repeated_targets_are_concatenated() {
-        let a = Args::parse(&argv(&["-t", "10.0.0.1", "-t", "10.0.0.2"])).unwrap();
+        let a = parse(&argv(&["-t", "10.0.0.1", "-t", "10.0.0.2"])).unwrap();
         assert_eq!(a.target_spec, "10.0.0.1,10.0.0.2");
     }
 
     #[test]
     fn mode_and_port_stay_consistent() {
-        let a = Args::parse(&argv(&["-t", "10.0.0.1", "--mode", "tcp"])).unwrap();
+        let a = parse(&argv(&["-t", "10.0.0.1", "--mode", "tcp"])).unwrap();
         assert_eq!(a.mode, ProbeMode::Tcp { port: 80 });
         // 先给 mode 再给 port：port 生效
-        let b = Args::parse(&argv(&["-t", "10.0.0.1", "--mode=tcp", "-p", "445"])).unwrap();
+        let b = parse(&argv(&["-t", "10.0.0.1", "--mode=tcp", "-p", "445"])).unwrap();
         assert_eq!(b.mode, ProbeMode::Tcp { port: 445 });
         // 只给 port：隐含 TCP
-        let c = Args::parse(&argv(&["-t", "10.0.0.1", "-p", "22"])).unwrap();
+        let c = parse(&argv(&["-t", "10.0.0.1", "-p", "22"])).unwrap();
         assert_eq!(c.mode, ProbeMode::Tcp { port: 22 });
         // 后面再写 icmp 可以切回去
-        let d = Args::parse(&argv(&["-t", "10.0.0.1", "-p", "22", "--mode", "icmp"])).unwrap();
+        let d = parse(&argv(&["-t", "10.0.0.1", "-p", "22", "--mode", "icmp"])).unwrap();
         assert_eq!(d.mode, ProbeMode::Icmp);
     }
 
@@ -1080,77 +1135,77 @@ mod tests {
             ("hosts-only", TargetRange::HostsOnly),
             ("FULL", TargetRange::Full),
         ] {
-            let a = Args::parse(&argv(&["-t", "10.0.0.1", "--range", input])).unwrap();
+            let a = parse(&argv(&["-t", "10.0.0.1", "--range", input])).unwrap();
             assert_eq!(a.range, expect);
         }
-        assert!(Args::parse(&argv(&["-t", "10.0.0.1", "--range", "wat"])).is_err());
+        assert!(parse(&argv(&["-t", "10.0.0.1", "--range", "wat"])).is_err());
     }
 
     #[test]
     fn out_infers_format_from_extension() {
-        let a = Args::parse(&argv(&["-t", "10.0.0.1", "--out", "x/y/report.HTML"])).unwrap();
+        let a = parse(&argv(&["-t", "10.0.0.1", "--out", "x/y/report.HTML"])).unwrap();
         assert_eq!(a.out, Some((ExportFormat::Html, "x/y/report.HTML".into())));
-        let b = Args::parse(&argv(&["-t", "10.0.0.1", "--json", "d.json"])).unwrap();
+        let b = parse(&argv(&["-t", "10.0.0.1", "--json", "d.json"])).unwrap();
         assert_eq!(b.out, Some((ExportFormat::Json, "d.json".into())));
     }
 
     #[test]
     fn unknown_extension_for_out_is_rejected() {
-        let err = Args::parse(&argv(&["-t", "10.0.0.1", "--out", "x.xml"])).unwrap_err();
+        let err = parse(&argv(&["-t", "10.0.0.1", "--out", "x.xml"])).unwrap_err();
         assert!(err.contains("扩展名"), "{err}");
     }
 
     #[test]
     fn unknown_flags_are_rejected_not_ignored() {
-        assert!(Args::parse(&argv(&["--nope"])).is_err());
-        assert!(Args::parse(&argv(&["-t"])).is_err(), "缺值必须报错");
+        assert!(parse(&argv(&["--nope"])).is_err());
+        assert!(parse(&argv(&["-t"])).is_err(), "缺值必须报错");
     }
 
     #[test]
     fn numeric_bounds_are_enforced() {
-        assert!(Args::parse(&argv(&["-t", "a", "--timeout", "0"])).is_err());
-        assert!(Args::parse(&argv(&["-t", "a", "--timeout", "60001"])).is_err());
-        assert!(Args::parse(&argv(&["-t", "a", "--timeout", "60000"])).is_ok());
-        assert!(Args::parse(&argv(&["-t", "a", "-c", "0"])).is_err());
-        assert!(Args::parse(&argv(&["-t", "a", "-c", "257"])).is_err());
-        assert!(Args::parse(&argv(&["-t", "a", "-c", "256"])).is_ok());
-        assert!(Args::parse(&argv(&["-t", "a", "-p", "0"])).is_err());
-        assert!(Args::parse(&argv(&["-t", "a", "-p", "65536"])).is_err());
-        assert!(Args::parse(&argv(&["-t", "a", "--timeout", "abc"])).is_err());
+        assert!(parse(&argv(&["-t", "a", "--timeout", "0"])).is_err());
+        assert!(parse(&argv(&["-t", "a", "--timeout", "60001"])).is_err());
+        assert!(parse(&argv(&["-t", "a", "--timeout", "60000"])).is_ok());
+        assert!(parse(&argv(&["-t", "a", "-c", "0"])).is_err());
+        assert!(parse(&argv(&["-t", "a", "-c", "257"])).is_err());
+        assert!(parse(&argv(&["-t", "a", "-c", "256"])).is_ok());
+        assert!(parse(&argv(&["-t", "a", "-p", "0"])).is_err());
+        assert!(parse(&argv(&["-t", "a", "-p", "65536"])).is_err());
+        assert!(parse(&argv(&["-t", "a", "--timeout", "abc"])).is_err());
     }
 
     #[test]
     fn watch_and_rounds_are_validated() {
-        let a = Args::parse(&argv(&["-t", "a", "-w", "30", "-n", "3"])).unwrap();
+        let a = parse(&argv(&["-t", "a", "-w", "30", "-n", "3"])).unwrap();
         assert_eq!(a.watch_seconds, Some(30));
         assert_eq!(a.rounds, Some(3));
-        assert!(Args::parse(&argv(&["-t", "a", "-w", "0"])).is_err());
-        assert!(Args::parse(&argv(&["-t", "a", "-n", "0"])).is_err());
+        assert!(parse(&argv(&["-t", "a", "-w", "0"])).is_err());
+        assert!(parse(&argv(&["-t", "a", "-n", "0"])).is_err());
     }
 
     #[test]
     fn help_and_version_short_circuit_validation() {
-        let a = Args::parse(&argv(&["--help"])).unwrap();
+        let a = parse(&argv(&["--help"])).unwrap();
         assert!(a.help);
         assert!(a.validate().is_ok(), "帮助不需要目标");
-        let b = Args::parse(&argv(&["-V"])).unwrap();
+        let b = parse(&argv(&["-V"])).unwrap();
         assert!(b.version);
         assert!(b.validate().is_ok());
     }
 
     #[test]
     fn missing_target_is_a_usage_error() {
-        let a = Args::parse(&argv(&["--quiet"])).unwrap();
+        let a = parse(&argv(&["--quiet"])).unwrap();
         let err = a.validate().unwrap_err();
         assert!(err.contains("缺少目标"), "{err}");
         // 显式给了空目标也算缺失
-        let b = Args::parse(&argv(&["-t", "  "])).unwrap();
+        let b = parse(&argv(&["-t", "  "])).unwrap();
         assert!(b.validate().is_err());
     }
 
     #[test]
     fn describe_mentions_mode_concurrency_and_timeout() {
-        let a = Args::parse(&argv(&[
+        let a = parse(&argv(&[
             "-t",
             "a",
             "-p",
@@ -1170,13 +1225,13 @@ mod tests {
 
     #[test]
     fn fingerprint_flags_are_parsed_and_defaults_are_conservative() {
-        let a = Args::parse(&argv(&["-t", "10.0.0.1"])).unwrap();
+        let a = parse(&argv(&["-t", "10.0.0.1"])).unwrap();
         assert!(!a.fingerprint, "默认不做指纹");
         assert!(a.fp_grab_banner, "默认抓横幅（只读）");
         assert_eq!(a.fp_timeout_ms, 800);
         assert!(a.fp_ports.is_empty(), "默认用核心内置端口集");
 
-        let b = Args::parse(&argv(&[
+        let b = parse(&argv(&[
             "-t",
             "10.0.0.1",
             "--fingerprint",
@@ -1198,30 +1253,26 @@ mod tests {
         assert_eq!(cfg.timeout.as_millis(), 1500);
 
         // 短别名
-        assert!(
-            Args::parse(&argv(&["-t", "a", "--fp"]))
-                .unwrap()
-                .fingerprint
-        );
+        assert!(parse(&argv(&["-t", "a", "--fp"])).unwrap().fingerprint);
     }
 
     #[test]
     fn fingerprint_flag_errors_are_reported() {
-        assert!(Args::parse(&argv(&["-t", "a", "--fp-ports", "abc"])).is_err());
-        assert!(Args::parse(&argv(&["-t", "a", "--fp-ports", "0-5"])).is_err());
-        assert!(Args::parse(&argv(&["-t", "a", "--fp-timeout", "0"])).is_err());
-        assert!(Args::parse(&argv(&["-t", "a", "--fp-timeout", "99999"])).is_err());
+        assert!(parse(&argv(&["-t", "a", "--fp-ports", "abc"])).is_err());
+        assert!(parse(&argv(&["-t", "a", "--fp-ports", "0-5"])).is_err());
+        assert!(parse(&argv(&["-t", "a", "--fp-timeout", "0"])).is_err());
+        assert!(parse(&argv(&["-t", "a", "--fp-timeout", "99999"])).is_err());
     }
 
     #[test]
     fn describe_mentions_fingerprint_only_when_enabled() {
-        let off = Args::parse(&argv(&["-t", "a"])).unwrap();
+        let off = parse(&argv(&["-t", "a"])).unwrap();
         assert!(!off.describe().contains("指纹"));
-        let on = Args::parse(&argv(&["-t", "a", "--fingerprint"])).unwrap();
+        let on = parse(&argv(&["-t", "a", "--fingerprint"])).unwrap();
         let text = on.describe();
         assert!(text.contains("端口指纹"), "{text}");
         assert!(text.contains("含横幅"), "{text}");
-        let no_banner = Args::parse(&argv(&["-t", "a", "--fingerprint", "--no-banner"])).unwrap();
+        let no_banner = parse(&argv(&["-t", "a", "--fingerprint", "--no-banner"])).unwrap();
         assert!(!no_banner.describe().contains("含横幅"));
     }
 
@@ -1231,7 +1282,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("targets.txt");
         std::fs::write(&path, "# 注释\n10.0.0.1\n\n10.0.0.2\n").unwrap();
-        let a = Args::parse(&argv(&[
+        let a = parse(&argv(&[
             "--target-file",
             path.to_str().unwrap(),
             "-t",
@@ -1249,7 +1300,7 @@ mod tests {
 
     #[test]
     fn missing_target_file_is_a_clear_error() {
-        let err = Args::parse(&argv(&["--target-file", "no/such/file"])).unwrap_err();
+        let err = parse(&argv(&["--target-file", "no/such/file"])).unwrap_err();
         assert!(err.contains("读取目标文件"), "{err}");
     }
 
@@ -1259,7 +1310,7 @@ mod tests {
 
     #[test]
     fn history_and_report_default_to_off() {
-        let a = Args::parse(&argv(&["-t", "10.0.0.1"])).unwrap();
+        let a = parse(&argv(&["-t", "10.0.0.1"])).unwrap();
         assert!(a.history.is_none(), "不指定就不落盘——没写文件是默认行为");
         assert!(a.report.is_none());
         assert_eq!(a.keep_days, DEFAULT_KEEP_DAYS);
@@ -1270,7 +1321,7 @@ mod tests {
 
     #[test]
     fn history_report_and_keep_days_are_parsed() {
-        let a = Args::parse(&argv(&[
+        let a = parse(&argv(&[
             "-t",
             "10.0.0.1",
             "--watch",
@@ -1294,20 +1345,20 @@ mod tests {
 
     #[test]
     fn report_only_accepts_csv_or_html() {
-        assert!(Args::parse(&argv(&["-t", "a", "--report", "out.csv"])).is_ok());
-        assert!(Args::parse(&argv(&["-t", "a", "--report", "out.HTML"])).is_ok());
-        let err = Args::parse(&argv(&["-t", "a", "--report", "out.json"])).unwrap_err();
+        assert!(parse(&argv(&["-t", "a", "--report", "out.csv"])).is_ok());
+        assert!(parse(&argv(&["-t", "a", "--report", "out.HTML"])).is_ok());
+        let err = parse(&argv(&["-t", "a", "--report", "out.json"])).unwrap_err();
         assert!(err.contains("只支持"), "{err}");
     }
 
     #[test]
     fn keep_days_bounds_and_requires_history() {
-        assert!(Args::parse(&argv(&["-t", "a", "--history", "x", "--keep-days", "0"])).is_err());
-        assert!(Args::parse(&argv(&["-t", "a", "--history", "x", "--keep-days", "3651"])).is_err());
-        assert!(Args::parse(&argv(&["-t", "a", "--history", "x", "--keep-days", "3650"])).is_ok());
+        assert!(parse(&argv(&["-t", "a", "--history", "x", "--keep-days", "0"])).is_err());
+        assert!(parse(&argv(&["-t", "a", "--history", "x", "--keep-days", "3651"])).is_err());
+        assert!(parse(&argv(&["-t", "a", "--history", "x", "--keep-days", "3650"])).is_ok());
 
         // 单独给 --keep-days 是无效组合，必须报错而不是静默忽略
-        let a = Args::parse(&argv(&["-t", "a", "--keep-days", "30"])).unwrap();
+        let a = parse(&argv(&["-t", "a", "--keep-days", "30"])).unwrap();
         let err = a.validate().unwrap_err();
         assert!(err.contains("--history"), "{err}");
     }
@@ -1318,7 +1369,7 @@ mod tests {
 
     #[test]
     fn alert_flags_default_to_off_and_are_parsed() {
-        let a = Args::parse(&argv(&["-t", "10.0.0.1"])).unwrap();
+        let a = parse(&argv(&["-t", "10.0.0.1"])).unwrap();
         assert!(!a.alert, "不指定 --alert 就不该有告警");
         assert!(a.alert_kinds.is_empty());
         assert_eq!(a.alert_latency_ms, cping_core::DEFAULT_LATENCY_THRESHOLD_MS);
@@ -1326,7 +1377,7 @@ mod tests {
         assert!(a.notify_channels.is_empty());
         assert!(!a.describe().contains("告警"), "{}", a.describe());
 
-        let b = Args::parse(&argv(&[
+        let b = parse(&argv(&[
             "-t",
             "10.0.0.1",
             "--alert",
@@ -1366,27 +1417,27 @@ mod tests {
 
     #[test]
     fn alert_flag_errors_are_reported_not_ignored() {
-        assert!(Args::parse(&argv(&["-t", "a", "--alert-kinds", "nope"])).is_err());
-        assert!(Args::parse(&argv(&["-t", "a", "--alert-kinds", ""])).is_err());
-        assert!(Args::parse(&argv(&["-t", "a", "--alert-uptime", "101"])).is_err());
-        assert!(Args::parse(&argv(&["-t", "a", "--alert-latency", "abc"])).is_err());
+        assert!(parse(&argv(&["-t", "a", "--alert-kinds", "nope"])).is_err());
+        assert!(parse(&argv(&["-t", "a", "--alert-kinds", ""])).is_err());
+        assert!(parse(&argv(&["-t", "a", "--alert-uptime", "101"])).is_err());
+        assert!(parse(&argv(&["-t", "a", "--alert-latency", "abc"])).is_err());
         // --alert-state 单独给没有意义
-        let a = Args::parse(&argv(&["-t", "a", "--alert-state", "s.txt"])).unwrap();
+        let a = parse(&argv(&["-t", "a", "--alert-state", "s.txt"])).unwrap();
         assert!(a.alert, "--alert-state 本身即开启告警");
-        let b = Args::parse(&argv(&["-t", "a"])).unwrap();
+        let b = parse(&argv(&["-t", "a"])).unwrap();
         assert!(b.validate().is_ok());
     }
 
     #[test]
     fn notify_defaults_to_console_and_channel_params_are_collected() {
-        let a = Args::parse(&argv(&["-t", "a", "--alert"])).unwrap();
+        let a = parse(&argv(&["-t", "a", "--alert"])).unwrap();
         assert_eq!(
             a.notify_config().keys(),
             vec!["console"],
             "默认只用 console"
         );
 
-        let b = Args::parse(&argv(&[
+        let b = parse(&argv(&[
             "-t",
             "a",
             "--notify-cmd",
@@ -1402,7 +1453,7 @@ mod tests {
         );
         assert!(b.validate().is_ok());
 
-        let c = Args::parse(&argv(&[
+        let c = parse(&argv(&[
             "-t",
             "a",
             "--notify",
@@ -1413,7 +1464,7 @@ mod tests {
         .unwrap();
         assert_eq!(c.notify_config().keys(), vec!["webhook"]);
 
-        let d = Args::parse(&argv(&[
+        let d = parse(&argv(&[
             "-t",
             "a",
             "--notify",
@@ -1441,17 +1492,17 @@ mod tests {
     #[test]
     fn notify_channel_misuse_is_a_usage_error() {
         // 点名了通道却不给必填参数 → 报错，别静默变成「什么也不发」
-        let a = Args::parse(&argv(&["-t", "a", "--notify", "webhook"])).unwrap();
+        let a = parse(&argv(&["-t", "a", "--notify", "webhook"])).unwrap();
         assert!(a.validate().unwrap_err().contains("--notify-webhook"));
 
-        let b = Args::parse(&argv(&["-t", "a", "--notify", "smtp"])).unwrap();
+        let b = parse(&argv(&["-t", "a", "--notify", "smtp"])).unwrap();
         assert!(b.validate().unwrap_err().contains("--notify-smtp"));
 
-        let c = Args::parse(&argv(&["-t", "a", "--notify-smtp", "mail.lan"])).unwrap();
+        let c = parse(&argv(&["-t", "a", "--notify-smtp", "mail.lan"])).unwrap();
         assert!(c.validate().unwrap_err().contains("--notify-mail-to"));
 
         // 给了 webhook 地址却没在 --notify 里选上它
-        let d = Args::parse(&argv(&[
+        let d = parse(&argv(&[
             "-t",
             "a",
             "--notify",
@@ -1462,9 +1513,9 @@ mod tests {
         .unwrap();
         assert!(d.validate().unwrap_err().contains("webhook"));
 
-        assert!(Args::parse(&argv(&["-t", "a", "--notify", "telegram"])).is_err());
+        assert!(parse(&argv(&["-t", "a", "--notify", "telegram"])).is_err());
         assert!(
-            Args::parse(&argv(&["-t", "a", "--notify-list"]))
+            parse(&argv(&["-t", "a", "--notify-list"]))
                 .unwrap()
                 .notify_list
         );
@@ -1521,16 +1572,15 @@ note = ""
     #[test]
     fn m16_profile_flags_require_config() {
         // 模板来自配置文件，单独给 --profile 只能是个误会，必须报错
-        let e = Args::parse(&argv(&["--profile", "lan"])).unwrap_err();
+        let e = parse(&argv(&["--profile", "lan"])).unwrap_err();
         assert!(e.contains("--config"), "{e}");
-        let e = Args::parse(&argv(&["--list-profiles"])).unwrap_err();
+        let e = parse(&argv(&["--list-profiles"])).unwrap_err();
         assert!(e.contains("--config"), "{e}");
     }
 
     #[test]
     fn m16_missing_config_file_is_an_error_not_a_fallback() {
-        let e =
-            Args::parse(&argv(&["--config", "no/such/cping.toml", "-t", "10.0.0.1"])).unwrap_err();
+        let e = parse(&argv(&["--config", "no/such/cping.toml", "-t", "10.0.0.1"])).unwrap_err();
         assert!(e.contains("读取配置"), "{e}");
         // 路径拼错绝不能退化成「按默认值跑」——那是最难查的一类问题
         assert!(!e.contains("默认"), "{e}");
@@ -1540,7 +1590,7 @@ note = ""
     fn m16_profile_fills_target_and_probe_params() {
         let path = write_config("fill.toml", CFG);
         // 命令行一个探测参数都没给，全部由模板填空
-        let a = Args::parse(&argv(&["--config", path.as_str(), "--profile", "dmz"])).unwrap();
+        let a = parse(&argv(&["--config", path.as_str(), "--profile", "dmz"])).unwrap();
         assert_eq!(a.target_spec, "10.2.0.0/30");
         assert_eq!(a.timeout_ms, 2500);
         assert_eq!(a.concurrency, 4);
@@ -1552,7 +1602,7 @@ note = ""
     #[test]
     fn m16_default_profile_is_used_when_profile_is_omitted() {
         let path = write_config("default.toml", CFG);
-        let a = Args::parse(&argv(&["--config", path.as_str()])).unwrap();
+        let a = parse(&argv(&["--config", path.as_str()])).unwrap();
         assert_eq!(
             a.target_spec, "10.1.0.0/30",
             "没给 --profile 时用 default_profile"
@@ -1565,7 +1615,7 @@ note = ""
     #[test]
     fn m16_cli_values_always_win_over_the_profile() {
         let path = write_config("cli-wins.toml", CFG);
-        let a = Args::parse(&argv(&[
+        let a = parse(&argv(&[
             "--config",
             path.as_str(),
             "--profile",
@@ -1596,7 +1646,7 @@ note = ""
     fn m16_same_value_is_not_reported_as_a_conflict() {
         // 命令行给的值与模板一致时说「盖掉了」纯属噪音，会把真正的说明淹掉
         let path = write_config("same.toml", CFG);
-        let a = Args::parse(&argv(&[
+        let a = parse(&argv(&[
             "--config",
             path.as_str(),
             "--profile",
@@ -1615,7 +1665,7 @@ note = ""
     #[test]
     fn m16_unknown_profile_is_an_error_listing_what_exists() {
         let path = write_config("unknown.toml", CFG);
-        let e = Args::parse(&argv(&["--config", path.as_str(), "--profile", "prod"])).unwrap_err();
+        let e = parse(&argv(&["--config", path.as_str(), "--profile", "prod"])).unwrap_err();
         assert!(e.contains("没有名为 \"prod\" 的模板"), "{e}");
         // 报错要顺手列出现有模板，否则用户只能去翻文件
         assert!(e.contains("lan") && e.contains("dmz"), "{e}");
@@ -1624,7 +1674,7 @@ note = ""
     #[test]
     fn m16_notes_explain_where_each_field_came_from() {
         let path = write_config("notes.toml", CFG);
-        let a = Args::parse(&argv(&["--config", path.as_str()])).unwrap();
+        let a = parse(&argv(&["--config", path.as_str()])).unwrap();
         let notes = a.config_notes.join("\n");
         assert!(notes.contains("使用模板 lan"), "{notes}");
         assert!(notes.contains("目标规格取自模板"), "{notes}");
@@ -1637,7 +1687,7 @@ note = ""
         let v1 = "schema_version = 1\n\n[probe]\nprefix = \"10.5.0\"\nrange = \"full\"\n\
                   timeout_ms = 900\nconcurrency = 48\nmode = \"icmp\"\ntcp_port = 80\n";
         let path = write_config("v1.toml", v1);
-        let a = Args::parse(&argv(&["--config", path.as_str()])).unwrap();
+        let a = parse(&argv(&["--config", path.as_str()])).unwrap();
         assert_eq!(
             a.target_spec, "10.5.0",
             "v1 的 [probe].prefix 要顶上来当目标"
@@ -1652,7 +1702,7 @@ note = ""
     #[test]
     fn m16_newer_schema_is_refused_not_guessed() {
         let path = write_config("newer.toml", "schema_version = 99\n");
-        let e = Args::parse(&argv(&["--config", path.as_str(), "-t", "10.0.0.1"])).unwrap_err();
+        let e = parse(&argv(&["--config", path.as_str(), "-t", "10.0.0.1"])).unwrap_err();
         assert!(e.contains("拒绝读取"), "{e}");
     }
 
@@ -1661,12 +1711,12 @@ note = ""
         // 配置坏了也得能查用法——否则用户连「怎么改」都看不到
         let path = write_config("broken-help.toml", "这不是 TOML\n");
         assert!(
-            Args::parse(&argv(&["--config", path.as_str(), "--help"]))
+            parse(&argv(&["--config", path.as_str(), "--help"]))
                 .unwrap()
                 .help
         );
         assert!(
-            Args::parse(&argv(&["--config", path.as_str(), "-V"]))
+            parse(&argv(&["--config", path.as_str(), "-V"]))
                 .unwrap()
                 .version
         );
@@ -1675,9 +1725,12 @@ note = ""
     #[test]
     fn m16_help_documents_the_new_flags() {
         for flag in ["--config", "--profile", "--list-profiles", "--dump-config"] {
-            assert!(HELP.contains(flag), "帮助里没有 {flag}");
+            assert!(help(Lang::Zh).contains(flag), "帮助里没有 {flag}");
         }
-        assert!(HELP.contains("双方括号"), "要提醒 [[profiles]] 是双方括号");
+        assert!(
+            help(Lang::Zh).contains("双方括号"),
+            "要提醒 [[profiles]] 是双方括号"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -1686,7 +1739,7 @@ note = ""
 
     #[test]
     fn m17_policy_defaults_are_limited_and_guarded() {
-        let a = Args::parse(&argv(&["-t", "10.0.0.1"])).unwrap();
+        let a = parse(&argv(&["-t", "10.0.0.1"])).unwrap();
         assert_eq!(a.max_pps, cping_core::DEFAULT_MAX_PPS);
         assert!(a.max_pps > 0, "默认必须限速，不能指望用户自觉");
         assert_eq!(a.max_targets, cping_core::MAX_TARGETS);
@@ -1698,7 +1751,7 @@ note = ""
 
     #[test]
     fn m17_policy_flags_are_parsed_and_shown_in_describe() {
-        let a = Args::parse(&argv(&[
+        let a = parse(&argv(&[
             "-t",
             "10.0.0.1",
             "--max-pps",
@@ -1712,7 +1765,7 @@ note = ""
         assert!(text.contains("不限速"), "关掉限速必须摆在明面上：{text}");
         assert!(text.contains("允许保留网段"), "{text}");
 
-        let b = Args::parse(&argv(&["-t", "10.0.0.1", "--max-targets", "256"])).unwrap();
+        let b = parse(&argv(&["-t", "10.0.0.1", "--max-targets", "256"])).unwrap();
         assert_eq!(b.max_targets, 256);
         assert!(b.policy().validate().is_ok());
     }
@@ -1720,32 +1773,32 @@ note = ""
     #[test]
     fn m17_out_of_range_policy_is_rejected_not_clamped() {
         // 越界的值一律报错：「我设了 1000 怎么还是 500」比报错难查得多
-        let a = Args::parse(&argv(&["-t", "10.0.0.1", "--max-pps", "100001"])).unwrap();
+        let a = parse(&argv(&["-t", "10.0.0.1", "--max-pps", "100001"])).unwrap();
         let err = a.validate().unwrap_err();
         assert!(err.contains("100000"), "{err}");
         assert!(err.contains("关闭限速"), "{err}");
 
-        let b = Args::parse(&argv(&["-t", "10.0.0.1", "--max-targets", "70000"])).unwrap();
+        let b = parse(&argv(&["-t", "10.0.0.1", "--max-targets", "70000"])).unwrap();
         let err = b.validate().unwrap_err();
         assert!(err.contains("只能收紧"), "{err}");
 
-        let c = Args::parse(&argv(&["-t", "10.0.0.1", "--max-targets", "0"])).unwrap();
+        let c = parse(&argv(&["-t", "10.0.0.1", "--max-targets", "0"])).unwrap();
         assert!(c.validate().is_err());
 
         // 非数字直接是解析错误
-        assert!(Args::parse(&argv(&["-t", "10.0.0.1", "--max-pps", "abc"])).is_err());
+        assert!(parse(&argv(&["-t", "10.0.0.1", "--max-pps", "abc"])).is_err());
     }
 
     #[test]
     fn m17_reserved_targets_are_refused_with_a_reason_and_a_way_out() {
-        let a = Args::parse(&argv(&["-t", "224.0.0.0/29"])).unwrap();
+        let a = parse(&argv(&["-t", "224.0.0.0/29"])).unwrap();
         let spec = cping_core::parse_spec(&a.target_spec, a.range).unwrap();
         let err = a.policy().check_targets(&spec.targets).unwrap_err();
         let text = err.to_string();
         assert!(text.contains("保留网段"), "{text}");
         assert!(text.contains("组播"), "{text}");
         // 放行之后就不再拦
-        let b = Args::parse(&argv(&["-t", "224.0.0.0/29", "--allow-reserved"])).unwrap();
+        let b = parse(&argv(&["-t", "224.0.0.0/29", "--allow-reserved"])).unwrap();
         assert!(b.policy().check_targets(&spec.targets).is_ok());
     }
 
@@ -1753,7 +1806,7 @@ note = ""
     fn m17_private_and_loopback_targets_still_work() {
         // 拦保留网段不能把工具的正常用途一起拦掉
         for spec_text in ["192.168.1", "10.0.0.0/30", "127.0.0.1"] {
-            let a = Args::parse(&argv(&["-t", spec_text])).unwrap();
+            let a = parse(&argv(&["-t", spec_text])).unwrap();
             let spec = cping_core::parse_spec(&a.target_spec, a.range).unwrap();
             assert!(
                 a.policy().check_targets(&spec.targets).is_ok(),
@@ -1764,24 +1817,147 @@ note = ""
 
     #[test]
     fn m17_audit_path_is_collected_and_documented() {
-        let a = Args::parse(&argv(&["-t", "10.0.0.1", "--audit", "run.jsonl"])).unwrap();
+        let a = parse(&argv(&["-t", "10.0.0.1", "--audit", "run.jsonl"])).unwrap();
         assert_eq!(a.audit.as_deref(), Some("run.jsonl"));
-        assert!(HELP.contains("--audit"), "帮助里没有 --audit");
+        assert!(help(Lang::Zh).contains("--audit"), "帮助里没有 --audit");
         for flag in ["--max-pps", "--max-targets", "--allow-reserved"] {
-            assert!(HELP.contains(flag), "帮助里没有 {flag}");
+            assert!(help(Lang::Zh).contains(flag), "帮助里没有 {flag}");
         }
     }
 
     #[test]
     fn m16_describe_mentions_the_config_and_profile() {
         let path = write_config("describe.toml", CFG);
-        let a = Args::parse(&argv(&["--config", path.as_str(), "--profile", "dmz"])).unwrap();
+        let a = parse(&argv(&["--config", path.as_str(), "--profile", "dmz"])).unwrap();
         let text = a.describe();
         assert!(text.contains("模板 dmz"), "{text}");
         // 没给配置文件时不能凭空多出一段
-        assert!(!Args::parse(&argv(&["-t", "10.0.0.1"]))
+        assert!(!parse(&argv(&["-t", "10.0.0.1"]))
             .unwrap()
             .describe()
             .contains("配置"));
+    }
+
+    // ------------------------------------------------------------------
+    // --lang：中英双语
+    // ------------------------------------------------------------------
+
+    /// 中日韩字符与全角标点的范围（与 `i18n.rs` 里的检查同一套）。
+    fn has_cjk(s: &str) -> Option<char> {
+        s.chars().find(|c| {
+            let u = *c as u32;
+            (0x3000..=0x303F).contains(&u)
+                || (0x3040..=0x30FF).contains(&u)
+                || (0x3400..=0x4DBF).contains(&u)
+                || (0x4E00..=0x9FFF).contains(&u)
+                || (0xF900..=0xFAFF).contains(&u)
+                || (0xFF00..=0xFFEF).contains(&u)
+        })
+    }
+
+    #[test]
+    fn lang_help_is_documented_in_both_languages() {
+        // `--lang` 必须出现在中英两份帮助里，否则英文用户查不到怎么切语言
+        for lang in Lang::ALL {
+            let text = help(lang);
+            assert!(text.contains("--lang"), "{lang} 的帮助里没有 --lang");
+            assert!(text.contains("zh|en"), "{lang} 的帮助里没写取值");
+        }
+    }
+
+    #[test]
+    fn invalid_lang_is_rejected_not_ignored() {
+        // 本项目最不能接受的一类 bug：静默忽略用户显式给的参数
+        let e = Args::parse_with(&argv(&["--lang", "fr", "-t", "10.0.0.1"]), Lang::Zh).unwrap_err();
+        assert!(e.contains("--lang"), "{e}");
+        // 缺取值同样报错
+        assert!(Args::parse_with(&argv(&["--lang"]), Lang::Zh).is_err());
+        // `--lang=` 空串也拒绝
+        assert!(Args::parse_with(&argv(&["--lang="]), Lang::Zh).is_err());
+    }
+
+    #[test]
+    fn lang_accepts_locale_forms_and_last_one_wins() {
+        let a = parse(&argv(&["--lang", "en_US.UTF-8", "-t", "10.0.0.1"])).unwrap();
+        assert_eq!(a.lang, Lang::En);
+        // 多次给：最后一次生效（与 `resolve_lang` 一致，不静默吞掉前一个）
+        let b = parse(&argv(&["--lang", "en", "--lang", "zh", "-t", "10.0.0.1"])).unwrap();
+        assert_eq!(b.lang, Lang::Zh);
+    }
+
+    #[test]
+    fn env_fallback_is_used_when_lang_is_absent() {
+        // 不给 --lang 时用调用方给的兜底（生产中来自 `Lang::from_env`）
+        assert_eq!(parse(&argv(&["-t", "10.0.0.1"])).unwrap().lang, Lang::Zh);
+        assert_eq!(
+            Args::parse_with(&argv(&["-t", "10.0.0.1"]), Lang::En)
+                .unwrap()
+                .lang,
+            Lang::En
+        );
+    }
+
+    #[test]
+    fn english_help_errors_and_summary_have_no_cjk() {
+        // 要求的**最小覆盖**：帮助文本、参数错误消息、策略摘要
+        assert!(has_cjk(help(Lang::En)).is_none(), "英文帮助含中日韩字符");
+
+        for bad in [
+            vec!["--lang", "en", "--timeout", "0"],
+            vec!["--lang", "en", "--range", "wat"],
+            vec!["--lang", "en", "--nope"],
+            vec!["--lang", "en", "--notify", "telegram"],
+            vec!["--lang", "en", "--fp-timeout", "99999"],
+        ] {
+            let e = Args::parse_with(&argv(&bad), Lang::Zh).unwrap_err();
+            assert!(has_cjk(&e).is_none(), "英文参数错误含中日韩字符：{e}");
+        }
+
+        // 缺目标（validate 阶段）
+        let a = Args::parse_with(&argv(&["--lang", "en", "--quiet"]), Lang::Zh).unwrap();
+        let e = a.validate().unwrap_err();
+        assert!(has_cjk(&e).is_none(), "英文校验错误含中日韩字符：{e}");
+
+        // 策略摘要与策略错误（核心层的 describe_in / localized）
+        let p = cping_core::ScanPolicy {
+            max_pps: 0,
+            max_targets: 100,
+            allow_reserved: true,
+        };
+        let summary = p.describe_in(Lang::En);
+        assert!(
+            has_cjk(&summary).is_none(),
+            "英文策略摘要含中日韩字符：{summary}"
+        );
+        let e = cping_core::ScanPolicy {
+            max_pps: 100_001,
+            max_targets: cping_core::MAX_TARGETS,
+            allow_reserved: false,
+        }
+        .validate_in(Lang::En)
+        .unwrap_err()
+        .localized(Lang::En);
+        assert!(has_cjk(&e).is_none(), "英文策略错误含中日韩字符：{e}");
+
+        // 状态摘要（Args::describe）在英文下也不该出现中日韩字符
+        let a = Args::parse_with(
+            &argv(&[
+                "--lang",
+                "en",
+                "-t",
+                "10.0.0.1",
+                "--max-pps",
+                "0",
+                "--allow-reserved",
+                "--fingerprint",
+                "--watch",
+                "30",
+                "--alert",
+            ]),
+            Lang::Zh,
+        )
+        .unwrap();
+        let text = a.describe();
+        assert!(has_cjk(&text).is_none(), "英文状态摘要含中日韩字符：{text}");
     }
 }
