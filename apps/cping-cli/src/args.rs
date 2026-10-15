@@ -18,6 +18,9 @@ pub const EXIT_USAGE: i32 = 2;
 /// 探测后端不可用（权限不足或平台不支持）。
 pub const EXIT_BACKEND: i32 = 3;
 
+/// M14：时序默认保留天数。`--keep-days` 的默认值，也是「有没有被显式改过」的判据。
+pub const DEFAULT_KEEP_DAYS: u64 = 7;
+
 pub const HELP: &str = r#"CPing 无头命令行 —— 批量 PING，结果可导出，退出码可判
 
 用法：
@@ -44,6 +47,9 @@ pub const HELP: &str = r#"CPing 无头命令行 —— 批量 PING，结果可�
       --fp-timeout <ms>   指纹的单端口超时（默认 800，上限 60000）
   -w, --watch <秒>        持续监控：每 N 秒重扫一轮，并输出变化
   -n, --rounds <n>        watch 模式总轮数（默认一直跑，Ctrl+C 停止）
+      --history <路径>    把每轮追加到长期时序文件（跨会话累积，默认保留 7 天）
+      --report <路径>     结束时写出可用率报表（.csv 或 .html）
+      --keep-days <天>    时序保留天数（默认 7；仅与 --history 同用）
       --out <路径>        导出结果；按扩展名决定格式（.csv/.txt/.json/.html）
       --json <路径>       等价于 --out 且强制 JSON
   -q, --quiet             不打印人类可读摘要（只输出文件与退出码）
@@ -63,12 +69,20 @@ pub const HELP: &str = r#"CPing 无头命令行 —— 批量 PING，结果可�
   cping-cli -t 10.0.0.0/30 --json report.json --enrich
   cping-cli -t 192.168.1 --fingerprint --out assets.csv
   cping-cli -t 192.168.1 --watch 30 --out rounds.json
+  cping-cli -t 192.168.1 --watch 60 --history net.ts --report uptime.html
 
 关于 --fingerprint：
   端口指纹是**独立于在线判定的第二趟探测**，只对在线主机做：
   端口全关不会把主机改成离线，端口开放也不会把离线主机变在线。
   服务横幅只读对方主动送出的前 256 字节，**不发送任何协议请求**；
   设备类型是「厂商 + 开放端口」的**推断**结论，识别不出就留空。
+
+关于 --history / --report：
+  时序文件带格式版本号（首行 CPING-TS <版本>）；版本不符会**拒绝读取**并退
+  出码 2，绝不用猜出来的数据覆盖你已有的历史。每轮都立即落盘，Ctrl+C 也不
+  丢已跑过的轮次。报表数值可逐条对账回原始记录：降采样只做同类项相加，
+  观测轮数与 RTT 求和在合并前后守恒。注意「从未在线」的主机 RTT 记为 -，
+  而不是 0（0 会被读成「极快」）。
 "#;
 
 /// 解析后的命令行参数。
@@ -90,6 +104,12 @@ pub struct Args {
     pub fp_timeout_ms: u64,
     pub watch_seconds: Option<u64>,
     pub rounds: Option<u64>,
+    /// M14：长期时序文件路径（跨会话累积）。
+    pub history: Option<String>,
+    /// M14：可用率报表输出路径（.csv / .html）。
+    pub report: Option<String>,
+    /// M14：时序保留天数。
+    pub keep_days: u64,
     pub out: Option<(ExportFormat, String)>,
     pub quiet: bool,
     /// M12：只列出后端能力后退出。
@@ -115,6 +135,9 @@ impl Default for Args {
             fp_timeout_ms: 800,
             watch_seconds: None,
             rounds: None,
+            history: None,
+            report: None,
+            keep_days: DEFAULT_KEEP_DAYS,
             out: None,
             quiet: false,
             list_backends: false,
@@ -251,6 +274,22 @@ impl Args {
                     }
                     args.rounds = Some(v);
                 }
+                "--history" => args.history = Some(take_value("--history")?),
+                "--report" => {
+                    let path = take_value("--report")?;
+                    let lower = path.to_ascii_lowercase();
+                    if !lower.ends_with(".csv") && !lower.ends_with(".html") {
+                        return Err("--report 只支持 .csv 或 .html".into());
+                    }
+                    args.report = Some(path);
+                }
+                "--keep-days" => {
+                    let v = parse_u64("--keep-days", &take_value("--keep-days")?)?;
+                    if v == 0 || v > 3650 {
+                        return Err("--keep-days 必须在 1..=3650 之间".into());
+                    }
+                    args.keep_days = v;
+                }
                 "-o" | "--out" => {
                     let path = take_value("--out")?;
                     let format = ExportFormat::from_path(&path).ok_or_else(|| {
@@ -278,6 +317,11 @@ impl Args {
             return Err("缺少目标：请用 --target 指定（例如 --target 192.168.1）".into());
         }
         self.mode.validate().map_err(|e| e.to_string())?;
+        // M14：`--keep-days` 只在写时序文件时才有意义。静默忽略会让人以为
+        // 「我明明设了 30 天，怎么还在按 7 天裁」——这类参数必须报错。
+        if self.history.is_none() && self.keep_days != DEFAULT_KEEP_DAYS {
+            return Err("--keep-days 仅在同时指定 --history 时有意义".into());
+        }
         Ok(())
     }
 
@@ -303,13 +347,26 @@ impl Args {
         } else {
             String::new()
         };
+        // M14：时序与报表
+        let hist = if self.history.is_some() {
+            format!(" · 长期时序（保留 {} 天）", self.keep_days)
+        } else {
+            String::new()
+        };
+        let rep = if self.report.is_some() {
+            " · 结束时出可用率报表"
+        } else {
+            ""
+        };
         format!(
-            "{} · {} 并发 · 超时 {} ms{}{}",
+            "{} · {} 并发 · 超时 {} ms{}{}{}{}",
             self.mode.describe(),
             self.concurrency,
             self.timeout_ms,
             watch,
-            fp
+            fp,
+            hist,
+            rep
         )
     }
 
@@ -567,5 +624,64 @@ mod tests {
     fn missing_target_file_is_a_clear_error() {
         let err = Args::parse(&argv(&["--target-file", "no/such/file"])).unwrap_err();
         assert!(err.contains("读取目标文件"), "{err}");
+    }
+
+    // ------------------------------------------------------------------
+    // M14：长期时序与可用率报表
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn history_and_report_default_to_off() {
+        let a = Args::parse(&argv(&["-t", "10.0.0.1"])).unwrap();
+        assert!(a.history.is_none(), "不指定就不落盘——没写文件是默认行为");
+        assert!(a.report.is_none());
+        assert_eq!(a.keep_days, DEFAULT_KEEP_DAYS);
+        let text = a.describe();
+        assert!(!text.contains("长期时序"), "{text}");
+        assert!(!text.contains("报表"), "{text}");
+    }
+
+    #[test]
+    fn history_report_and_keep_days_are_parsed() {
+        let a = Args::parse(&argv(&[
+            "-t",
+            "10.0.0.1",
+            "--watch",
+            "60",
+            "--history",
+            "net.ts",
+            "--report",
+            "uptime.html",
+            "--keep-days",
+            "30",
+        ]))
+        .unwrap();
+        assert_eq!(a.history.as_deref(), Some("net.ts"));
+        assert_eq!(a.report.as_deref(), Some("uptime.html"));
+        assert_eq!(a.keep_days, 30);
+        let text = a.describe();
+        assert!(text.contains("长期时序"), "{text}");
+        assert!(text.contains("30 天"), "{text}");
+        assert!(text.contains("报表"), "{text}");
+    }
+
+    #[test]
+    fn report_only_accepts_csv_or_html() {
+        assert!(Args::parse(&argv(&["-t", "a", "--report", "out.csv"])).is_ok());
+        assert!(Args::parse(&argv(&["-t", "a", "--report", "out.HTML"])).is_ok());
+        let err = Args::parse(&argv(&["-t", "a", "--report", "out.json"])).unwrap_err();
+        assert!(err.contains("只支持"), "{err}");
+    }
+
+    #[test]
+    fn keep_days_bounds_and_requires_history() {
+        assert!(Args::parse(&argv(&["-t", "a", "--history", "x", "--keep-days", "0"])).is_err());
+        assert!(Args::parse(&argv(&["-t", "a", "--history", "x", "--keep-days", "3651"])).is_err());
+        assert!(Args::parse(&argv(&["-t", "a", "--history", "x", "--keep-days", "3650"])).is_ok());
+
+        // 单独给 --keep-days 是无效组合，必须报错而不是静默忽略
+        let a = Args::parse(&argv(&["-t", "a", "--keep-days", "30"])).unwrap();
+        let err = a.validate().unwrap_err();
+        assert!(err.contains("--history"), "{err}");
     }
 }

@@ -577,3 +577,68 @@ CLI 模式不初始化终端 UI。
   `--no-banner` 下同一端口横幅为空；TXT/CSV/JSON/HTML 四种导出均含指纹数据
 - 未实测：跨主机（非回环）的指纹与横幅；IPv6 目标的端口指纹；
   Android 上的指纹（TCP 可用，但未在真机跑过）
+
+### M14 — v2.2.0 历史与趋势（实施记录，2026-10-15）
+
+**实现文件**
+
+- `crates/cping-core/src/timeseries.rs`（新增，约 1090 行含测试）
+  - `HostAgg`（只存**可累加**的量：`samples` / `online` / `rtt_sum` / `rtt_max`）、
+    `SeriesPoint`（`at_ms` / `span_ms` / `rounds` / `hosts`）、`TimeSeries`
+  - `append` / `append_results`：时间倒退的点**拒绝**（否则序列乱序、曲线错位）
+  - `prune`：按保留期裁剪，基准是**最新点**而不是「现在」
+  - `downsample`：从**最旧的一半**两两合并（同 IP 才合并），返回合并数
+  - `to_text` / `from_text`：行式文本格式，零依赖；版本不符报错、坏行跳过并计数
+  - `report()` → `HostReport`（观测/在线轮数、可用率、平均/最差 RTT、抖动、点数）
+  - `sparkline_svg` / `char_bar_chart`：两个纯函数，GUI / TUI 各用其一
+  - `report_csv` / `report_html`：报表导出（CSV 带 BOM，与主导出同口径）
+- `apps/cping-cli`：`--history` / `--report` / `--keep-days`
+- `apps/cping-tui`：`U` 键 + 趋势面板（`trend_lines()` 与界面同源）
+- `apps/cping-gui`：`trend_state` / `clear_trend` / `export_uptime_report`
+  + 「趋势」页签 `TrendPanel.vue`（桌面与移动端共用，移动端关掉导出按钮）
+
+**实现时收敛的三处设计（与本节初版计划的差异）**
+
+1. `span_ms` 的语义改过一次。初版定义为「与上一个点的时间差（向后看）」，
+   合并与裁剪都算错——合并后的窗口长度必须覆盖两点区间。最终定为
+   **前向窗口 `[at, at+span)`**：`span` 表示「这个点往后覆盖多久」，
+   上一个点的窗口延伸到下一个点的起点；最新点的 `span` 是 0
+   （还没有后继，长度未知，不能凭空给一个数）。
+2. 「抖动」的算法明确为「相邻点**平均 RTT** 之差的平均绝对值」，不是 RTT 逐样本
+   标准差。理由是前者对单点内的降采样不敏感，报表可逐条对账回原始记录。
+3. TUI 不落盘，只累积在进程内；跨会话的长期历史由 `cping-cli --history` 负责。
+   两者共用同一套核心（`TimeSeries`），不存在两份口径。
+
+**顺手修掉的一个真 bug**
+
+`HostReport::worst_rtt_ms` 最初写成「`rtt_max == 0` 则为 `None`」。而回环地址的
+RTT 本来就是 0 ms ——拿 0 当「没测到」的哨兵，会把一台**在线且极快**的主机在
+报表里显示成「-」。改为以 `online == 0` 判定，并补了一条专门的回归测试
+（`online_with_zero_rtt_still_reports_a_worst_rtt`）。
+
+**验收对照**
+
+| 验收要点 | 落地情况 |
+| --- | --- |
+| 存储格式版本化 | 文件头 `CPING-TS <version>`；版本不符 `from_text` 返回 `Err` 并说明原因，有测试 |
+| 坏数据不阻塞读取 | 单行解析失败只跳过并计数（`from_text` 返回 `skipped`），CLI 据此打印警告后继续；有测试 |
+| 时间跨度与保留策略有明确测试 | `span_of_a_point_is_its_window_towards_the_next_one`、`prune_uses_latest_point_as_reference_not_wall_clock` |
+| 报表数值与原始记录可逐条对账 | `downsample_preserves_totals_exactly`（合并前后 `samples`/`online`/`rtt_sum`/`rounds` 四者守恒）、`report_matches_raw_records_host_by_host`（期望值手算给出） |
+| 曲线不把「没测到」画成「离线」 | `uptime_curve_marks_missing_points_as_none`、`sparkline_breaks_the_line_on_missing_points`、`char_bar_chart_is_fixed_width_and_marks_gaps`（三处一致） |
+
+**测试与实测**
+
+- 单元/集成测试：+27（`timeseries.rs` 17 + CLI 参数 4 + TUI 5 + 核心零值边界 1），
+  工作区合计 **336 passed / 0 failed**
+- 真实冒烟（Windows 本机回环，两段会话）：
+  1. `cping-cli -t 127.0.0.1 -n 3 -w 1 --history net.ts --report uptime.html`
+     → 每轮各追加 1 点（`point <at_ms> <span_ms> 1` + `host ...` + `end`），
+     结束后写出 HTML 报表，退出码 0
+  2. 另起一次会话，`-n 2 -q` 续写**同一个** `net.ts` → 累计 5 个时间点；
+     `--report uptime.csv` 显示 `127.0.0.1,5,5,100.0,...`
+- `cargo fmt --check` / `cargo clippy --workspace --all-targets` 两套干净；
+  前端 `vue-tsc --noEmit` 0 错误、`npm run build` 通过
+- 未实测：跨天/跨周的长期保留与降采样（降采样只在单测里跑过，没有真实跑满
+  2016 个点）；Android 上的趋势页（与桌面同一份 Vue 代码，未在真机跑过）；
+  GUI 趋势页的人工目视确认（只做了构建与类型检查）
+

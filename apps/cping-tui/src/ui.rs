@@ -48,9 +48,32 @@ pub fn draw(f: &mut Frame, app: &App) {
         draw_changes(f, app, f.area());
     } else if app.show_fingerprints {
         draw_fingerprints(f, app, f.area());
+    } else if app.show_trend {
+        draw_trend(f, app, f.area());
     } else if app.show_help {
         draw_help(f, app, f.area());
     }
+}
+
+/// M14 历史与趋势面板。标题里点明 `·` 的含义：它是「没测到」，不是「离线」。
+fn draw_trend(f: &mut Frame, app: &App, area: Rect) {
+    let popup = centered(area, 92, (area.height.saturating_sub(4)).min(28));
+    f.render_widget(Clear, popup);
+    let block = Block::default().borders(Borders::ALL).title(format!(
+        " 历史与趋势（{} 台主机 · {} 点 / {} 轮） ",
+        app.series.hosts().len(),
+        app.series.len(),
+        app.series.total_rounds()
+    ));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let lines: Vec<Line> = app
+        .trend_lines(inner.width as usize)
+        .into_iter()
+        .map(|t| Line::from(Span::raw(truncate_display(&t, inner.width as usize))))
+        .collect();
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 /// M13 端口指纹面板。
@@ -338,7 +361,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_keys(f: &mut Frame, app: &App, area: Rect) {
-    let base = "Enter 开始 · i 编辑 · g/t 视图 · f 过滤 · s/S/j/H 导出 · m 补厂商 · n 查主机名 · F 指纹 · w/l 快照 · M 监控 · e 变化 · T/p 方式 · ? 帮助 · q 退出";
+    let base = "Enter 开始 · i 编辑 · g/t 视图 · f 过滤 · s/S/j/H 导出 · m 补厂商 · n 查主机名 · F 指纹 · U 趋势 · w/l 快照 · M 监控 · e 变化 · T/p 方式 · ? 帮助 · q 退出";
     let text = if app.status.is_empty() {
         base.to_string()
     } else {
@@ -397,7 +420,7 @@ fn draw_restore_prompt(f: &mut Frame, pending: &PendingRestore, area: Rect) {
 
 fn draw_help(f: &mut Frame, app: &App, area: Rect) {
     // 高度随内容增长：帮助面板里的每一条都是要让人看到的，截断等于没说
-    let popup = centered(area, 78, 46);
+    let popup = centered(area, 78, 52);
     f.render_widget(Clear, popup);
     // M12：如实告诉用户「现在用的是哪个后端、它能干什么、不能干什么」。
     // 内容来自核心注册表，与 `cping-cli --list-backends` 同源，不会两边说法不一。
@@ -417,6 +440,12 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         Line::from("  F            端口指纹（选中主机；无选中则全部在线主机）"),
         Line::from("               端口扫描与在线判定是两回事：端口全关不影响「在线」；"),
         Line::from("               横幅只读不写；设备类型是推断，识别不出就留空"),
+        Line::from(""),
+        Line::from("历史与趋势（M14）"),
+        Line::from("  U            查看可用率趋势（每台主机一条字符柱状曲线）"),
+        Line::from("               数值与曲线都来自本进程累积的轮次；跨会话的历史"),
+        Line::from("               请用 cping-cli --history（两者共用同一套时序核心）"),
+        Line::from("               曲线里的 · 是「该轮没测到这台主机」，不是「离线」"),
         Line::from(""),
         Line::from("目标与探测方式（M9）"),
         Line::from("  输入支持     192.168.1（网段）/ 单主机 / CIDR（192.168.1.0/24）/ 多段"),

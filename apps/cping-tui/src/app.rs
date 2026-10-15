@@ -233,6 +233,15 @@ pub struct App {
     pub show_fingerprints: bool,
     fingerprint_job: Option<FingerprintJob>,
 
+    // ---- M14 历史与趋势 ----
+    /// 跨轮次的长期时序（TUI 内**常驻内存**：它服务的是「眼前这台机器在变好还是变坏」；
+    /// 需要跨会话的那份历史由 `cping-cli --history` 落盘，两者共用一个核心）。
+    pub series: cping_core::TimeSeries,
+    /// 是否显示趋势面板。
+    pub show_trend: bool,
+    /// 本轮的起始时刻（Unix 毫秒）：时序点用它打时间戳，而不是「扫描结束的现在」。
+    round_at_ms: Option<u64>,
+
     handle: Option<SchedulerHandle>,
     scheduler: ProbeScheduler,
 }
@@ -290,6 +299,9 @@ impl App {
             fingerprints: Vec::new(),
             show_fingerprints: false,
             fingerprint_job: None,
+            series: cping_core::TimeSeries::new(),
+            show_trend: false,
+            round_at_ms: None,
             handle: None,
             // M5 起默认使用**平台原生 ICMP**；`--mock` 可切回模拟后端做演示。
             // M12：后端选择（含 mock 分支）统一走核心注册表，三端共用一处。
@@ -408,6 +420,14 @@ impl App {
             }
         }
 
+        // 趋势面板：与上面两个面板同规矩——任意键关闭，`U` 自身也当关闭
+        if self.show_trend {
+            self.show_trend = false;
+            if !matches!(action, Action::Quit | Action::ForceQuit | Action::ShowTrend) {
+                return;
+            }
+        }
+
         // 「发现上次结果」的确认框优先级最高：此时只有恢复/丢弃两个有效选择，
         // 免得用户在没意识到有弹窗的情况下误按其它键。
         if self.pending_restore.is_some() {
@@ -492,6 +512,13 @@ impl App {
             Action::SaveHtml => self.save("html"),
             Action::Enrich => self.enrich(false),
             Action::Fingerprint => self.fingerprint_targets(),
+            Action::ShowTrend => {
+                self.show_trend = !self.show_trend;
+                if self.show_trend && self.series.is_empty() {
+                    self.status =
+                        "趋势面板：还没有历史数据，先扫描一轮（M 开监控可持续累积）".into();
+                }
+            }
             Action::LookupHostname => self.lookup_selected_hostname(),
             Action::SaveSnapshot => self.save_snapshot(),
             Action::LoadSnapshot => self.load_snapshot_from_disk(),
@@ -623,6 +650,61 @@ impl App {
                 lines.push(format!("    {}", fp.device_summary()));
             }
         }
+        lines
+    }
+
+    // ------------------------------------------------------------------
+    // M14：历史与趋势
+    // ------------------------------------------------------------------
+
+    /// 趋势面板的展示文本（供测试断言使用，与界面同源）。
+    ///
+    /// 每台主机一条：可用率 + 平均/最差 RTT + 抖动 + 字符柱状在线率曲线。
+    /// 曲线里的 `·` 是「这一轮没测到这台主机」，**不是**「离线」——这是最容易
+    /// 被读错的一处，所以图例里必须写明。
+    pub fn trend_lines(&self, width: usize) -> Vec<String> {
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "时间跨度 {:.1} 小时 · {} 个时间点 · 累计 {} 轮（保留 {} 天）",
+            self.series.span_ms() as f64 / 3_600_000.0,
+            self.series.len(),
+            self.series.total_rounds(),
+            self.series.retention_secs / 86_400
+        ));
+        let report = self.series.report();
+        if report.is_empty() {
+            lines.push(String::new());
+            lines.push("还没有历史数据：先扫描一轮。".to_string());
+            lines.push("开监控（M）连续跑几轮，这里就会出现每台主机的可用率曲线。".to_string());
+            return lines;
+        }
+        lines.push(format!(
+            "{:<17} {:>7} {:>7} {:>9} {:>9} {:>8}",
+            "主机", "可用率", "在线/总", "平均RTT", "最差RTT", "抖动"
+        ));
+        // 曲线宽度：预留给文字列，至少 8 格
+        let curve_w = width.saturating_sub(56).max(8);
+        for r in &report {
+            let curve = self.series.uptime_curve(r.ip);
+            let bar = cping_core::char_bar_chart(&curve, curve_w)
+                .into_iter()
+                .next()
+                .unwrap_or_default();
+            lines.push(format!(
+                "{:<17} {:>7} {:>7} {:>9} {:>9} {:>8}  {}",
+                r.ip.to_string(),
+                r.uptime_text(),
+                format!("{}/{}", r.online, r.samples),
+                r.avg_rtt_text(),
+                r.worst_rtt_text(),
+                r.jitter_text(),
+                bar
+            ));
+        }
+        lines.push(String::new());
+        lines.push(format!(
+            "曲线：每格一轮在线率（越高越满）；· = 该轮没测到这台主机（≠ 离线）。宽度 {curve_w} 格。"
+        ));
         lines
     }
 
@@ -778,6 +860,7 @@ impl App {
                 self.elapsed_ms = 0;
                 self.started_at = Some(Instant::now());
                 self.scan_time = now_string();
+                self.round_at_ms = Some(now_ms());
                 self.running = true;
                 self.cancelled = false;
                 self.handle = Some(handle);
@@ -887,6 +970,10 @@ impl App {
             return;
         }
         self.monitor.commit_round(&done, &self.thresholds);
+        // M14：同一份结果也进长期时序。用**本轮起始时刻**打时间戳，而不是「扫描结束的现在」——
+        // 一轮本身可能跑几秒，用结束时刻会让曲线的时间轴一点点被拉长。
+        let at = self.round_at_ms.unwrap_or_else(now_ms);
+        self.series.append_results(at, &done);
     }
 
     /// 变化摘要（无变化时返回空串，不写「变化 0 项」这种噪音）。
@@ -1365,6 +1452,14 @@ pub fn now_string() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format_hms(secs)
+}
+
+/// 当前 Unix 毫秒（M14 时序点时间戳）。取不到就返回 0，由核心按「时间未知」处理。
+pub fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// 文件名用时间戳 `YYYYMMDD-HHMMSS`。
@@ -1847,6 +1942,100 @@ mod tests {
             lines[1].contains("按 F"),
             "空状态要告诉用户怎么触发：{:?}",
             lines
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // M14：历史与趋势
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn trend_lines_explain_the_empty_state_instead_of_showing_zeros() {
+        let app = App::new(opts());
+        let lines = app.trend_lines(80);
+        assert!(lines[0].contains("时间跨度"), "{lines:?}");
+        assert!(lines[0].contains("0 个时间点"), "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("还没有历史数据")),
+            "空状态必须说清楚，而不是画一堆 0% 让人误读：{lines:?}"
+        );
+    }
+
+    #[test]
+    fn trend_accumulates_one_point_per_round_and_matches_the_core_report() {
+        let mut app = App::new(opts());
+        app.prefix = "127.0.0".into();
+        for _ in 0..3 {
+            app.start_scan();
+            wait_done(&mut app, 300);
+        }
+        assert_eq!(app.series.len(), 3, "每完成一轮就该多一个时间点");
+        assert_eq!(app.series.total_rounds(), 3);
+
+        // 报表数值与核心同源，不做二次加工：每台主机被观测到 3 次，在线次数不超过样本数
+        let report = app.series.report();
+        assert_eq!(report.len(), app.targets.len(), "每台目标都应有一行");
+        assert!(
+            report.iter().any(|r| r.online > 0),
+            "整网段必然有在线主机：{report:?}"
+        );
+        for r in &report {
+            assert_eq!(r.samples, 3, "三轮观测，样本数必须是 3：{r:?}");
+            assert!(r.online <= r.samples, "{r:?}");
+            if r.online == 0 {
+                assert_eq!(r.avg_rtt_ms, None, "从未在线不得给 0 冒充 RTT：{r:?}");
+            } else {
+                assert!(r.avg_rtt_ms.is_some(), "{r:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn trend_panel_renders_uptime_bars_and_spells_out_the_dot_meaning() {
+        let mut app = App::new(opts());
+        app.prefix = "127.0.0".into();
+        app.start_scan();
+        wait_done(&mut app, 300);
+        app.show_trend = true;
+
+        let text = render(&app, 120, 34);
+        assert!(text.contains("历史与趋势"), "{text}");
+        assert!(text.contains("可用率"), "{text}");
+        assert!(text.contains("100.0%"), "应显示可用率数值：{text}");
+        // 曲线用的是核心的字符柱状图（满格 █ 表示 100% 在线）
+        assert!(text.contains('█'), "在线率曲线应渲染成字符柱：{text}");
+        // 「没测到 ≠ 离线」这条边界必须在面板里写明
+        let lines = app.trend_lines(100);
+        assert!(
+            lines.iter().any(|l| l.contains("不是") || l.contains("≠")),
+            "必须解释 · 的含义：{lines:?}"
+        );
+    }
+
+    #[test]
+    fn trend_panel_is_closed_by_any_key() {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+        let mut app = App::new(opts());
+        app.show_trend = true;
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(!app.show_trend, "任意键应关闭面板");
+        // 再按一次 U 仍能打开（U 在面板里表现为「关闭」，不该被吃掉两次）
+        app.on_key(KeyEvent::new(KeyCode::Char('U'), KeyModifiers::NONE));
+        assert!(app.show_trend, "U 应重新打开面板");
+    }
+
+    #[test]
+    fn pressing_u_before_any_scan_says_why_there_is_nothing_to_show() {
+        let mut app = App::new(opts());
+        app.on_key(KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Char('U'),
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(app.show_trend);
+        assert!(
+            app.status.contains("还没有历史数据"),
+            "应给出明确原因：{}",
+            app.status
         );
     }
 

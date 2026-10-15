@@ -15,6 +15,7 @@ import ChangePanel from '../components/ChangePanel.vue'
 import ColorSettings from '../components/ColorSettings.vue'
 import MobileResultList from '../components/MobileResultList.vue'
 import ResultGrid from '../components/ResultGrid.vue'
+import TrendPanel from '../components/TrendPanel.vue'
 import {
   COMMON_TCP_PORTS,
   MONITOR_INTERVALS,
@@ -26,7 +27,7 @@ import { usePingStore } from '../stores/ping'
 const store = usePingStore()
 const message = useMessage()
 
-const tab = ref<'list' | 'matrix' | 'changes'>('list')
+const tab = ref<'list' | 'matrix' | 'changes' | 'trend'>('list')
 const showSettings = ref(false)
 const localSpec = ref(store.prefix)
 const specError = ref<string | null>(null)
@@ -105,6 +106,12 @@ async function onCheckRestore() {
 function openChanges() {
   tab.value = 'changes'
   void store.loadChanges()
+}
+
+/** M14：切到趋势页并拉一次数据（不做轮询）。 */
+function openTrend() {
+  tab.value = 'trend'
+  void store.loadTrend()
 }
 </script>
 
@@ -247,6 +254,14 @@ function openChanges() {
       <button
         type="button"
         class="mobile__tab"
+        :class="{ 'mobile__tab--active': tab === 'trend' }"
+        @click="openTrend"
+      >
+        趋势 ({{ store.trend?.rounds ?? 0 }})
+      </button>
+      <button
+        type="button"
+        class="mobile__tab"
         :class="{ 'mobile__tab--active': store.hideOffline }"
         @click="store.hideOffline = !store.hideOffline"
       >
@@ -257,6 +272,7 @@ function openChanges() {
     <div class="mobile__body">
       <MobileResultList v-if="tab === 'list'" />
       <ChangePanel v-else-if="tab === 'changes'" />
+      <TrendPanel v-else-if="tab === 'trend'" :exportable="false" />
       <div v-else-if="!store.canUseMatrix" class="cping-panel" style="font-size: 12px">
         目标 {{ store.stats.total }} 个，超过矩阵上限 256 个，请用列表查看。
       </div>

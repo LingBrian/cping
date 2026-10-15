@@ -51,6 +51,8 @@ pub enum Action {
     SaveHtml,
     /// M13：对选中主机（或全部在线主机）做端口指纹
     Fingerprint,
+    /// M14：查看历史与可用率趋势
+    ShowTrend,
     Char(char),
     Backspace,
 }
@@ -94,6 +96,8 @@ pub fn map_key(key: KeyEvent) -> Action {
         KeyCode::Char('p') => Action::CyclePort,
         // M13 资产识别：F 对选中主机做端口指纹
         KeyCode::Char('F') => Action::Fingerprint,
+        // M14 历史与趋势：U 看可用率（uptime）
+        KeyCode::Char('U') => Action::ShowTrend,
         // 确认框用：y 恢复、N 不恢复（小写 n 在确认框里也当「不恢复」，
         // 由 app 层按当前状态解释，见 App::on_key）
         KeyCode::Char('y') | KeyCode::Char('Y') => Action::PromptYes,
@@ -135,6 +139,13 @@ mod tests {
         assert_eq!(press('F'), Action::Fingerprint);
         // 回归：小写 f 仍是「过滤不在线」，大小写敏感照旧
         assert_eq!(press('f'), Action::ToggleFilter);
+    }
+
+    #[test]
+    fn m14_shortcut_does_not_take_over_lowercase_u() {
+        assert_eq!(press('U'), Action::ShowTrend);
+        // 回归：小写 u 没被占用，仍落到「普通字符」分支（不进任何功能）
+        assert_eq!(press('u'), Action::Char('u'));
     }
 
     #[test]

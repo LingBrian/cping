@@ -32,6 +32,7 @@ pub mod scheduler;
 pub mod snapshot;
 pub mod spec;
 pub mod target;
+pub mod timeseries;
 
 /// 可选异步调度（M12）。默认**不编译**，因此默认构建仍无第三方运行时依赖。
 ///
@@ -111,6 +112,11 @@ pub use target::{
     build_targets, cell_index, cell_of_addr, cell_of_host, cell_of_ip, cell_position, matrix_slots,
     parse_prefix, AsTargetAddr, Ipv4Prefix, TargetRange, MATRIX_CELLS, MATRIX_COLS, MATRIX_ROWS,
     MAX_TARGETS,
+};
+pub use timeseries::{
+    char_bar_chart, latency_bucket, report_csv, report_html, sparkline_svg, HostAgg, HostReport,
+    SeriesPoint, TimeSeries, DEFAULT_MAX_POINTS, DEFAULT_RETENTION_SECS, SERIES_FORMAT_VERSION,
+    SERIES_SIGNATURE,
 };
 
 /// 版本号，供 UI 展示与调试。

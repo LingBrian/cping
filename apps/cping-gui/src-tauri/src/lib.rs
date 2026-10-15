@@ -50,6 +50,10 @@ pub fn run() {
             commands::fingerprint_hosts_cmd,
             commands::clear_fingerprints,
             commands::fingerprint_state,
+            // M14：历史与趋势
+            commands::trend_state,
+            commands::clear_trend,
+            commands::export_uptime_report,
             commands::async_scheduler_available,
             commands::start_scan,
             commands::cancel_scan,

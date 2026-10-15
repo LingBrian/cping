@@ -448,10 +448,7 @@ pub fn infer_device(vendor: Option<&str>, open_ports: &[u16]) -> Option<DeviceGu
         basis.extend(basis_ports(&[3389]));
         let windows_hint = has(445) || has(135) || has(139);
         if windows_hint {
-            let extra: Vec<u16> = [445u16, 135, 139]
-                .into_iter()
-                .filter(|p| has(*p))
-                .collect();
+            let extra: Vec<u16> = [445u16, 135, 139].into_iter().filter(|p| has(*p)).collect();
             basis.extend(basis_ports(&extra));
         }
         return Some(DeviceGuess {

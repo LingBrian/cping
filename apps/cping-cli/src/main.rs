@@ -16,6 +16,7 @@ use cping_core::monitor::{diff_scans, Change, ChangeLog, DEFAULT_CHANGE_CAPACITY
 use cping_core::result::{ProbeResult, ScanStats};
 use cping_core::scheduler::ProbeScheduler;
 use cping_core::spec::{parse_spec, TargetSpec};
+use cping_core::timeseries::TimeSeries;
 use cping_core::{backend_for_run, config::ColorConfig};
 use std::time::{Duration, Instant};
 
@@ -80,6 +81,8 @@ struct Session {
     changes: ChangeLog,
     round: u64,
     last_stats: ScanStats,
+    /// M14：跨会话的长期时序（`--history` 载入并回写，`--report` 据此出报表）。
+    series: TimeSeries,
 }
 
 impl Session {
@@ -96,6 +99,38 @@ impl Session {
                 spec.len()
             );
         }
+        // M14：长期时序。`--history` 指向的文件若已存在就**续写**（跨会话累积），
+        // 这样「连续观察一周的可用率」才是真的连续，而不是每次开机重来。
+        let mut series = match &args.history {
+            Some(path) => match TimeSeries::load_from_path(path) {
+                Ok((s, skipped)) => {
+                    if skipped > 0 {
+                        eprintln!(
+                            "警告：历史文件 {path} 有 {skipped} 行无法解析，已跳过（其余数据继续使用）"
+                        );
+                    }
+                    if !args.quiet && !s.is_empty() {
+                        println!(
+                            "已载入历史 {} 点 · {} 轮（{path}）",
+                            s.len(),
+                            s.total_rounds()
+                        );
+                    }
+                    s
+                }
+                Err(e) => {
+                    // 文件**不存在**是首次使用的正常情况；文件存在却读不动（版本不符、
+                    // 不是 CPing 时序）就必须拒绝——否则下一轮写回时会把用户的历史覆盖掉。
+                    if std::path::Path::new(path).exists() {
+                        eprintln!("历史文件无法使用：{e}");
+                        return Err(EXIT_USAGE);
+                    }
+                    TimeSeries::new()
+                }
+            },
+            None => TimeSeries::new(),
+        };
+        series.retention_secs = args.keep_days * 86_400;
         Ok(Self {
             args: args.clone(),
             spec: spec.clone(),
@@ -106,6 +141,7 @@ impl Session {
             changes: ChangeLog::new(DEFAULT_CHANGE_CAPACITY),
             round: 0,
             last_stats: ScanStats::default(),
+            series,
         })
     }
 
@@ -147,6 +183,26 @@ impl Session {
                 }
             }
 
+            // M14：并入长期时序。每轮**立即落盘**——Ctrl+C 或掉电时已经跑过的轮次
+            // 不该丢，这是「长期观察」的基本要求。
+            if self.args.history.is_some() || self.args.report.is_some() {
+                self.series.append_results(now_ms(), &outcome.results);
+            }
+            if let Some(path) = &self.args.history {
+                if let Err(e) = self.series.save_to_path(path) {
+                    eprintln!("历史写入失败：{e}");
+                    return EXIT_USAGE;
+                }
+                if !self.args.quiet {
+                    println!(
+                        "  历史：{} 点 · {} 轮 · 保留 {} 天 → {path}",
+                        self.series.len(),
+                        self.series.total_rounds(),
+                        self.series.retention_secs / 86_400
+                    );
+                }
+            }
+
             self.previous = outcome.results;
             self.changes.extend(outcome.changes);
 
@@ -158,6 +214,18 @@ impl Session {
             match self.args.watch_seconds {
                 None => break,
                 Some(secs) => std::thread::sleep(Duration::from_secs(secs)),
+            }
+        }
+
+        // M14：报表在**所有轮次之后**生成——它描述的是整个过程，而不是某一轮。
+        if let Some(path) = &self.args.report {
+            if self.series.is_empty() {
+                eprintln!("报表：没有可用的历史数据，已跳过 {path}");
+            } else if let Err(e) = self.write_uptime_report(path) {
+                eprintln!("报表写入失败：{e}");
+                return EXIT_USAGE;
+            } else if !self.args.quiet {
+                println!("可用率报表（{} 台主机）→ {path}", self.series.hosts().len());
             }
         }
 
@@ -280,6 +348,17 @@ impl Session {
             .map_err(|e| e.to_string())?;
         std::fs::write(path, bytes).map_err(|e| e.to_string())
     }
+
+    /// M14：写出可用率报表。格式由扩展名决定（参数解析阶段已限定 .csv/.html）。
+    fn write_uptime_report(&self, path: &str) -> Result<(), String> {
+        let report = self.series.report();
+        let bytes = if path.to_ascii_lowercase().ends_with(".html") {
+            cping_core::report_html(&self.series, &report).into_bytes()
+        } else {
+            cping_core::report_csv(&report)
+        };
+        std::fs::write(path, bytes).map_err(|e| format!("写入 {path} 失败：{e}"))
+    }
 }
 
 struct RoundOutcome {
@@ -378,9 +457,7 @@ fn print_round(
     }
 }
 
-/// 本地时间文本（不引时区库：用系统本地时间换算）。
 /// M12：列出本平台的后端能力。
-///
 /// 刻意把**不可用**的后端也打出来（并写明原因）：「ICMPv6 未实装」是用户需要
 /// 知道的事实，藏起来只会让人对着清一色的「不支持」猜原因。
 fn print_backends() {
@@ -431,6 +508,15 @@ fn now_text() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format_unix_local(secs)
+}
+
+/// 当前 Unix 毫秒（M14 时序点的时间戳）。取不到时退化为 0，
+/// 调用端会把它当作「时间未知」——而不是伪造一个看起来合理的数字。
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// 把 Unix 秒转成 `YYYY-MM-DD HH:MM:SS`（本地时区偏移由系统给出）。

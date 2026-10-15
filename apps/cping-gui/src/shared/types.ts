@@ -294,3 +294,44 @@ export interface FingerprintDto {
   deviceBasis: string[]
 }
 
+
+// ---------------------------------------------------------------------------
+// M14 历史与趋势（可用率）
+// ---------------------------------------------------------------------------
+
+/**
+ * 一台主机的可用率行。
+ *
+ * `avgRttMs` / `worstRttMs` 为 `null` 表示**从未在线**——不是 0。
+ * 界面必须显示成 `-`，写成 0 会被读成「极快」。
+ */
+export interface UptimeRowDto {
+  ip: string
+  samples: number
+  online: number
+  uptimePercent: number
+  uptimeText: string
+  avgRttMs: number | null
+  avgRttText: string
+  worstRttMs: number | null
+  worstRttText: string
+  jitterMs: number
+  jitterText: string
+  points: number
+  /** 在线率曲线：每点 0..1；`null` = 该轮**没测到**这台主机（≠ 离线）。 */
+  curve: (number | null)[]
+  /** 内嵌 SVG 折线（后端纯函数产出，无脚本）。 */
+  sparkline: string
+}
+
+/** 趋势页整体状态。 */
+export interface TrendDto {
+  points: number
+  rounds: number
+  hosts: number
+  spanHours: number
+  retentionDays: number
+  rows: UptimeRowDto[]
+  /** 空状态时的一句人话；有数据时为 null。 */
+  emptyHint: string | null
+}

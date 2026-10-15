@@ -17,6 +17,7 @@ import type {
   SnapshotDto,
   SnapshotSavedDto,
   SpecDto,
+  TrendDto,
 } from '../shared/types'
 
 export function isTauri(): boolean {
@@ -194,4 +195,28 @@ export async function restoreSnapshot(path?: string): Promise<SnapshotDto> {
 
 export function onProbeEvent(cb: (event: ProbeEventDto) => void): Promise<UnlistenFn> {
   return listen<ProbeEventDto>('probe-event', (ev) => cb(ev.payload))
+}
+
+// ---------------------------------------------------------------------------
+// M14：历史与趋势（可用率）
+// ---------------------------------------------------------------------------
+
+/**
+ * 取趋势页数据。`chartWidth` 是折线图的像素宽度（默认 160）。
+ *
+ * 曲线里的 `null` 表示该轮**没测到**这台主机，不是「离线」——
+ * 界面必须画成断线，不能连起来也不能补 0。
+ */
+export async function trendState(chartWidth = 160): Promise<TrendDto> {
+  return invoke<TrendDto>('trend_state', { chartWidth })
+}
+
+/** 清空趋势历史，返回清掉的点数。 */
+export async function clearTrend(): Promise<number> {
+  return invoke<number>('clear_trend')
+}
+
+/** 导出可用率报表（.csv / .html，按扩展名决定）。 */
+export async function exportUptimeReport(path: string): Promise<string> {
+  return invoke<string>('export_uptime_report', { path })
 }

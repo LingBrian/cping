@@ -19,6 +19,7 @@ import {
   type ScanStatsDto,
   type SegmentDto,
   type SnapshotDto,
+  type TrendDto,
 } from '../shared/types'
 import * as svc from '../services/ping'
 
@@ -318,6 +319,9 @@ export const usePingStore = defineStore('ping', () => {
       await refreshSnapshot()
       // 变化流水要在快照之后再拉：后端是在终态处理里写的变化日志。
       await loadChanges(200)
+      // M14：本轮也已并入后端时序。只有「趋势已经被看过」时才顺手刷新，
+      // 免得从没打开过趋势页的用户每轮都白白多一次 IPC。
+      if (trend.value !== null) await loadTrend()
       if (withInfo) {
         const n = recognized.value
         const base = cancelled.value
@@ -497,6 +501,55 @@ export const usePingStore = defineStore('ping', () => {
     }
     return lines
   })
+
+  // -------------------------------------------------------------------------
+  // M14：历史与趋势（可用率）
+  // -------------------------------------------------------------------------
+
+  /**
+   * 趋势页数据。**不做轮询**：只在切到「趋势」页签、以及每轮扫描结束时拉一次。
+   * 时序本身在后端累积（跨轮次、跨会话），前端只是看一眼当前的账。
+   */
+  const trend = ref<TrendDto | null>(null)
+  const trendBusy = ref(false)
+
+  /** 拉一次趋势。`chartWidth` 由页面按容器宽度给定。 */
+  async function loadTrend(chartWidth = 160): Promise<void> {
+    trendBusy.value = true
+    try {
+      trend.value = await svc.trendState(chartWidth)
+    } catch (e) {
+      status.value = `趋势读取失败：${String(e)}`
+    } finally {
+      trendBusy.value = false
+    }
+  }
+
+  /** 清空趋势历史。回报清掉了多少个时间点，别让用户以为「没反应」。 */
+  async function dropTrend(): Promise<void> {
+    try {
+      const removed = await svc.clearTrend()
+      trend.value = null
+      status.value = `已清空趋势历史（${removed} 个时间点）`
+    } catch (e) {
+      status.value = `清空趋势失败：${String(e)}`
+    }
+  }
+
+  /** 导出可用率报表（.csv / .html）。 */
+  async function exportTrend(path: string): Promise<string | null> {
+    try {
+      const msg = await svc.exportUptimeReport(path)
+      status.value = msg
+      return msg
+    } catch (e) {
+      status.value = `导出可用率报表失败：${String(e)}`
+      return null
+    }
+  }
+
+  /** 趋势页里出现过的在线主机数（角标用）。 */
+  const trendHostCount = computed(() => trend.value?.rows.length ?? 0)
 
   function setTcpPort(port: number) {
     if (!Number.isFinite(port) || port <= 0 || port > 65535) return
@@ -884,6 +937,13 @@ export const usePingStore = defineStore('ping', () => {
     fingerprintLines,
     runFingerprint,
     dropFingerprints,
+    // M14
+    trend,
+    trendBusy,
+    trendHostCount,
+    loadTrend,
+    dropTrend,
+    exportTrend,
     // M8
     round,
     changes,

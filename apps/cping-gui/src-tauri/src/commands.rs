@@ -588,6 +588,11 @@ struct Shared {
     /// M13：本轮指纹用的端口数与是否抓横幅（供界面如实说明）。
     fingerprint_ports: usize,
     fingerprint_banner: bool,
+    /// M14：长期时序（进程内累积，供趋势页与可用率报表使用）。
+    series: cping_core::TimeSeries,
+    /// M14：本轮扫描的起始时刻（Unix 毫秒）——时序点用它打时间戳，
+    /// 而不是「扫描结束的现在」，免得一轮跑几秒就把时间轴拉长。
+    round_at_ms: u64,
 }
 
 pub struct AppState {
@@ -632,6 +637,8 @@ impl AppState {
                 fingerprints: Vec::new(),
                 fingerprint_ports: 0,
                 fingerprint_banner: true,
+                series: cping_core::TimeSeries::new(),
+                round_at_ms: 0,
             })),
         }
     }
@@ -955,6 +962,8 @@ pub fn start_scan(
         sh.task_id = Some(task_id.clone());
         sh.prefix = prefix;
         sh.scan_time = now_string();
+        // M14：本轮的时间戳取「开扫这一刻」，供时序点使用。
+        sh.round_at_ms = unix_millis();
         sh.targets = targets;
         sh.cell_slots = slots;
         sh.results = vec![None; total];
@@ -1022,6 +1031,13 @@ pub fn start_scan(
                 }
                 let thresholds_now = sh.thresholds;
                 sh.monitor.commit_round(&current, &thresholds_now);
+                // M14：同一份结果也进长期时序。时间戳用开扫时刻（见 `round_at_ms`）。
+                let at = if sh.round_at_ms == 0 {
+                    unix_millis()
+                } else {
+                    sh.round_at_ms
+                };
+                sh.series.append_results(at, &current);
                 // 进程随时可能被系统回收（Android 上销毁 Activity 即退出进程），
                 // 所以结果一落地就顺手写盘，不依赖退出钩子。
                 let _ = autosave(&app, &sh);
@@ -1178,6 +1194,130 @@ pub fn export_diff(state: State<'_, AppState>, path: String) -> Result<String, S
     Ok(format!(
         "已导出差异报告（{} 项）→ {path}",
         diff.entries.len()
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// M14：历史与趋势
+// ---------------------------------------------------------------------------
+
+/// 单台主机的可用率报表行。
+///
+/// 与核心 [`cping_core::HostReport`] 一一对应，只是补了「显示文本」与曲线，
+/// 前端不做任何数值加工——报表口径只能有一处。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UptimeRowDto {
+    pub ip: String,
+    pub samples: u64,
+    pub online: u64,
+    pub uptime_percent: f64,
+    pub uptime_text: String,
+    /// 平均 RTT（ms）。**从未在线为 null，不是 0**：0 会被读成「极快」。
+    pub avg_rtt_ms: Option<f64>,
+    pub avg_rtt_text: String,
+    pub worst_rtt_ms: Option<u32>,
+    pub worst_rtt_text: String,
+    pub jitter_ms: f64,
+    pub jitter_text: String,
+    /// 出现过该主机的时间点数。
+    pub points: usize,
+    /// 在线率曲线：每点 0..1，`null` = 该轮**没测到**这台主机（≠ 离线）。
+    pub curve: Vec<Option<f64>>,
+    /// 内嵌 SVG 折线（核心纯函数产出，不引图表库）。
+    pub sparkline: String,
+}
+
+/// 趋势页的整体状态。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrendDto {
+    pub points: usize,
+    pub rounds: u64,
+    pub hosts: usize,
+    /// 时间跨度（小时）。
+    pub span_hours: f64,
+    pub retention_days: u64,
+    pub rows: Vec<UptimeRowDto>,
+    /// 空状态时给一句人话；有数据时为 null。
+    pub empty_hint: Option<String>,
+}
+
+/// 趋势页数据（M14）。`chart_width` 由前端按容器宽度给定，默认 160。
+#[tauri::command]
+pub fn trend_state(state: State<'_, AppState>, chart_width: Option<u32>) -> Result<TrendDto, String> {
+    let sh = state.shared.lock().expect("state poisoned");
+    let width = chart_width.unwrap_or(160).clamp(60, 640);
+    let report = sh.series.report();
+    let rows: Vec<UptimeRowDto> = report
+        .iter()
+        .map(|r| {
+            let curve = sh.series.uptime_curve(r.ip);
+            UptimeRowDto {
+                ip: r.ip.to_string(),
+                samples: r.samples,
+                online: r.online,
+                uptime_percent: r.uptime_percent(),
+                uptime_text: r.uptime_text(),
+                avg_rtt_ms: r.avg_rtt_ms,
+                avg_rtt_text: r.avg_rtt_text(),
+                worst_rtt_ms: r.worst_rtt_ms,
+                worst_rtt_text: r.worst_rtt_text(),
+                jitter_ms: r.jitter_ms,
+                jitter_text: r.jitter_text(),
+                points: r.points,
+                sparkline: cping_core::sparkline_svg(&curve, width, 28),
+                curve,
+            }
+        })
+        .collect();
+    Ok(TrendDto {
+        points: sh.series.len(),
+        rounds: sh.series.total_rounds(),
+        hosts: rows.len(),
+        span_hours: sh.series.span_ms() as f64 / 3_600_000.0,
+        retention_days: sh.series.retention_secs / 86_400,
+        empty_hint: if rows.is_empty() {
+            Some("还没有历史数据：先扫描一轮，开持续监控可累积更多轮次。".into())
+        } else {
+            None
+        },
+        rows,
+    })
+}
+
+/// 清空趋势历史。返回清掉的点数，好让界面如实回报「清了多少」。
+#[tauri::command]
+pub fn clear_trend(state: State<'_, AppState>) -> Result<usize, String> {
+    let mut sh = state.shared.lock().expect("state poisoned");
+    let removed = sh.series.len();
+    sh.series = cping_core::TimeSeries::new();
+    Ok(removed)
+}
+
+/// 把累积的可用率报表导出成 CSV / HTML（按扩展名决定）。
+#[tauri::command]
+pub fn export_uptime_report(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<String, String> {
+    let sh = state.shared.lock().expect("state poisoned");
+    if sh.series.is_empty() {
+        return Err("还没有历史数据可导出（先完成至少一轮扫描）".into());
+    }
+    let report = sh.series.report();
+    let bytes = if path.to_ascii_lowercase().ends_with(".html") {
+        cping_core::report_html(&sh.series, &report).into_bytes()
+    } else if path.to_ascii_lowercase().ends_with(".csv") {
+        cping_core::report_csv(&report)
+    } else {
+        return Err("可用率报表只支持 .csv / .html".into());
+    };
+    std::fs::write(&path, &bytes).map_err(|e| format!("写入 {path} 失败：{e}"))?;
+    Ok(format!(
+        "已导出可用率报表（{} 台主机 · {} 轮）→ {path}",
+        report.len(),
+        sh.series.total_rounds()
     ))
 }
 
@@ -1644,6 +1784,15 @@ fn unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// M14：当前 Unix 毫秒（时序点时间戳）。取不到硬故障时返回 0，
+/// 由核心按「时间未知」处理，而不是伪造一个看似合理的数值。
+fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
 

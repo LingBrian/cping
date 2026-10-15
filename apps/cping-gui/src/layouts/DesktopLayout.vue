@@ -18,18 +18,21 @@ import ProgressSummary from '../components/ProgressSummary.vue'
 import ResultGrid from '../components/ResultGrid.vue'
 import ResultTable from '../components/ResultTable.vue'
 import StatusBar from '../components/StatusBar.vue'
+import TrendPanel from '../components/TrendPanel.vue'
 import { MONITOR_INTERVALS, type ExportFormatKey } from '../shared/types'
 import { usePingStore } from '../stores/ping'
 
 const store = usePingStore()
 const message = useMessage()
-const tab = ref<'matrix' | 'table' | 'changes' | 'assets'>(
+const tab = ref<'matrix' | 'table' | 'changes' | 'assets' | 'trend'>(
   store.view === 'table' ? 'table' : 'matrix',
 )
 
 watch(tab, (v) => {
   // 变化页签不是一个「视图偏好」，所以不写进配置
   if (v === 'matrix' || v === 'table') store.view = v
+  // M14：切到趋势页时拉一次数据（不做轮询，扫描结束时后端会顺带刷新）
+  if (v === 'trend') void store.loadTrend()
 })
 
 const monitorOptions = MONITOR_INTERVALS.map((s) => ({ label: `${s} 秒`, value: s }))
@@ -116,6 +119,12 @@ async function onFingerprint() {
   } else {
     message.error(store.status)
   }
+}
+
+/** M14：切到趋势页并拉一次数据。已在趋势页时 watch 不会触发，所以这里显式拉。 */
+async function onShowTrend() {
+  tab.value = 'trend'
+  await store.loadTrend()
 }
 
 /** M7：把当前结果存成快照，下次启动可以直接恢复。 */
@@ -222,6 +231,10 @@ async function onSaveSnapshot() {
         >
           端口指纹（不影响在线判定）
         </NButton>
+        <!-- M14：历史与趋势。没有历史也允许打开——空状态会说明怎么攒数据。 -->
+        <NButton style="width: 100%; margin-top: 8px" @click="onShowTrend">
+          可用率趋势
+        </NButton>
         <div style="font-size: 11px; color: #6b7280; margin-top: 6px">
           已识别 MAC {{ store.recognized.mac }} · 厂商 {{ store.recognized.vendor }} · 主机名
           {{ store.recognized.hostname }}
@@ -289,6 +302,16 @@ async function onSaveSnapshot() {
         >
           <div style="height: 100%; padding-top: 8px; min-height: 0">
             <FingerprintPanel />
+          </div>
+        </NTabPane>
+        <!-- M14：历史与趋势。标签带轮数——用户一眼能看出「攒了多少账」。 -->
+        <NTabPane
+          name="trend"
+          :tab="`趋势 (${store.trend?.rounds ?? 0} 轮)`"
+          display-directive="show"
+        >
+          <div style="height: 100%; padding-top: 8px; min-height: 0">
+            <TrendPanel />
           </div>
         </NTabPane>
       </NTabs>

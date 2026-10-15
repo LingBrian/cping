@@ -6,9 +6,9 @@
 
 Rust 核心 · TUI（ratatui）· 桌面 GUI（Tauri 2 + Vue 3）· Android
 
-[![Release](https://img.shields.io/badge/release-v2.1.0-111827)](../../releases)
+[![Release](https://img.shields.io/badge/release-v2.2.0-111827)](../../releases)
 [![CI](https://github.com/LingBrian/cping/actions/workflows/ci.yml/badge.svg)](https://github.com/LingBrian/cping/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-309%20passed-brightgreen)](docs/testing.md)
+[![Tests](https://img.shields.io/badge/tests-336%20passed-brightgreen)](docs/testing.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20Android-lightgrey)](docs/platform-compatibility.md)
 
@@ -73,6 +73,7 @@ cping/
 │   ├── monitor/history                 M8：轮次对比 · 变化日志 · 逐轮历史
 │   ├── json/html/diff/export           M10：四种导出格式与两次扫描对比
 │   ├── fingerprint                     M13：端口指纹 · 服务横幅 · 设备类型推断（纯数据驱动）
+│   ├── timeseries                      M14：长期时序 · 降采样 · 可用率报表 · 折线与字符曲线
 │   ├── oui/neighbor/hostname/enrich    M7：厂商识别 · ARP 取 MAC · 反查主机名 · 信息补全
 │   ├── snapshot                        结果快照落盘与恢复（严格解析，坏数据宁可报错）
 │   ├── data/                           IEEE OUI 三表（54,190 条，编译期嵌入）
@@ -126,6 +127,9 @@ cping-cli -t 192.168.1 --watch 30 --rounds 10 --quiet
 cping-cli --list-backends          # 本平台有哪些后端可用、支持哪些地址族
 cping-cli -t 192.168.1 --fingerprint --out assets.csv   # M13：端口指纹 + 设备推断
 cping-cli -t 192.168.1 --fingerprint --fp-ports 22,80,443 --no-banner
+# M14：把每轮追加到长期时序（跨会话累积），结束时出可用率报表
+cping-cli -t 192.168.1 --watch 60 --history net.ts --report uptime.html
+cping-cli -t 192.168.1 --watch 300 --history net.ts --keep-days 30 --report uptime.csv
 ```
 
 退出码：`0` 全部在线 / `1` 存在离线 / `2` 参数错误 / `3` 权限不足或后端不可用。
@@ -136,6 +140,11 @@ cping-cli -t 192.168.1 --fingerprint --fp-ports 22,80,443 --no-banner
 > `--fingerprint` 是**独立于在线判定的第二趟探测**：端口全关不会把主机改成离线，
 > 端口开放也不会把离线主机变在线。横幅只读对方主动送出的前 256 字节，
 > **不发送任何协议请求**；设备类型是「厂商 + 端口」的**推断**结论，识别不出就留空。
+>
+> `--history` 写出的时序文件**带格式版本号**，版本不符时显式拒绝读取；每轮都立即
+> 落盘，Ctrl+C 也不丢已跑过的轮次。`--report` 的数值可直接对账回原始记录：
+> 降采样只做同类项相加，观测轮数与 RTT 求和在合并前后守恒。
+> **从未在线的主机 RTT 记为「-」而不是 0**——0 会被读成「极快」。
 
 ### TUI
 
@@ -153,11 +162,16 @@ cping-tui --prefix 192.168.1
 | `w` | 保存快照 | `l` | 从快照恢复 |
 | `T` | 切换 ICMP ↔ TCP | `p` | 轮换常用 TCP 端口 |
 | `F` | 端口指纹（选中主机；无选中则全部在线主机） | `M` | 开/关持续监控 | `e` | 查看变化事件流 |
-| `[` / `]` | 缩短 / 延长重扫间隔 | `?` / `F1` | 帮助 |
-| `q` | 退出（运行中需再按一次确认） | `Ctrl+C` | 强制退出并恢复终端 |
+| `U` | 历史与趋势（每台主机一条在线率字符柱曲线） | `[` / `]` | 缩短 / 延长重扫间隔 |
+| `?` / `F1` | 帮助 | `q` | 退出（运行中需再按一次确认） |
+| `Ctrl+C` | 强制退出并恢复终端 | | |
 
 状态符号：`#` 低延迟 · `+` 中延迟 · `*` 高延迟 · `-` 无回应 · `!` 错误 · `.` 未探测。
 **颜色不是唯一标识**：无颜色终端下符号仍然可区分。
+
+趋势面板里的曲线用 8 档字符柱（`▁▂▃▄▅▆▇█`）表示每轮的在线率；`·` 表示该轮
+**没测到**这台主机（不是「离线」）。TUI 的趋势只累积在本进程内——需要跨会话的
+长期历史请用 `cping-cli --history`，两者共用同一套时序核心。
 
 可选 `--snapshot-dir <目录>` 指定快照目录（默认当前目录）。
 
@@ -174,10 +188,16 @@ cping-tui --prefix 192.168.1
 **默认不恢复**（丢弃 / 暂不恢复 / 恢复结果三个出口）。存在的理由是 Android 上
 进程会被系统随时回收（销毁 Activity 即退出进程），内存里的结果不可靠。
 
+**趋势（M14）**：每轮扫描都会并入长期时序，「趋势」页签按主机显示可用率、在线/观测
+轮数、平均与最差 RTT、抖动，以及一条内嵌 SVG 在线率折线（纯函数产出，**无脚本**）。
+曲线断开处表示该轮**没测到**这台主机，不是「离线」。可导出 CSV / HTML 报表并清空。
+移动端同一页签，但隐藏导出按钮（`plugin-dialog` 的 `save` 在 Android 上无原生实现）。
+
 ### Android
 
-列表优先的触控布局：网段输入（数字键盘）→ 开始探测；列表/矩阵页签、仅在线开关、
-导出到应用专属外部目录（回报完整路径，Android 10+ 分区存储无需权限）、抽屉式设置。
+列表优先的触控布局：网段输入（数字键盘）→ 开始探测；列表/矩阵/变化/趋势页签、
+仅在线开关、导出到应用专属外部目录（回报完整路径，Android 10+ 分区存储无需权限）、
+抽屉式设置。
 已在 Android 15 模拟器完成真机级验收：安装/启动/扫描/导出/横竖屏/前后台全部通过；
 普通权限下 raw ICMP 被拒（`EPERM`/`EACCES`），状态如实显示「权限不足」，
 独立 TCP 连通性模式见路线图 M9。
@@ -190,8 +210,8 @@ cping-tui --prefix 192.168.1
 | **v1.1.0** ✅ | M7 | 目标信息增强：OUI 厂商识别（54,190 条离线库）、ARP/MAC、主机名反查、结果快照与恢复 |
 | **v1.2.0–v1.5.0** ✅ | M8–M11 | 持续监控 · 探测扩展（TCP / 多网段 / CIDR）· JSON/HTML/diff 与无头 CLI · Linux 实测与打包、CI/CD |
 | **v2.0.0** ✅ | M12 | 架构升级：IPv4+IPv6 统一目标模型、后端注册表、可选 Tokio 异步调度 |
-| v2.1.0 | M13 | 资产识别：开放端口与服务指纹、设备类型推断 |
-| v2.2.0 | M14 | 历史与趋势：跨会话记录、可用率与延迟趋势 |
+| v2.1.0 ✅ | M13 | 资产识别：开放端口与服务指纹、设备类型推断 |
+| **v2.2.0** ✅ | M14 | 历史与趋势：跨会话时序（版本化格式 + 降采样）、可用率报表、在线率曲线 |
 | v2.3.0–v2.7.0 | M15–M19 | 告警与通知 · 配置与模板 · 安全与合规 · 国际化与无障碍 · 规模化性能 |
 | v3.0.0 | M20 | 生态与开放：插件接口、脚本化任务、对外 API（主版本） |
 
