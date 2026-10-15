@@ -130,7 +130,6 @@ export interface BackendCapsDto {
 
 /** 导出格式（M10） */
 export type ExportFormatKey = 'csv' | 'txt' | 'json' | 'html'
-
 export interface ColorConfigDto {
   low: string
   mid: string
@@ -260,3 +259,38 @@ export const CLASS_SYMBOLS: Record<ResultClassKey, string> = {
   offline: '-',
   error: '!',
 }
+
+// ---------------------------------------------------------------------------
+// M13 资产识别（端口指纹）
+// ---------------------------------------------------------------------------
+
+/** 一个开放端口。关闭端口不会出现在这里。 */
+export interface OpenPortDto {
+  port: number
+  /** 已知服务名；未收录的端口为 null（界面不得自行编一个）。 */
+  service: string | null
+  /** 服务主动送出的横幅（只读一次，原样保存）。 */
+  banner: string | null
+  connectRttMs: number
+}
+
+/**
+ * 一台主机的端口指纹。
+ *
+ * 注意：这是**附加信息**，与在线判定无关——端口全关的主机照样是「在线」。
+ */
+export interface FingerprintDto {
+  ip: string
+  scanned: number
+  elapsedMs: number
+  openPorts: OpenPortDto[]
+  openPortsSummary: string
+  /** 设备类型推断结论；识别不出为 null（界面留空，不写「未知」）。 */
+  deviceKind: string | null
+  deviceConfidence: string | null
+  /** 恒为 true：提醒消费方这是**推断**而不是事实。 */
+  deviceIsInference: boolean
+  deviceSummary: string
+  deviceBasis: string[]
+}
+

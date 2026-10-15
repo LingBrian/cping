@@ -12,6 +12,7 @@ import {
 import { save } from '@tauri-apps/plugin-dialog'
 import ChangePanel from '../components/ChangePanel.vue'
 import ColorSettings from '../components/ColorSettings.vue'
+import FingerprintPanel from '../components/FingerprintPanel.vue'
 import PrefixForm from '../components/PrefixForm.vue'
 import ProgressSummary from '../components/ProgressSummary.vue'
 import ResultGrid from '../components/ResultGrid.vue'
@@ -22,7 +23,9 @@ import { usePingStore } from '../stores/ping'
 
 const store = usePingStore()
 const message = useMessage()
-const tab = ref<'matrix' | 'table' | 'changes'>(store.view === 'table' ? 'table' : 'matrix')
+const tab = ref<'matrix' | 'table' | 'changes' | 'assets'>(
+  store.view === 'table' ? 'table' : 'matrix',
+)
 
 watch(tab, (v) => {
   // 变化页签不是一个「视图偏好」，所以不写进配置
@@ -98,6 +101,21 @@ async function onEnrich() {
   const msg = await store.enrich()
   if (msg) message.success(msg)
   else message.error(store.status)
+}
+
+/** M13：对在线主机做端口指纹。**不动 results**：端口全关的主机照样是在线。 */
+async function onFingerprint() {
+  if (store.stats.online === 0) {
+    message.warning('没有在线主机可做端口指纹')
+    return
+  }
+  const msg = await store.runFingerprint(null)
+  if (msg) {
+    message.success(msg)
+    tab.value = 'assets'
+  } else {
+    message.error(store.status)
+  }
 }
 
 /** M7：把当前结果存成快照，下次启动可以直接恢复。 */
@@ -195,6 +213,15 @@ async function onSaveSnapshot() {
         >
           保存快照
         </NButton>
+        <!-- M13：资产识别。按钮文案直说边界，避免被误读成「再扫一遍在线」。 -->
+        <NButton
+          style="width: 100%; margin-top: 8px"
+          :loading="store.fingerprintBusy"
+          :disabled="store.stats.online === 0"
+          @click="onFingerprint"
+        >
+          端口指纹（不影响在线判定）
+        </NButton>
         <div style="font-size: 11px; color: #6b7280; margin-top: 6px">
           已识别 MAC {{ store.recognized.mac }} · 厂商 {{ store.recognized.vendor }} · 主机名
           {{ store.recognized.hostname }}
@@ -252,6 +279,16 @@ async function onSaveSnapshot() {
         <NTabPane name="changes" :tab="`变化 (${store.changes.length})`" display-directive="show">
           <div style="height: 100%; padding-top: 8px; min-height: 0">
             <ChangePanel />
+          </div>
+        </NTabPane>
+        <!-- M13：资产识别。标签带主机数，与「变化」页签同一套提示逻辑。 -->
+        <NTabPane
+          name="assets"
+          :tab="`资产 (${store.fingerprintedHosts})`"
+          display-directive="show"
+        >
+          <div style="height: 100%; padding-top: 8px; min-height: 0">
+            <FingerprintPanel />
           </div>
         </NTabPane>
       </NTabs>

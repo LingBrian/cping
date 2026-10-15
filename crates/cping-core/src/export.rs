@@ -16,6 +16,7 @@
 use crate::classify::{classify_status, Thresholds};
 use crate::config::ColorConfig;
 use crate::error::{CoreError, CoreResult};
+use crate::fingerprint::HostFingerprint;
 use crate::json::Json;
 use crate::monitor::Change;
 use crate::result::{ProbeResult, ProbeStatus, ScanStats};
@@ -27,7 +28,7 @@ pub const CSV_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
 /// 导出格式的**报告版本号**：结构性变更时递增，消费方据此判断能否解析。
 pub const REPORT_FORMAT_VERSION: u32 = 2;
 
-pub const CSV_HEADER: [&str; 9] = [
+pub const CSV_HEADER: [&str; 11] = [
     "扫描时间",
     "IP地址",
     "状态",
@@ -38,6 +39,9 @@ pub const CSV_HEADER: [&str; 9] = [
     "主机名",
     // M9 追加列：仍然只在末尾追加，旧列位置与内容不变
     "探测方式",
+    // M13 追加列：端口指纹**不参与在线判定**，只作为附加信息列出现
+    "开放端口",
+    "设备推断",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,8 +167,20 @@ pub fn sorted_by_ip(results: &[ProbeResult]) -> Vec<ProbeResult> {
     out
 }
 
-/// 生成 CSV 字节（含 BOM）。
+/// 生成 CSV 字节（含 BOM）。不带指纹数据——等价于 `export_csv_with_fingerprints(.., &[])`。
 pub fn export_csv(results: &[ProbeResult], meta: &ExportMeta) -> CoreResult<Vec<u8>> {
+    export_csv_with_fingerprints(results, meta, &[])
+}
+
+/// 生成 CSV 字节（含 BOM），并把端口指纹作为**末尾两列**附上。
+///
+/// 指纹列**只描述端口**，不改变任何既有列（状态/RTT/在线判定一律不动）——
+/// 这是「端口扫描与连通性结果分列」这条验收要求在导出侧的落地。
+pub fn export_csv_with_fingerprints(
+    results: &[ProbeResult],
+    meta: &ExportMeta,
+    fingerprints: &[HostFingerprint],
+) -> CoreResult<Vec<u8>> {
     let mut text = String::new();
     text.push_str(&CSV_HEADER.join(","));
     text.push_str("\r\n");
@@ -173,6 +189,9 @@ pub fn export_csv(results: &[ProbeResult], meta: &ExportMeta) -> CoreResult<Vec<
         let rtt = r.status.rtt_ms().map(|v| v.to_string()).unwrap_or_default();
         let mac = r.mac.clone().unwrap_or_default();
         let note = r.status.note().unwrap_or("").to_string();
+        let fp = fingerprint_for(fingerprints, r.ip);
+        let open_ports = fp.map(|f| f.open_ports_summary()).unwrap_or_default();
+        let device = fp.map(|f| f.device_summary()).unwrap_or_default();
         let fields = [
             meta.scan_time.clone(),
             r.ip.to_string(),
@@ -185,6 +204,9 @@ pub fn export_csv(results: &[ProbeResult], meta: &ExportMeta) -> CoreResult<Vec<
             r.hostname.clone().unwrap_or_default(),
             // M9 追加列：同样只在末尾追加
             meta.mode.describe(),
+            // M13 追加列（仅开放端口；关闭端口不出现）
+            open_ports,
+            device,
         ];
         let line: Vec<String> = fields.iter().map(|f| csv_escape(f)).collect();
         text.push_str(&line.join(","));
@@ -197,11 +219,29 @@ pub fn export_csv(results: &[ProbeResult], meta: &ExportMeta) -> CoreResult<Vec<
     Ok(bytes)
 }
 
-/// 生成 TXT 字节（UTF-8，定宽对齐）。
+/// 按 IP 取指纹条目（线性查找：一次扫描的主机数有上限，不值得建 HashMap）。
+fn fingerprint_for(fingerprints: &[HostFingerprint], ip: IpAddr) -> Option<&HostFingerprint> {
+    fingerprints.iter().find(|f| f.ip() == ip)
+}
+
+/// 生成 TXT 字节（UTF-8，定宽对齐）。不带指纹数据。
 pub fn export_txt(
     results: &[ProbeResult],
     meta: &ExportMeta,
     thresholds: &Thresholds,
+) -> CoreResult<Vec<u8>> {
+    export_txt_with_fingerprints(results, meta, thresholds, &[])
+}
+
+/// 生成 TXT 字节：定宽明细表 + **独立的**端口指纹小节。
+///
+/// 指纹小节排在明细表之后，标题里写明「与在线判定相互独立」，
+/// 避免读者把「端口全关」误读成「主机离线」。
+pub fn export_txt_with_fingerprints(
+    results: &[ProbeResult],
+    meta: &ExportMeta,
+    thresholds: &Thresholds,
+    fingerprints: &[HostFingerprint],
 ) -> CoreResult<Vec<u8>> {
     let sorted = sorted_by_ip(results);
     let stats = ScanStats::from_results(&sorted);
@@ -270,6 +310,56 @@ pub fn export_txt(
         ));
     }
 
+    // --- M13：端口指纹（独立小节，不与在线判定混排）-------------------------
+    if !fingerprints.is_empty() {
+        out.push('\n');
+        out.push_str("端口指纹（附加信息，与上面的在线判定相互独立）\n");
+        out.push_str("------------------------------------------------------------\n");
+        out.push_str(&format!(
+            "探测端口数 : {} 个\n",
+            fingerprints[0].report.scanned
+        ));
+        out.push_str(&format!(
+            "开放端口合计 : {} 个（出现在 {} 台主机上）\n",
+            fingerprints
+                .iter()
+                .map(|f| f.report.findings.len())
+                .sum::<usize>(),
+            fingerprints.iter().filter(|f| f.has_open_ports()).count()
+        ));
+        out.push_str("------------------------------------------------------------\n");
+        for fp in fingerprints {
+            let ip = fp.ip().to_string();
+            if !fp.has_open_ports() {
+                // 端口全关**不等于**主机离线，这里必须说清楚
+                out.push_str(&format!("{:<17} 无开放端口（不影响其在线状态）\n", ip));
+                continue;
+            }
+            out.push_str(&format!(
+                "{:<17} {}\n",
+                ip,
+                truncate_display(&fp.open_ports_summary(), 60)
+            ));
+            for f in &fp.report.findings {
+                if let Some(banner) = &f.banner {
+                    out.push_str(&format!(
+                        "{:<17}   :{:<6} {}\n",
+                        "",
+                        f.port,
+                        truncate_display(banner, 60)
+                    ));
+                }
+            }
+            if !fp.device_summary().is_empty() {
+                out.push_str(&format!(
+                    "{:<17}   {}\n",
+                    "",
+                    truncate_display(&fp.device_summary(), 90)
+                ));
+            }
+        }
+    }
+
     Ok(out.into_bytes())
 }
 
@@ -325,6 +415,12 @@ pub struct ScanReport {
     pub thresholds: Thresholds,
     /// 本轮变化（M8）；单次扫描时为空。
     pub changes: Vec<Change>,
+    /// 端口指纹（M13）；未启用指纹时为**空**。
+    ///
+    /// 刻意与 `results` 并列而不是塞进 `ProbeResult`：端口扫描是一趟**独立**
+    /// 探测，把它混进结果模型会让「在线」判定出现第二个来源。分开存，
+    /// 任何消费方都必须显式选择性的合并。
+    pub fingerprints: Vec<HostFingerprint>,
 }
 
 impl ScanReport {
@@ -343,14 +439,28 @@ impl ScanReport {
             stats,
             thresholds,
             changes,
+            fingerprints: Vec::new(),
         }
+    }
+
+    /// 附上端口指纹（M13）。空切片等价于「没做指纹」。
+    pub fn with_fingerprints(mut self, fingerprints: Vec<HostFingerprint>) -> Self {
+        self.fingerprints = fingerprints;
+        self
     }
 
     /// 按格式渲染为字节缓冲（调用方决定落盘方式）。
     pub fn render(&self, format: ExportFormat, palette: &ColorConfig) -> CoreResult<Vec<u8>> {
         match format {
-            ExportFormat::Csv => export_csv(&self.results, &self.meta),
-            ExportFormat::Txt => export_txt(&self.results, &self.meta, &self.thresholds),
+            ExportFormat::Csv => {
+                export_csv_with_fingerprints(&self.results, &self.meta, &self.fingerprints)
+            }
+            ExportFormat::Txt => export_txt_with_fingerprints(
+                &self.results,
+                &self.meta,
+                &self.thresholds,
+                &self.fingerprints,
+            ),
             ExportFormat::Json => Ok(self.to_json_text().into_bytes()),
             ExportFormat::Html => Ok(crate::html::render_report(self, palette).into_bytes()),
         }
@@ -405,6 +515,44 @@ impl ScanReport {
             ])
         }));
 
+        // M13：端口指纹独立成数组。`device.is_inference` 恒为 true，
+        // 让机器消费者也无法把推断结论误当成事实。
+        let fingerprints = Json::array(self.fingerprints.iter().map(|fp| {
+            let open = Json::array(fp.report.findings.iter().map(|f| {
+                Json::object([
+                    ("port", Json::UInt(f.port as u64)),
+                    (
+                        "service",
+                        match f.service {
+                            Some(s) => Json::str(s),
+                            None => Json::Null,
+                        },
+                    ),
+                    ("banner", Json::opt_str(f.banner.clone())),
+                    ("connect_rtt_ms", Json::UInt(f.connect_rtt_ms as u64)),
+                ])
+            }));
+            let device = match &fp.device {
+                Some(d) => Json::object([
+                    ("kind", Json::str(d.kind)),
+                    ("confidence", Json::str(d.confidence.label_zh())),
+                    ("is_inference", Json::Bool(true)),
+                    (
+                        "basis",
+                        Json::array(d.basis.iter().map(|b| Json::str(b.clone()))),
+                    ),
+                ]),
+                None => Json::Null,
+            };
+            Json::object([
+                ("ip", Json::str(fp.ip().to_string())),
+                ("scanned", Json::UInt(fp.report.scanned as u64)),
+                ("elapsed_ms", Json::UInt(fp.report.elapsed_ms)),
+                ("open_ports", open),
+                ("device", device),
+            ])
+        }));
+
         Json::object([
             ("tool", Json::str("cping")),
             ("version", Json::str(crate::VERSION)),
@@ -445,6 +593,7 @@ impl ScanReport {
                 ]),
             ),
             ("changes", changes),
+            ("fingerprints", fingerprints),
             ("targets", targets),
         ])
     }

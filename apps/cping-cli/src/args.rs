@@ -38,6 +38,10 @@ pub const HELP: &str = r#"CPing 无头命令行 —— 批量 PING，结果可�
       --timeout <ms>      单目标超时（默认 1000，上限 60000）
   -c, --concurrency <n>   并发数（默认 32，上限 256）
       --enrich            扫描后补全 MAC 与厂商（读本机邻居表，离线 OUI 库）
+      --fingerprint       对在线主机做端口指纹 + 设备类型推断（M13）
+      --fp-ports <列表>   指纹探测的端口，如 22,80,443-445（默认内置常用集）
+      --no-banner         指纹时**不**抓取服务横幅（默认抓，只读不写）
+      --fp-timeout <ms>   指纹的单端口超时（默认 800，上限 60000）
   -w, --watch <秒>        持续监控：每 N 秒重扫一轮，并输出变化
   -n, --rounds <n>        watch 模式总轮数（默认一直跑，Ctrl+C 停止）
       --out <路径>        导出结果；按扩展名决定格式（.csv/.txt/.json/.html）
@@ -57,7 +61,14 @@ pub const HELP: &str = r#"CPing 无头命令行 —— 批量 PING，结果可�
   cping-cli -t 192.168.1
   cping-cli -t 192.168.1.0/24 --mode tcp --port 445 --out scan.csv
   cping-cli -t 10.0.0.0/30 --json report.json --enrich
+  cping-cli -t 192.168.1 --fingerprint --out assets.csv
   cping-cli -t 192.168.1 --watch 30 --out rounds.json
+
+关于 --fingerprint：
+  端口指纹是**独立于在线判定的第二趟探测**，只对在线主机做：
+  端口全关不会把主机改成离线，端口开放也不会把离线主机变在线。
+  服务横幅只读对方主动送出的前 256 字节，**不发送任何协议请求**；
+  设备类型是「厂商 + 开放端口」的**推断**结论，识别不出就留空。
 "#;
 
 /// 解析后的命令行参数。
@@ -69,6 +80,14 @@ pub struct Args {
     pub timeout_ms: u64,
     pub concurrency: usize,
     pub enrich: bool,
+    /// M13：对在线主机做端口指纹。
+    pub fingerprint: bool,
+    /// M13：指纹端口列表；空表示用核心内置的常用集。
+    pub fp_ports: Vec<u16>,
+    /// M13：是否抓取服务横幅（默认抓，只读）。
+    pub fp_grab_banner: bool,
+    /// M13：指纹单端口超时。
+    pub fp_timeout_ms: u64,
     pub watch_seconds: Option<u64>,
     pub rounds: Option<u64>,
     pub out: Option<(ExportFormat, String)>,
@@ -90,6 +109,10 @@ impl Default for Args {
             timeout_ms: cping_core::DEFAULT_TIMEOUT_MS,
             concurrency: cping_core::DEFAULT_CONCURRENCY,
             enrich: false,
+            fingerprint: false,
+            fp_ports: Vec::new(),
+            fp_grab_banner: true,
+            fp_timeout_ms: 800,
             watch_seconds: None,
             rounds: None,
             out: None,
@@ -131,6 +154,21 @@ impl Args {
                 "-q" | "--quiet" => args.quiet = true,
                 "--list-backends" => args.list_backends = true,
                 "--enrich" => args.enrich = true,
+                "--fingerprint" | "--fp" => args.fingerprint = true,
+                "--no-banner" => args.fp_grab_banner = false,
+                "--fp-ports" => {
+                    let v = take_value("--fp-ports")?;
+                    let ports = cping_core::PortScanConfig::parse_ports(&v)
+                        .map_err(|e| format!("--fp-ports 无效：{e}"))?;
+                    args.fp_ports = ports;
+                }
+                "--fp-timeout" => {
+                    let v = parse_u64("--fp-timeout", &take_value("--fp-timeout")?)?;
+                    if v == 0 || v > MAX_TIMEOUT_MS {
+                        return Err(format!("--fp-timeout 必须在 1..={MAX_TIMEOUT_MS} 之间"));
+                    }
+                    args.fp_timeout_ms = v;
+                }
                 "-t" | "--target" => {
                     let v = take_value("--target")?;
                     if args.target_given && !args.target_spec.is_empty() {
@@ -248,13 +286,44 @@ impl Args {
             Some(s) => format!(" · 每 {s} 秒重扫"),
             None => String::new(),
         };
+        let fp = if self.fingerprint {
+            let ports = if self.fp_ports.is_empty() {
+                format!("{} 个常用端口", cping_core::DEFAULT_FINGERPRINT_PORTS.len())
+            } else {
+                format!("{} 个指定端口", self.fp_ports.len())
+            };
+            format!(
+                " · 端口指纹（{ports}{}）",
+                if self.fp_grab_banner {
+                    "，含横幅"
+                } else {
+                    ""
+                }
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "{} · {} 并发 · 超时 {} ms{}",
+            "{} · {} 并发 · 超时 {} ms{}{}",
             self.mode.describe(),
             self.concurrency,
             self.timeout_ms,
-            watch
+            watch,
+            fp
         )
+    }
+
+    /// M13：把 CLI 参数收敛成一个核心层能直接消费的指纹配置。
+    pub fn fingerprint_config(&self) -> cping_core::PortScanConfig {
+        let mut cfg = cping_core::PortScanConfig {
+            timeout: std::time::Duration::from_millis(self.fp_timeout_ms),
+            grab_banner: self.fp_grab_banner,
+            ..Default::default()
+        };
+        if !self.fp_ports.is_empty() {
+            cfg.ports = self.fp_ports.clone();
+        }
+        cfg.normalized()
     }
 }
 
@@ -413,6 +482,63 @@ mod tests {
         assert!(text.contains("64 并发"), "{text}");
         assert!(text.contains("500 ms"), "{text}");
         assert!(!text.contains("重扫"), "{text}");
+    }
+
+    #[test]
+    fn fingerprint_flags_are_parsed_and_defaults_are_conservative() {
+        let a = Args::parse(&argv(&["-t", "10.0.0.1"])).unwrap();
+        assert!(!a.fingerprint, "默认不做指纹");
+        assert!(a.fp_grab_banner, "默认抓横幅（只读）");
+        assert_eq!(a.fp_timeout_ms, 800);
+        assert!(a.fp_ports.is_empty(), "默认用核心内置端口集");
+
+        let b = Args::parse(&argv(&[
+            "-t",
+            "10.0.0.1",
+            "--fingerprint",
+            "--fp-ports",
+            "22,80,443",
+            "--no-banner",
+            "--fp-timeout",
+            "1500",
+        ]))
+        .unwrap();
+        assert!(b.fingerprint);
+        assert_eq!(b.fp_ports, vec![22, 80, 443]);
+        assert!(!b.fp_grab_banner);
+        assert_eq!(b.fp_timeout_ms, 1500);
+        // 配置收敛：CLI 参数 → 核心配置
+        let cfg = b.fingerprint_config();
+        assert_eq!(cfg.ports, vec![22, 80, 443]);
+        assert!(!cfg.grab_banner);
+        assert_eq!(cfg.timeout.as_millis(), 1500);
+
+        // 短别名
+        assert!(
+            Args::parse(&argv(&["-t", "a", "--fp"]))
+                .unwrap()
+                .fingerprint
+        );
+    }
+
+    #[test]
+    fn fingerprint_flag_errors_are_reported() {
+        assert!(Args::parse(&argv(&["-t", "a", "--fp-ports", "abc"])).is_err());
+        assert!(Args::parse(&argv(&["-t", "a", "--fp-ports", "0-5"])).is_err());
+        assert!(Args::parse(&argv(&["-t", "a", "--fp-timeout", "0"])).is_err());
+        assert!(Args::parse(&argv(&["-t", "a", "--fp-timeout", "99999"])).is_err());
+    }
+
+    #[test]
+    fn describe_mentions_fingerprint_only_when_enabled() {
+        let off = Args::parse(&argv(&["-t", "a"])).unwrap();
+        assert!(!off.describe().contains("指纹"));
+        let on = Args::parse(&argv(&["-t", "a", "--fingerprint"])).unwrap();
+        let text = on.describe();
+        assert!(text.contains("端口指纹"), "{text}");
+        assert!(text.contains("含横幅"), "{text}");
+        let no_banner = Args::parse(&argv(&["-t", "a", "--fingerprint", "--no-banner"])).unwrap();
+        assert!(!no_banner.describe().contains("含横幅"));
     }
 
     #[test]

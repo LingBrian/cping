@@ -9,6 +9,7 @@ import type {
   ChangeDto,
   EnrichReportDto,
   ExportFormatKey,
+  FingerprintDto,
   HostnameLookupDto,
   PendingSnapshotDto,
   ProbeEventDto,
@@ -44,6 +45,31 @@ export async function backendCaps(): Promise<BackendCapsDto[]> {
 /** M12：面向界面的一行能力摘要。 */
 export async function backendSummary(): Promise<string> {
   return invoke<string>('backend_summary')
+}
+
+/** M13：对在线主机做端口指纹。`indices` 为空表示对全部在线主机做。 */
+export async function fingerprintHosts(
+  indices: number[] | null = null,
+  ports: number[] | null = null,
+  grabBanner = true,
+  timeoutMs = 800,
+): Promise<FingerprintDto[]> {
+  return invoke<FingerprintDto[]>('fingerprint_hosts_cmd', {
+    indices,
+    ports,
+    grabBanner,
+    timeoutMs,
+  })
+}
+
+/** M13：清空指纹结果。 */
+export async function clearFingerprints(): Promise<void> {
+  return invoke<void>('clear_fingerprints')
+}
+
+/** M13：当前指纹结果的规模：主机数 / 端口数 / 是否抓横幅。 */
+export async function fingerprintState(): Promise<[number, number, boolean]> {
+  return invoke<[number, number, boolean]>('fingerprint_state')
 }
 
 /** M12：本构建是否带可选异步调度（编译期决定）。 */

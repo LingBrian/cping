@@ -154,6 +154,14 @@ struct HostnameJob {
     rx: Receiver<Option<String>>,
 }
 
+/// 一次进行中的端口指纹（M13）。同样放线程里：单主机 28 端口最坏要几秒。
+struct FingerprintJob {
+    /// 本次实际探测的主机数。
+    hosts: usize,
+    ports: usize,
+    rx: Receiver<Vec<cping_core::HostFingerprint>>,
+}
+
 pub struct App {
     pub prefix: String,
     pub editing: bool,
@@ -218,6 +226,13 @@ pub struct App {
     /// 当前实际选中的后端标识（M12），与 `scheduler` 里的后端同源。
     backend_id: cping_core::BackendId,
 
+    // ---- M13 资产识别 ----
+    /// 最近一次的端口指纹结果（独立于 `results`，不参与在线判定）。
+    pub fingerprints: Vec<cping_core::HostFingerprint>,
+    /// 是否显示指纹面板。
+    pub show_fingerprints: bool,
+    fingerprint_job: Option<FingerprintJob>,
+
     handle: Option<SchedulerHandle>,
     scheduler: ProbeScheduler,
 }
@@ -272,6 +287,9 @@ impl App {
             backend_mode: mode,
             use_mock: options.mock,
             backend_id,
+            fingerprints: Vec::new(),
+            show_fingerprints: false,
+            fingerprint_job: None,
             handle: None,
             // M5 起默认使用**平台原生 ICMP**；`--mock` 可切回模拟后端做演示。
             // M12：后端选择（含 mock 分支）统一走核心注册表，三端共用一处。
@@ -351,6 +369,7 @@ impl App {
 
             self.poll_backend();
             self.poll_hostname_job();
+            self.poll_fingerprint_job();
             if self.running {
                 if let Some(t0) = self.started_at {
                     self.elapsed_ms = t0.elapsed().as_millis() as u64;
@@ -374,6 +393,17 @@ impl App {
         if self.show_changes {
             self.show_changes = false;
             if !matches!(action, Action::Quit | Action::ForceQuit) {
+                return;
+            }
+        }
+
+        // 指纹面板：任意键关闭；F 与 Esc 都算「关闭」，符合「面板键」的直觉
+        if self.show_fingerprints {
+            self.show_fingerprints = false;
+            if !matches!(
+                action,
+                Action::Quit | Action::ForceQuit | Action::Fingerprint
+            ) {
                 return;
             }
         }
@@ -461,6 +491,7 @@ impl App {
             Action::SaveJson => self.save("json"),
             Action::SaveHtml => self.save("html"),
             Action::Enrich => self.enrich(false),
+            Action::Fingerprint => self.fingerprint_targets(),
             Action::LookupHostname => self.lookup_selected_hostname(),
             Action::SaveSnapshot => self.save_snapshot(),
             Action::LoadSnapshot => self.load_snapshot_from_disk(),
@@ -486,6 +517,113 @@ impl App {
             | Action::PromptYes
             | Action::PromptNo => {}
         }
+    }
+
+    // ------------------------------------------------------------------
+    // M13：资产识别（端口指纹）
+    // ------------------------------------------------------------------
+
+    /// 对当前选中主机做端口指纹；没有选中行时对**全部在线主机**做。
+    ///
+    /// 刻意放在后台线程：单主机 30 个端口、每端口 800 ms 超时，最坏情况要几秒，
+    /// 卡住界面比慢几秒更糟。结果只进 `fingerprints`，**绝不动 `results`**——
+    /// 端口扫描是独立的一趟探测，不得影响在线判定。
+    pub fn fingerprint_targets(&mut self) {
+        if self.fingerprint_job.is_some() {
+            self.status = "已有一次指纹探测在进行中，稍候…".into();
+            return;
+        }
+        let cfg = cping_core::PortScanConfig::default();
+        // 选中行优先；否则取全部在线主机（上限 64 台，避免一次按键打出一整网段的端口扫描）
+        let selected = self
+            .selected_target_index()
+            .and_then(|idx| self.results.get(idx).and_then(|r| r.as_ref()))
+            .filter(|r| r.status.is_online())
+            .map(|r| vec![(r.ip, r.vendor.clone())]);
+        let hosts: Vec<(IpAddr, Option<String>)> = match selected {
+            Some(v) => v,
+            None => self
+                .results
+                .iter()
+                .flatten()
+                .filter(|r| r.status.is_online())
+                .take(64)
+                .map(|r| (r.ip, r.vendor.clone()))
+                .collect(),
+        };
+        if hosts.is_empty() {
+            self.status = "没有在线主机可做端口指纹（先扫描，或先把光标移到在线行）".into();
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let job_hosts = hosts.clone();
+        let ports = cfg.ports.len();
+        std::thread::spawn(move || {
+            let out = cping_core::fingerprint_hosts(&job_hosts, &cfg);
+            let _ = tx.send(out);
+        });
+        self.status = format!(
+            "正在对 {} 台主机探测 {} 个端口（只读横幅，不发送协议请求）…",
+            hosts.len(),
+            ports
+        );
+        self.fingerprint_job = Some(FingerprintJob {
+            hosts: hosts.len(),
+            ports,
+            rx,
+        });
+    }
+
+    fn poll_fingerprint_job(&mut self) {
+        let Some(job) = self.fingerprint_job.as_ref() else {
+            return;
+        };
+        match job.rx.try_recv() {
+            Ok(fps) => {
+                let open_total: usize = fps.iter().map(|f| f.report.findings.len()).sum();
+                let with_open = fps.iter().filter(|f| f.has_open_ports()).count();
+                let hosts = job.hosts;
+                let ports = job.ports;
+                self.fingerprints = fps;
+                self.fingerprint_job = None;
+                self.show_fingerprints = true;
+                self.status = format!(
+                    "指纹完成：{hosts} 台主机 × {ports} 个端口 · 发现 {open_total} 个开放端口（{with_open} 台有开放端口）"
+                );
+                self.autosave();
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.fingerprint_job = None;
+                self.status = "指纹探测线程异常结束".into();
+            }
+        }
+    }
+
+    /// 指纹面板的展示文本（供测试断言使用，与界面同源）。
+    pub fn fingerprint_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        lines.push("端口指纹（附加信息，与在线判定相互独立）".to_string());
+        if self.fingerprints.is_empty() {
+            lines.push("（还没有指纹结果：按 F 对选中主机探测）".to_string());
+            return lines;
+        }
+        for fp in &self.fingerprints {
+            if !fp.has_open_ports() {
+                lines.push(format!("{}  无开放端口", fp.ip()));
+                continue;
+            }
+            lines.push(format!("{}  {}", fp.ip(), fp.open_ports_summary()));
+            for f in &fp.report.findings {
+                if let Some(banner) = &f.banner {
+                    lines.push(format!("    :{} {banner}", f.port));
+                }
+            }
+            if !fp.device_summary().is_empty() {
+                lines.push(format!("    {}", fp.device_summary()));
+            }
+        }
+        lines
     }
 
     // ------------------------------------------------------------------
@@ -1349,13 +1487,19 @@ mod tests {
     fn help_overlay_renders() {
         let mut app = App::new(opts());
         app.show_help = true;
-        let out = render(&app, 130, 40);
+        let out = render(&app, 130, 52);
         assert!(out.contains("快捷键"));
         assert!(out.contains("Ctrl+C"));
         // M8 / M9 的新键也必须在帮助里
         assert!(out.contains("持续监控"), "帮助应含 M8 段落");
         assert!(out.contains("TCP-OPEN"), "帮助应说明 TCP 模式的状态语义");
         assert!(out.contains("CIDR"), "帮助应说明 M9 的目标写法");
+        // M13 段落 + 那条最容易误读的边界说明
+        assert!(out.contains("资产识别"), "帮助应含 M13 段落");
+        assert!(
+            out.contains("端口扫描与在线判定是两回事"),
+            "帮助必须写明端口扫描与在线判定互不影响"
+        );
     }
 
     #[test]
@@ -1617,6 +1761,93 @@ mod tests {
         let snap = load_from_path(&path).expect("写出的快照必须能解析回来");
         assert_eq!(snap.total, app.targets.len());
         assert_eq!(snap.results.len(), app.results.iter().flatten().count());
+    }
+
+    #[test]
+    fn fingerprint_panel_shows_ports_banners_and_inference_without_touching_online_verdict() {
+        use cping_core::{HostFingerprint, PortFinding, PortScanReport};
+        let mut app = App::new(opts());
+        app.prefix = "127.0.0".into();
+        app.start_scan();
+        wait_done(&mut app, 300);
+        let stats_before = app.stats.clone();
+
+        // 直接注入指纹结果：不依赖本机是否真的开了端口，只验证渲染与边界
+        app.fingerprints = vec![
+            HostFingerprint {
+                report: PortScanReport {
+                    ip: "127.0.0.1".parse().unwrap(),
+                    findings: vec![PortFinding {
+                        port: 22,
+                        service: Some("ssh"),
+                        banner: Some("SSH-2.0-X".into()),
+                        connect_rtt_ms: 1,
+                    }],
+                    scanned: 28,
+                    elapsed_ms: 40,
+                },
+                device: cping_core::infer_device(Some("TP-Link"), &[22]),
+            },
+            HostFingerprint {
+                report: PortScanReport {
+                    ip: "127.0.0.2".parse().unwrap(),
+                    findings: Vec::new(),
+                    scanned: 28,
+                    elapsed_ms: 38,
+                },
+                device: None,
+            },
+        ];
+        app.show_fingerprints = true;
+
+        let text = render(&app, 100, 30);
+        assert!(text.contains("端口指纹"), "{text}");
+        assert!(text.contains("与在线判定相互独立"), "标题必须写明这条边界");
+        assert!(text.contains("22(ssh)"), "应显示端口与服务");
+        assert!(text.contains("SSH-2.0-X"), "横幅应原样显示");
+        assert!(text.contains("推断"), "设备结论必须标注为推断");
+        assert!(text.contains("无开放端口"), "端口全关的主机也要列出");
+
+        // 关键：端口扫描绝不允许改动在线判定
+        assert_eq!(app.stats, stats_before, "指纹不得改动任何统计");
+    }
+
+    #[test]
+    fn pressing_f_without_online_hosts_explains_instead_of_doing_nothing() {
+        let mut app = App::new(opts());
+        // 尚未扫描 → 没有任何在线主机
+        app.fingerprint_targets();
+        assert!(
+            app.status.contains("没有在线主机"),
+            "应给出明确原因而不是静默无反应：{}",
+            app.status
+        );
+        assert!(app.fingerprints.is_empty());
+    }
+
+    #[test]
+    fn fingerprint_panel_is_closed_by_any_key() {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+        let mut app = App::new(opts());
+        app.show_fingerprints = true;
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(!app.show_fingerprints, "任意键应关闭面板");
+        // 小写 f（过滤）也不该被面板吃掉两次
+        app.show_fingerprints = true;
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert!(!app.show_fingerprints);
+    }
+
+    #[test]
+    fn fingerprint_lines_are_available_before_any_scan() {
+        let app = App::new(opts());
+        let lines = app.fingerprint_lines();
+        assert!(lines[0].contains("端口指纹"));
+        assert!(
+            lines[1].contains("按 F"),
+            "空状态要告诉用户怎么触发：{:?}",
+            lines
+        );
     }
 
     #[test]

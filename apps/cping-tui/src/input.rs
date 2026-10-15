@@ -49,6 +49,8 @@ pub enum Action {
     /// M10：导出 JSON / HTML 报告
     SaveJson,
     SaveHtml,
+    /// M13：对选中主机（或全部在线主机）做端口指纹
+    Fingerprint,
     Char(char),
     Backspace,
 }
@@ -90,6 +92,8 @@ pub fn map_key(key: KeyEvent) -> Action {
         // M9 探测方式：T 切 ICMP/TCP，p 轮换端口
         KeyCode::Char('T') => Action::ToggleMode,
         KeyCode::Char('p') => Action::CyclePort,
+        // M13 资产识别：F 对选中主机做端口指纹
+        KeyCode::Char('F') => Action::Fingerprint,
         // 确认框用：y 恢复、N 不恢复（小写 n 在确认框里也当「不恢复」，
         // 由 app 层按当前状态解释，见 App::on_key）
         KeyCode::Char('y') | KeyCode::Char('Y') => Action::PromptYes,
@@ -124,6 +128,13 @@ mod tests {
         assert_eq!(press('l'), Action::LoadSnapshot);
         assert_eq!(press('N'), Action::PromptNo);
         assert_eq!(press('y'), Action::PromptYes);
+    }
+
+    #[test]
+    fn m13_shortcut_does_not_take_over_f() {
+        assert_eq!(press('F'), Action::Fingerprint);
+        // 回归：小写 f 仍是「过滤不在线」，大小写敏感照旧
+        assert_eq!(press('f'), Action::ToggleFilter);
     }
 
     #[test]

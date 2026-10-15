@@ -211,6 +211,37 @@ impl Session {
             }
         }
 
+        // M13：端口指纹只针对**在线**主机，且与在线判定分列。
+        // 端口全关不会把主机改成离线；这里也不改 results 里的任何字段。
+        let fingerprints = if self.args.fingerprint {
+            let online: Vec<(std::net::IpAddr, Option<String>)> = results
+                .iter()
+                .filter(|r| r.status.is_online())
+                .map(|r| (r.ip, r.vendor.clone()))
+                .collect();
+            if online.is_empty() {
+                if !self.args.quiet {
+                    println!("  端口指纹：没有在线主机，跳过");
+                }
+                Vec::new()
+            } else {
+                let cfg = self.args.fingerprint_config();
+                let fps = cping_core::fingerprint_hosts(&online, &cfg);
+                if !self.args.quiet {
+                    let open_total: usize = fps.iter().map(|f| f.report.findings.len()).sum();
+                    println!(
+                        "  端口指纹：{} 台在线主机 × {} 个端口 · 发现 {} 个开放端口",
+                        fps.len(),
+                        cfg.ports.len(),
+                        open_total
+                    );
+                }
+                fps
+            }
+        } else {
+            Vec::new()
+        };
+
         let changes = diff_scans(&self.previous, &results, thresholds, self.round);
         let stats = ScanStats::from_results_with_total(&results, self.spec.len());
         Ok(RoundOutcome {
@@ -219,6 +250,7 @@ impl Session {
             elapsed_ms: outcome.elapsed_ms.max(started.elapsed().as_millis() as u64),
             cancelled: outcome.cancelled,
             changes,
+            fingerprints,
         })
     }
 
@@ -241,7 +273,8 @@ impl Session {
             meta,
             Thresholds::default(),
             outcome.changes.clone(),
-        );
+        )
+        .with_fingerprints(outcome.fingerprints.clone());
         let bytes = report
             .render(format, &ColorConfig::default())
             .map_err(|e| e.to_string())?;
@@ -255,6 +288,8 @@ struct RoundOutcome {
     elapsed_ms: u64,
     cancelled: bool,
     changes: Vec<Change>,
+    /// M13：端口指纹（独立于 results，不参与在线判定）。
+    fingerprints: Vec<cping_core::HostFingerprint>,
 }
 
 fn print_round(
@@ -319,6 +354,26 @@ fn print_round(
                 vendor,
                 host
             );
+        }
+    }
+
+    // M13：端口指纹单独一段，标题写明与在线判定无关
+    if !outcome.fingerprints.is_empty() {
+        println!("  端口指纹（附加信息，与上面的在线判定相互独立）：");
+        for fp in &outcome.fingerprints {
+            if !fp.has_open_ports() {
+                println!("    {:<15} 无开放端口", fp.ip());
+                continue;
+            }
+            println!("    {:<15} {}", fp.ip(), fp.open_ports_summary());
+            for f in &fp.report.findings {
+                if let Some(banner) = &f.banner {
+                    println!("    {:<15}   :{} {}", "", f.port, banner);
+                }
+            }
+        }
+        for fp in outcome.fingerprints.iter().filter(|f| f.device.is_some()) {
+            println!("    {} → {}", fp.ip(), fp.device_summary());
         }
     }
 }
@@ -457,6 +512,7 @@ mod tests {
             elapsed_ms: 12,
             cancelled: false,
             changes: Vec::new(),
+            fingerprints: Vec::new(),
         };
         // 只要不 panic 即可；内容由手工冒烟确认（见 docs/testing.md §M10）
         print_round(1, &spec, &args, &outcome, &[]);

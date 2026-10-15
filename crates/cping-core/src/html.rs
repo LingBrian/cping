@@ -149,6 +149,48 @@ pub fn render_report(report: &ScanReport, palette: &ColorConfig) -> String {
         html.push_str("</div>\n</section>\n");
     }
 
+    // 端口指纹（M13）：独立分区，标题写明「推断」，与在线判定互不干涉
+    if !report.fingerprints.is_empty() {
+        html.push_str("<section>\n<h2>端口指纹 <span class=\"sub-tag\">附加信息，与在线判定相互独立</span></h2>\n");
+        html.push_str("<div class=\"table-wrap\">\n<table>\n<thead><tr>");
+        for h in ["IP地址", "开放端口", "服务横幅", "设备类型（推断）"] {
+            html.push_str(&format!("<th>{}</th>", escape(h)));
+        }
+        html.push_str("</tr></thead>\n<tbody>\n");
+        for fp in &report.fingerprints {
+            let ports = if fp.has_open_ports() {
+                escape(&fp.open_ports_summary())
+            } else {
+                // 「端口全关」≠「主机离线」，写清楚
+                "<span class=\"muted\">无开放端口（不影响在线状态）</span>".to_string()
+            };
+            let banners = fp
+                .report
+                .findings
+                .iter()
+                .filter_map(|f| f.banner.as_ref().map(|b| format!(":{} {}", f.port, b)))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            let device = if fp.device_summary().is_empty() {
+                "<span class=\"muted\">—</span>".to_string()
+            } else {
+                escape(&fp.device_summary())
+            };
+            html.push_str(&format!(
+                "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td></tr>\n",
+                escape(&fp.ip().to_string()),
+                ports,
+                if banners.is_empty() {
+                    "<span class=\"muted\">—</span>".to_string()
+                } else {
+                    escape(&banners)
+                },
+                device
+            ));
+        }
+        html.push_str("</tbody>\n</table>\n</div>\n</section>\n");
+    }
+
     // 明细表
     html.push_str("<section>\n<h2>明细</h2>\n<div class=\"table-wrap\">\n<table>\n<thead><tr>");
     for h in [
@@ -261,6 +303,8 @@ dd{margin:0}
 table{border-collapse:collapse;font-size:12.5px;width:100%}
 th,td{border-bottom:1px solid #eef0f3;padding:5px 8px;text-align:left;white-space:nowrap}
 th{position:sticky;top:0;background:#fafbfc}
+.muted{color:#9ca3af}
+.sub-tag{font-weight:400;font-size:12px;color:#6b7280;margin-left:8px}
 footer{color:#9ca3af;font-size:12px;text-align:center}
 @media (prefers-color-scheme:dark){
  body{background:#16181c;color:#e8eaed}
@@ -271,6 +315,8 @@ footer{color:#9ca3af;font-size:12px;text-align:center}
  .card{border-color:#2c3138}
  .cell.empty{background:#2a2e34}
  dt,.card .k,header .sub{color:#9aa1ab}
+ .muted{color:#6b7280}
+ .sub-tag{color:#9aa1ab}
  footer{color:#6b7280}
 }
 </style>

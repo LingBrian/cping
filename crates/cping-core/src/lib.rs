@@ -15,6 +15,7 @@ pub mod diff;
 pub mod enrich;
 pub mod error;
 pub mod export;
+pub mod fingerprint;
 pub mod history;
 pub mod hostname;
 pub mod html;
@@ -54,6 +55,12 @@ pub use error::{CoreError, CoreResult, ProbeError};
 pub use export::{
     csv_escape, export, export_csv, export_to_path, export_txt, ExportFormat, ExportMeta,
     ScanReport, CSV_BOM, CSV_HEADER, REPORT_FORMAT_VERSION,
+};
+pub use fingerprint::{
+    fingerprint_host, fingerprint_hosts, grab_banner, infer_device, port_service_name, probe_port,
+    sanitize_banner, scan_ports, vendor_is_network_equipment, Confidence, DeviceGuess,
+    HostFingerprint, PortFinding, PortScanConfig, PortScanReport, BANNER_MAX_BYTES,
+    DEFAULT_FINGERPRINT_PORTS, MAX_PORTS_PER_HOST,
 };
 pub use history::{HistoryBuffer, HostSample, RoundRecord, Uptime, DEFAULT_ROUND_CAPACITY};
 pub use hostname::{

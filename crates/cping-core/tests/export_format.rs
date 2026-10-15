@@ -78,8 +78,8 @@ fn csv_header_is_exact() {
     let text = String::from_utf8(bytes[3..].to_vec()).unwrap();
     let header = text.split("\r\n").next().unwrap();
     assert_eq!(
-        header, "扫描时间,IP地址,状态,RTT(ms),MAC地址,备注,厂商,主机名,探测方式",
-        "M7/M9 新列只能追加在末尾"
+        header, "扫描时间,IP地址,状态,RTT(ms),MAC地址,备注,厂商,主机名,探测方式,开放端口,设备推断",
+        "M13 新列只能追加在末尾"
     );
     // 前 6 列必须与 M7 之前逐字节一致（旧脚本按列号解析仍然可用）
     let legacy = header.split(',').take(6).collect::<Vec<_>>().join(",");
@@ -92,6 +92,15 @@ fn csv_header_is_exact() {
         .collect::<Vec<_>>()
         .join(",");
     assert_eq!(m7, "厂商,主机名");
+    // 第 9 列必须与 M9 逐字节一致（M13 只在第 10/11 列追加）
+    let m9 = header.split(',').nth(8).unwrap();
+    assert_eq!(m9, "探测方式");
+    // 未做指纹时（无指纹数据的 csv），两列必须都是空串而不是占位文本
+    let row = text.split("\r\n").nth(1).unwrap();
+    let cols: Vec<&str> = row.split(',').collect();
+    assert_eq!(cols.len(), 11, "列数必须与表头一致");
+    assert_eq!(cols[9], "", "无指纹时「开放端口」为空");
+    assert_eq!(cols[10], "", "无指纹时「设备推断」为空");
 }
 
 #[test]
@@ -243,7 +252,7 @@ fn empty_export_is_still_valid() {
     let text = String::from_utf8(bytes[3..].to_vec()).unwrap();
     assert_eq!(
         text,
-        "扫描时间,IP地址,状态,RTT(ms),MAC地址,备注,厂商,主机名,探测方式\r\n"
+        "扫描时间,IP地址,状态,RTT(ms),MAC地址,备注,厂商,主机名,探测方式,开放端口,设备推断\r\n"
     );
 
     let txt = export_txt(&[], &meta(), &Thresholds::default()).unwrap();
@@ -261,13 +270,16 @@ fn legacy_columns_are_byte_identical_when_no_new_info() {
     let mut checked = 0;
     for line in lines {
         let cols: Vec<&str> = line.split(',').collect();
-        assert_eq!(cols.len(), 9, "新列必须存在（可为空），不能缺列: {line}");
+        assert_eq!(cols.len(), 11, "新列必须存在（可为空），不能缺列: {line}");
         assert_eq!(cols[0], "2026-10-13 21:40:00");
         // 后两列在本样例里没有任何信息 → 必须是空串而不是占位文本
         assert_eq!(cols[6], "", "无厂商信息时必须留空: {line}");
         assert_eq!(cols[7], "", "无主机名信息时必须留空: {line}");
         // M9 追加列：默认 ICMP
         assert_eq!(cols[8], "ICMP", "探测方式列必须写出后端语义: {line}");
+        // M13 追加列：本用例未做指纹 → 两列都为空，绝不写「未知」之类占位
+        assert_eq!(cols[9], "", "未做指纹时「开放端口」必须留空: {line}");
+        assert_eq!(cols[10], "", "未做指纹时「设备推断」必须留空: {line}");
         checked += 1;
     }
     assert_eq!(checked, 4);
@@ -300,12 +312,12 @@ fn new_columns_are_written_and_escaped() {
     let rows: Vec<&str> = text.split("\r\n").filter(|l| !l.is_empty()).collect();
 
     assert!(
-        rows[1].ends_with("\"Cisco Systems, Inc\",router.example.com,ICMP"),
+        rows[1].ends_with("\"Cisco Systems, Inc\",router.example.com,ICMP,,"),
         "含逗号的厂商名会被加引号，主机名紧随其后: {}",
         rows[1]
     );
     assert!(
-        rows[2].ends_with(",\"Acme, Inc.\",,ICMP"),
+        rows[2].ends_with(",\"Acme, Inc.\",,ICMP,,"),
         "含逗号的厂商名必须被引号包裹: {}",
         rows[2]
     );
@@ -334,7 +346,7 @@ fn tcp_mode_relabels_the_status_column() {
     let rows: Vec<&str> = text.split("\r\n").filter(|l| !l.is_empty()).collect();
     assert!(rows[1].contains("TCP-OPEN"), "{}", rows[1]);
     assert!(!rows[1].contains("在线"), "{}", rows[1]);
-    assert!(rows[1].ends_with("TCP:80"), "{}", rows[1]);
+    assert!(rows[1].ends_with("TCP:80,,"), "{}", rows[1]);
     assert!(rows[2].contains("TCP-超时"), "{}", rows[2]);
 }
 

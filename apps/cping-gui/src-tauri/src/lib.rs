@@ -46,6 +46,10 @@ pub fn run() {
             commands::matrix_view_max,
             commands::backend_caps,
             commands::backend_summary,
+            // M13：资产识别
+            commands::fingerprint_hosts_cmd,
+            commands::clear_fingerprints,
+            commands::fingerprint_state,
             commands::async_scheduler_available,
             commands::start_scan,
             commands::cancel_scan,

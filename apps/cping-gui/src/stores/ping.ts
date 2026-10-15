@@ -11,6 +11,7 @@ import {
   type ChangeDto,
   type ColorConfigDto,
   type ExportFormatKey,
+  type FingerprintDto,
   type PendingSnapshotDto,
   type ProbeModeKey,
   type ProbeResultDto,
@@ -86,6 +87,21 @@ export const usePingStore = defineStore('ping', () => {
   const backendSummary = ref('')
   /** M12：本构建是否带可选异步调度（编译期决定） */
   const asyncEnabled = ref(false)
+
+  // ---- M13：资产识别（端口指纹）----
+  /**
+   * 端口指纹结果。**与 results 分开放**：端口扫描是独立的一趟探测，
+   * 混进结果里会让「在线」出现第二个来源。
+   */
+  const fingerprints = ref<FingerprintDto[]>([])
+  /** 指纹面板是否展开 */
+  const showFingerprints = ref(false)
+  /** 正在进行指纹探测（按钮 loading） */
+  const fingerprintBusy = ref(false)
+  /** 本次指纹探测的端口数（说明文字用） */
+  const fingerprintPorts = ref(0)
+  /** 是否抓取服务横幅 */
+  const fingerprintBanner = ref(true)
 
   // ---- M8：持续监控与变化 ----
   /** 已完成轮次 */
@@ -404,6 +420,83 @@ export const usePingStore = defineStore('ping', () => {
     mode.value = key
     status.value = `探测方式：${modeLabel.value}（下次探测生效）`
   }
+
+  // -------------------------------------------------------------------------
+  // M13：资产识别（端口指纹）
+  // -------------------------------------------------------------------------
+
+  /** 已识别出设备类型的主机数（角标用）。 */
+  const fingerprintedHosts = computed(() => fingerprints.value.length)
+  const fingerprintOpenPorts = computed(() =>
+    fingerprints.value.reduce((n, f) => n + f.openPorts.length, 0),
+  )
+  const fingerprintWithOpenPorts = computed(
+    () => fingerprints.value.filter((f) => f.openPorts.length > 0).length,
+  )
+
+  /**
+   * 对在线主机做端口指纹。
+   *
+   * `indices` 为空 = 对全部在线主机做。**不动 results**：端口全关的主机
+   * 仍然是「在线」，这条边界不能被这次调用破坏。
+   */
+  async function runFingerprint(indices: number[] | null = null): Promise<string | null> {
+    if (fingerprintBusy.value) {
+      status.value = '已有一次指纹探测在进行中'
+      return null
+    }
+    fingerprintBusy.value = true
+    try {
+      const list = await svc.fingerprintHosts(indices, null, fingerprintBanner.value)
+      fingerprints.value = list
+      fingerprintPorts.value = list.length > 0 ? list[0].scanned : 0
+      showFingerprints.value = true
+      const openTotal = list.reduce((n, f) => n + f.openPorts.length, 0)
+      const withOpen = list.filter((f) => f.openPorts.length > 0).length
+      const msg = `端口指纹：${list.length} 台主机 · ${openTotal} 个开放端口（${withOpen} 台有开放端口）`
+      status.value = msg
+      return msg
+    } catch (e) {
+      status.value = `端口指纹失败：${String(e)}`
+      return null
+    } finally {
+      fingerprintBusy.value = false
+    }
+  }
+
+  /** 清空指纹结果（导出里随之不再出现指纹小节）。 */
+  async function dropFingerprints(): Promise<void> {
+    try {
+      await svc.clearFingerprints()
+    } catch {
+      // 清空失败不影响界面状态：本地也清掉，避免显示与后端不一致
+    }
+    fingerprints.value = []
+    fingerprintPorts.value = 0
+    showFingerprints.value = false
+    status.value = '已清空端口指纹'
+  }
+
+  /** 指纹面板里的一行行文本（与界面同源，便于测试）。 */
+  const fingerprintLines = computed<string[]>(() => {
+    const lines: string[] = ['端口指纹（附加信息，与在线判定相互独立）']
+    if (fingerprints.value.length === 0) {
+      lines.push('还没有指纹结果：点「端口指纹」或按 F 开始')
+      return lines
+    }
+    for (const f of fingerprints.value) {
+      if (f.openPorts.length === 0) {
+        lines.push(`${f.ip}  无开放端口`)
+        continue
+      }
+      lines.push(`${f.ip}  ${f.openPortsSummary}`)
+      for (const p of f.openPorts) {
+        if (p.banner) lines.push(`    :${p.port} ${p.banner}`)
+      }
+      if (f.deviceSummary) lines.push(`    ${f.deviceSummary}`)
+    }
+    return lines
+  })
 
   function setTcpPort(port: number) {
     if (!Number.isFinite(port) || port <= 0 || port > 65535) return
@@ -779,6 +872,18 @@ export const usePingStore = defineStore('ping', () => {
     backendSummary,
     backendCapDetails,
     asyncEnabled,
+    // M13
+    fingerprints,
+    showFingerprints,
+    fingerprintBusy,
+    fingerprintPorts,
+    fingerprintBanner,
+    fingerprintedHosts,
+    fingerprintOpenPorts,
+    fingerprintWithOpenPorts,
+    fingerprintLines,
+    runFingerprint,
+    dropFingerprints,
     // M8
     round,
     changes,

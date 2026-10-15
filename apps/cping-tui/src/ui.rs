@@ -46,9 +46,33 @@ pub fn draw(f: &mut Frame, app: &App) {
         draw_restore_prompt(f, pending, f.area());
     } else if app.show_changes {
         draw_changes(f, app, f.area());
+    } else if app.show_fingerprints {
+        draw_fingerprints(f, app, f.area());
     } else if app.show_help {
         draw_help(f, app, f.area());
     }
+}
+
+/// M13 端口指纹面板。
+///
+/// 标题里写明「与在线判定无关」：这是本项目最容易被人误读的一处——
+/// 端口全关的主机照样是「在线」，面板不能让人以为扫描把主机判成了离线。
+fn draw_fingerprints(f: &mut Frame, app: &App, area: Rect) {
+    let popup = centered(area, 88, (area.height.saturating_sub(4)).min(26));
+    f.render_widget(Clear, popup);
+    let block = Block::default().borders(Borders::ALL).title(format!(
+        " 端口指纹（{} 台主机 · 附加信息，与在线判定相互独立） ",
+        app.fingerprints.len()
+    ));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let lines: Vec<Line> = app
+        .fingerprint_lines()
+        .into_iter()
+        .map(|t| Line::from(Span::raw(truncate_display(&t, inner.width as usize))))
+        .collect();
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
@@ -314,7 +338,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_keys(f: &mut Frame, app: &App, area: Rect) {
-    let base = "Enter 开始 · i 编辑 · g/t 视图 · f 过滤 · s/S/j/H 导出 · m 补厂商 · n 查主机名 · w/l 快照 · M 监控 · e 变化 · T/p 方式 · ? 帮助 · q 退出";
+    let base = "Enter 开始 · i 编辑 · g/t 视图 · f 过滤 · s/S/j/H 导出 · m 补厂商 · n 查主机名 · F 指纹 · w/l 快照 · M 监控 · e 变化 · T/p 方式 · ? 帮助 · q 退出";
     let text = if app.status.is_empty() {
         base.to_string()
     } else {
@@ -372,7 +396,8 @@ fn draw_restore_prompt(f: &mut Frame, pending: &PendingRestore, area: Rect) {
 }
 
 fn draw_help(f: &mut Frame, app: &App, area: Rect) {
-    let popup = centered(area, 78, 41);
+    // 高度随内容增长：帮助面板里的每一条都是要让人看到的，截断等于没说
+    let popup = centered(area, 78, 46);
     f.render_widget(Clear, popup);
     // M12：如实告诉用户「现在用的是哪个后端、它能干什么、不能干什么」。
     // 内容来自核心注册表，与 `cping-cli --list-backends` 同源，不会两边说法不一。
@@ -387,6 +412,11 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         Line::from("  s / S        导出 CSV / TXT"),
         Line::from("  j / H        导出 JSON / HTML 报告"),
         Line::from("  ↑ ↓ PgUp PgDn Home End  表格滚动"),
+        Line::from(""),
+        Line::from("资产识别（M13）"),
+        Line::from("  F            端口指纹（选中主机；无选中则全部在线主机）"),
+        Line::from("               端口扫描与在线判定是两回事：端口全关不影响「在线」；"),
+        Line::from("               横幅只读不写；设备类型是推断，识别不出就留空"),
         Line::from(""),
         Line::from("目标与探测方式（M9）"),
         Line::from("  输入支持     192.168.1（网段）/ 单主机 / CIDR（192.168.1.0/24）/ 多段"),

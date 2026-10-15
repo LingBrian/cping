@@ -523,3 +523,57 @@ CLI 模式不初始化终端 UI。
 - 验收：默认 feature 组合下 `cargo tree` 无第三方运行时依赖；
   v4 与 v6 走同一套 `classify`（阈值不分族）；注册表有文档化的稳定性承诺
   （v2.x 内只新增、不改签名）。
+
+---
+
+## 阶段报告：M13–M20 实施记录（通向 v3.0.0）
+
+> 与 M8–M12 同一套纪律：每阶段先写计划（上文的 M13–M20 各节），再动代码；
+> 「实测过」与「未实测」严格分开；核心逻辑只在 `cping-core`。
+
+### M13 — v2.1.0 资产识别（实施记录，2026-10-15）
+
+**实现文件**
+
+- `crates/cping-core/src/fingerprint.rs`（新增，约 700 行含测试）
+  - 纯数据表 `PORT_SERVICES`（40 条端口 → 服务名，有「升序且唯一」的守卫测试）
+  - `PortScanConfig`：端口列表 / 单端口超时 / 单主机并发 / 是否抓横幅，
+    `parse_ports` 支持 `22,80,443-445` 写法并拒绝越界与超跨度区间
+  - `probe_port` / `grab_banner` / `sanitize_banner` / `scan_ports`
+  - `infer_device`：规则按特异性排序的**纯函数**（RDP → 网络设备 → SMB → SSH →
+    打印 → VNC → 数据库 → Web 兜底），未识别返回 `None`
+  - `fingerprint_hosts`：三端共享的批量入口
+- `crates/cping-core/src/export.rs`：`ScanReport` 新增 `fingerprints` 字段与
+  `with_fingerprints()`；CSV 追加 `开放端口`/`设备推断` 两列（**只在末尾**）、
+  TXT 追加独立小节；`html.rs` 追加独立分区
+- `apps/cping-cli`：`--fingerprint` / `--fp-ports` / `--no-banner` / `--fp-timeout`
+- `apps/cping-tui`：`F` 键 + 独立面板（`fingerprint_lines()` 与界面同源）
+- `apps/cping-gui`：`fingerprint_hosts_cmd` / `clear_fingerprints` / `fingerprint_state`
+  + 「资产」页签 `FingerprintPanel.vue` + 侧栏按钮
+
+**实现时收敛的两处设计（与本节初版计划的差异）**
+
+1. 计划里写「端口指纹结果」如何承载没说清。实现时定为：**绝不进 `ProbeResult`**，
+   而是与 `results` 并列的独立数组。理由是「在线」判定只能有一个来源；
+   一旦塞进结果模型，任何一个消费方都可能把「端口全关」读成「离线」。
+2. TUI 的指纹探测放在**后台线程**（计划里没提）。单主机 30 端口 × 800 ms
+   最坏要几秒，同步做会把界面卡住——卡界面比慢几秒更糟。
+
+**验收对照**
+
+| 验收要点 | 落地情况 |
+| --- | --- |
+| 端口扫描与 ICMP 结果分列，不混入在线判定 | CSV 只在末尾追加两列（前 9 列逐字节断言不变）；TXT/HTML 独立小节且标题写明边界；JSON 独立数组 |
+| 指纹规则表纯数据驱动、有单测 | `PORT_SERVICES` / `NETWORK_VENDOR_KEYS` 为常量数组；表结构有守卫测试；`infer_device` 为纯函数，8 条规则各有测试 |
+| 未识别的组合留空而非臆造 | `infer_device` 返回 `Option<DeviceGuess>`，`None` 时 CSV/TXT/HTML 均为空、JSON 为 `null`，有专门测试 |
+
+**测试与实测**
+
+- 单元/集成测试：+33（`fingerprint.rs` 19 + `fingerprint_export.rs` 7 +
+  CLI 参数 3 + TUI 4），工作区合计 **309 passed / 0 failed**
+- 真实冒烟（Windows 本机回环）：起一个「连接后主动问候」的服务，
+  `cping-cli -t 127.0.0.1 --fingerprint --fp-ports 18555,1` →
+  识别 `18555` 开放、`1` 未开放，横幅 `SSH-2.0-CPingSmokeTest` 原样抓取；
+  `--no-banner` 下同一端口横幅为空；TXT/CSV/JSON/HTML 四种导出均含指纹数据
+- 未实测：跨主机（非回环）的指纹与横幅；IPv6 目标的端口指纹；
+  Android 上的指纹（TCP 可用，但未在真机跑过）

@@ -580,6 +580,14 @@ struct Shared {
     monitor: MonitorState,
     /// 最近一次「上一轮 → 本轮」的差异（导出 diff 用）。
     last_diff: Option<ScanDiff>,
+    /// M13：最近一次的端口指纹结果。
+    ///
+    /// 存在这里是刻意的：导出时必须带上它，而**绝不能**塞进 `results`——
+    /// 端口扫描是独立的一趟探测，混进结果模型会让「在线」出现第二个来源。
+    fingerprints: Vec<cping_core::HostFingerprint>,
+    /// M13：本轮指纹用的端口数与是否抓横幅（供界面如实说明）。
+    fingerprint_ports: usize,
+    fingerprint_banner: bool,
 }
 
 pub struct AppState {
@@ -621,6 +629,9 @@ impl AppState {
                 monitor: MonitorState::new(MonitorConfig::default())
                     .expect("默认监控配置必然合法"),
                 last_diff: None,
+                fingerprints: Vec::new(),
+                fingerprint_ports: 0,
+                fingerprint_banner: true,
             })),
         }
     }
@@ -711,6 +722,153 @@ pub fn backend_caps() -> Result<Vec<BackendCapsDto>, String> {
             describe: c.describe(),
         })
         .collect())
+}
+
+/// 一个开放端口（M13）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenPortDto {
+    pub port: u16,
+    /// 已知服务名；未收录端口为 `None`（前端不得自行编一个）。
+    pub service: Option<String>,
+    /// 服务主动送出的横幅（只读一次，原样保存）。
+    pub banner: Option<String>,
+    pub connect_rtt_ms: u32,
+}
+
+/// 一台主机的端口指纹（M13）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FingerprintDto {
+    pub ip: String,
+    pub scanned: usize,
+    pub elapsed_ms: u64,
+    pub open_ports: Vec<OpenPortDto>,
+    /// 「22(ssh) 80(http)」；无开放端口时为空串。
+    pub open_ports_summary: String,
+    /// 设备类型**推断**结论；识别不出时为 `None`（界面留空）。
+    pub device_kind: Option<String>,
+    /// 推断置信度（低/中）。
+    pub device_confidence: Option<String>,
+    /// 恒为 true：让前端无法把这条结论误当成事实。
+    pub device_is_inference: bool,
+    pub device_summary: String,
+    /// 推断依据（逐条）。
+    pub device_basis: Vec<String>,
+}
+
+/// M13：对在线主机做端口指纹。
+///
+/// - `indices` 为空/缺省 → 对全部在线主机做（上限 64 台，避免一次点击打出一整网段）；
+/// - `ports` 为空/缺省 → 用核心内置的常用端口集；
+/// - 结果**同时**写进 `Shared::fingerprints`，导出时自动带上。
+#[tauri::command]
+pub fn fingerprint_hosts_cmd(
+    state: State<'_, AppState>,
+    indices: Option<Vec<u16>>,
+    ports: Option<Vec<u16>>,
+    grab_banner: Option<bool>,
+    timeout_ms: Option<u64>,
+) -> Result<Vec<FingerprintDto>, String> {
+    let cfg = {
+        let mut cfg = cping_core::PortScanConfig {
+            timeout: Duration::from_millis(timeout_ms.unwrap_or(800).clamp(100, 10_000)),
+            grab_banner: grab_banner.unwrap_or(true),
+            ..Default::default()
+        };
+        if let Some(list) = ports.filter(|v| !v.is_empty()) {
+            cfg.ports = list;
+        }
+        cfg.normalized()
+    };
+
+    // 锁内只取副本：端口探测会在锁外跑几秒，绝不能持锁
+    let hosts: Vec<(std::net::IpAddr, Option<String>)> = {
+        let sh = state.shared.lock().expect("state poisoned");
+        match indices.filter(|v| !v.is_empty()) {
+            Some(list) => list
+                .iter()
+                .filter_map(|i| sh.results.get(*i as usize).and_then(|s| s.as_ref()))
+                .filter(|r| r.status.is_online())
+                .map(|r| (r.ip, r.vendor.clone()))
+                .collect(),
+            None => sh
+                .results
+                .iter()
+                .flatten()
+                .filter(|r| r.status.is_online())
+                .take(64)
+                .map(|r| (r.ip, r.vendor.clone()))
+                .collect(),
+        }
+    };
+    if hosts.is_empty() {
+        return Err("没有在线主机可做端口指纹（先扫描，或先选中在线行）".into());
+    }
+
+    let scanned = cfg.ports.len();
+    let banner = cfg.grab_banner;
+    let fps = cping_core::fingerprint_hosts(&hosts, &cfg);
+
+    let dtos: Vec<FingerprintDto> = fps
+        .iter()
+        .map(|fp| FingerprintDto {
+            ip: fp.ip().to_string(),
+            scanned: fp.report.scanned,
+            elapsed_ms: fp.report.elapsed_ms,
+            open_ports: fp
+                .report
+                .findings
+                .iter()
+                .map(|f| OpenPortDto {
+                    port: f.port,
+                    service: f.service.map(str::to_string),
+                    banner: f.banner.clone(),
+                    connect_rtt_ms: f.connect_rtt_ms,
+                })
+                .collect(),
+            open_ports_summary: fp.open_ports_summary(),
+            device_kind: fp.device.as_ref().map(|d| d.kind.to_string()),
+            device_confidence: fp.device.as_ref().map(|d| d.confidence.label_zh().to_string()),
+            device_is_inference: true,
+            device_summary: fp.device_summary(),
+            device_basis: fp
+                .device
+                .as_ref()
+                .map(|d| d.basis.clone())
+                .unwrap_or_default(),
+        })
+        .collect();
+
+    // 写回：导出时会带上；`results` 一个字段都不动
+    {
+        let mut sh = state.shared.lock().expect("state poisoned");
+        sh.fingerprints = fps;
+        sh.fingerprint_ports = scanned;
+        sh.fingerprint_banner = banner;
+    }
+
+    Ok(dtos)
+}
+
+/// M13：清空指纹结果（未做指纹时导出里不会出现指纹小节）。
+#[tauri::command]
+pub fn clear_fingerprints(state: State<'_, AppState>) -> Result<(), String> {
+    let mut sh = state.shared.lock().expect("state poisoned");
+    sh.fingerprints.clear();
+    sh.fingerprint_ports = 0;
+    Ok(())
+}
+
+/// M13：当前是否已有指纹结果与它的规模（界面据此显示角标）。
+#[tauri::command]
+pub fn fingerprint_state(state: State<'_, AppState>) -> Result<(usize, usize, bool), String> {
+    let sh = state.shared.lock().expect("state poisoned");
+    Ok((
+        sh.fingerprints.len(),
+        sh.fingerprint_ports,
+        sh.fingerprint_banner,
+    ))
 }
 
 /// 面向界面的一行能力摘要（例如「ICMP 可用（需要权限，仅 IPv4）；ICMPv6 未实装…」）。
@@ -973,7 +1131,8 @@ fn build_report(sh: &Shared) -> Result<ScanReport, String> {
         meta,
         sh.thresholds,
         sh.monitor.last_round_changes().to_vec(),
-    ))
+    )
+    .with_fingerprints(sh.fingerprints.clone()))
 }
 
 fn write_export(sh: &Shared, path: &str) -> Result<String, String> {

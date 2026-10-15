@@ -6,9 +6,9 @@
 
 Rust 核心 · TUI（ratatui）· 桌面 GUI（Tauri 2 + Vue 3）· Android
 
-[![Release](https://img.shields.io/badge/release-v2.0.0-111827)](../../releases)
+[![Release](https://img.shields.io/badge/release-v2.1.0-111827)](../../releases)
 [![CI](https://github.com/LingBrian/cping/actions/workflows/ci.yml/badge.svg)](https://github.com/LingBrian/cping/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-276%20passed-brightgreen)](docs/testing.md)
+[![Tests](https://img.shields.io/badge/tests-309%20passed-brightgreen)](docs/testing.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20Android-lightgrey)](docs/platform-compatibility.md)
 
@@ -72,6 +72,7 @@ cping/
 │   ├── asynchronous                    M12：可选异步调度（`async` feature，默认关）
 │   ├── monitor/history                 M8：轮次对比 · 变化日志 · 逐轮历史
 │   ├── json/html/diff/export           M10：四种导出格式与两次扫描对比
+│   ├── fingerprint                     M13：端口指纹 · 服务横幅 · 设备类型推断（纯数据驱动）
 │   ├── oui/neighbor/hostname/enrich    M7：厂商识别 · ARP 取 MAC · 反查主机名 · 信息补全
 │   ├── snapshot                        结果快照落盘与恢复（严格解析，坏数据宁可报错）
 │   ├── data/                           IEEE OUI 三表（54,190 条，编译期嵌入）
@@ -123,12 +124,18 @@ cping-cli --target 192.168.1 --mode icmp
 cping-cli -t "192.168.1.0/24, ::1" --mode tcp --port 443 --out report.html
 cping-cli -t 192.168.1 --watch 30 --rounds 10 --quiet
 cping-cli --list-backends          # 本平台有哪些后端可用、支持哪些地址族
+cping-cli -t 192.168.1 --fingerprint --out assets.csv   # M13：端口指纹 + 设备推断
+cping-cli -t 192.168.1 --fingerprint --fp-ports 22,80,443 --no-banner
 ```
 
 退出码：`0` 全部在线 / `1` 存在离线 / `2` 参数错误 / `3` 权限不足或后端不可用。
 
 > 一次任务**只用一种探测方式**：ICMP 的「在线」与 TCP 的「开放」（`TCP-OPEN`）
 > 不会混进同一列统计。IPv6 目标目前请用 TCP（ICMPv6 未实装，如实登记为不可用）。
+>
+> `--fingerprint` 是**独立于在线判定的第二趟探测**：端口全关不会把主机改成离线，
+> 端口开放也不会把离线主机变在线。横幅只读对方主动送出的前 256 字节，
+> **不发送任何协议请求**；设备类型是「厂商 + 端口」的**推断**结论，识别不出就留空。
 
 ### TUI
 
@@ -145,7 +152,7 @@ cping-tui --prefix 192.168.1
 | `m` | 补全 MAC / 厂商 | `n` | 反查当前行主机名 |
 | `w` | 保存快照 | `l` | 从快照恢复 |
 | `T` | 切换 ICMP ↔ TCP | `p` | 轮换常用 TCP 端口 |
-| `M` | 开/关持续监控 | `e` | 查看变化事件流 |
+| `F` | 端口指纹（选中主机；无选中则全部在线主机） | `M` | 开/关持续监控 | `e` | 查看变化事件流 |
 | `[` / `]` | 缩短 / 延长重扫间隔 | `?` / `F1` | 帮助 |
 | `q` | 退出（运行中需再按一次确认） | `Ctrl+C` | 强制退出并恢复终端 |
 
