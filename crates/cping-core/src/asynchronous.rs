@@ -176,11 +176,17 @@ impl AsyncScheduler {
                 ));
 
                 let elapsed_ms = start.elapsed().as_millis() as u64;
-                let collected: Vec<ProbeResult> = {
+                // M19 第三步：与同步版同一处修正——不再为了让 `from_statuses`
+                // 数一遍就把整表克隆出来（那会与结果表同时存活、把峰值翻倍）。
+                // 改成持锁用增量口径逐条累加，零分配，口径逐字段相同。
+                let stats = {
                     let slots = coord.results.lock().expect("results poisoned");
-                    slots.iter().flatten().cloned().collect()
+                    let mut stats = ScanStats::for_total(coord.total);
+                    for slot in slots.iter().flatten() {
+                        stats.push_status(&slot.status);
+                    }
+                    stats
                 };
-                let stats = ScanStats::from_results_with_total(&collected, coord.total);
                 let cancelled = coord.cancel.load(Ordering::SeqCst);
                 coord.active.store(false, Ordering::SeqCst);
 

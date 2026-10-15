@@ -2812,6 +2812,51 @@ mod tests {
         );
     }
 
+    /// M19 第三步：**万级目标下仍可取消**。
+    ///
+    /// 这是「规模化」这件事在 TUI 侧的验收项：一个会跑上一两分钟的扫描
+    /// （默认策略是 500 pps，65535 个目标理论上是 131 秒），中途按取消必须
+    /// **立刻**停下来——不能因为结果表大了、通道有界了、事件多了就取消不掉。
+    ///
+    /// 用 `10.0.0.0/16`：CIDR 会把网络号与广播地址一起排除，所以是 65534 个目标，
+    /// 正好贴着 `MAX_TARGETS`（65536）这个硬上限。
+    ///
+    /// 这里同时用 ratatui 的**内存后端**渲染了一帧——「界面在万级目标下还能画出来」
+    /// 这件事是可以断言的（会 panic / 会越界都会红）；但**真实终端的观感**
+    /// 测不了，如实登记为未实测。
+    #[test]
+    fn m19_a_65534_target_scan_can_be_cancelled() {
+        let mut app = App::new(opts());
+        app.prefix = "10.0.0.0/16".into();
+        app.start_scan();
+        assert!(app.running, "应进入运行态");
+        assert_eq!(app.targets.len(), 65_534, "CIDR 展开的目标数不对");
+        assert_eq!(app.results.len(), 65_534, "结果表必须按目标数一次开好");
+
+        // 扫描中途：内存后端渲染一帧，万级目标下不许崩
+        let frame = render(&app, 80, 24);
+        assert!(!frame.is_empty(), "万级目标下渲染出了空帧");
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        app.cancel_scan(false);
+        wait_done(&mut app, 600);
+
+        assert!(!app.running, "取消后必须停下来（挂住就是背压把取消吃掉了）");
+        assert!(app.cancelled, "应标记为已取消");
+        assert_eq!(app.stats.total, 65_534, "未开始的目标仍计入总数");
+        // 取消后的两条恒等式：与「取消即丢弃」那种实现区别就在这里
+        assert_eq!(
+            app.stats.completed + app.stats.pending,
+            app.stats.total,
+            "已完成 + 未完成必须恒等于总数"
+        );
+        assert_eq!(
+            app.results.iter().flatten().count(),
+            app.stats.completed,
+            "已完成的结果必须与统计一致地保留在表里"
+        );
+    }
+
     #[test]
     fn invalid_prefix_is_rejected_without_starting() {
         let mut app = App::new(opts());

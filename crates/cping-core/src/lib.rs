@@ -13,6 +13,8 @@
 /// 色觉模拟下的可区分度）、字体缩放。
 pub mod a11y;
 pub mod alerts;
+/// M19 第三步：单次扫描的**内存预算**（由类型宽度推导，可编译期断言）。
+pub mod budget;
 pub mod classify;
 pub mod config;
 pub mod diff;
@@ -62,6 +64,10 @@ pub use alerts::{
     AlertContext, AlertEngine, AlertEvent, AlertKind, AlertLog, AlertRule, Severity,
     ALERT_STATE_FORMAT_VERSION, ALERT_STATE_SIGNATURE, DEFAULT_ALERT_CAPACITY,
     DEFAULT_COOLDOWN_SECS, DEFAULT_LATENCY_THRESHOLD_MS, DEFAULT_UPTIME_THRESHOLD_PCT,
+};
+pub use budget::{
+    run_to_completion_budget_bytes, scan_memory_budget_bytes, EVENT_QUEUE_BYTES,
+    PER_WORKER_SCRATCH_BYTES, RESULTS_SNAPSHOT_BYTES, RESULTS_TABLE_BYTES, TARGETS_VEC_BYTES,
 };
 pub use classify::{classify_rtt, classify_status, LatencyClass, ResultClass, Thresholds};
 pub use config::{

@@ -569,6 +569,74 @@ fn bench_scheduler(report: &mut Report) {
     let cancelled = cancel_run.results;
     report.record("scheduler.cancel.latency_ms", cancel_run.cancel_latency_ms);
     report.record("scheduler.cancel.completed_before", cancelled as f64);
+
+    // ---- 2d. 65536 目标端到端：**真实跑完**（不是外推），量内存峰值 ----
+    //
+    // M19 第三步的验收项。此前所有 65536 的数字都是「按 8192 的二次关系外推」——
+    // 时间可以外推，**内存不能**：它是线性的，而且「线性 × 常数」里的那个常数
+    // （峰值里同时存活了几份结构）恰恰是外推最容易错的地方。所以必须真跑一次。
+    let full_targets = mock_targets(cping_core::MAX_TARGETS);
+    let mut full = ProbeScheduler::new(MockBackend::new(MockPolicy::Realistic {
+        online_percent: 30,
+        base_rtt_ms: 1,
+        span_ms: 40,
+    }));
+    full.set_policy(free_policy).expect("策略校验失败");
+    let full_run = run_scan(&full, &config, &full_targets, None);
+
+    let budget = cping_core::scan_memory_budget_bytes(CONCURRENCY);
+    println!(
+        "  [2d] {} 目标端到端（不限速，**真实跑完**）",
+        cping_core::MAX_TARGETS
+    );
+    println!(
+        "       墙钟时间         {:.1} ms",
+        full_run.elapsed_s * 1000.0
+    );
+    println!(
+        "       吞吐             {:.0} 目标/秒",
+        cping_core::MAX_TARGETS as f64 / full_run.elapsed_s
+    );
+    println!("       结果事件         {} 条", full_run.results);
+    println!(
+        "       进度事件         {} 条发出 / {} 条被合并 / {} 条被丢弃",
+        full_run.events.progress_sent,
+        full_run.events.progress_merged,
+        full_run.events.progress_dropped
+    );
+    println!("       堆峰值           {}", human(full_run.peak_bytes));
+    println!("       流式内存预算     {}", human(budget));
+
+    assert_eq!(
+        full_run.results,
+        cping_core::MAX_TARGETS,
+        "65536 个结果必须一条不少"
+    );
+    assert_eq!(full_run.started, 1, "Started 只应有一条");
+    assert_eq!(full_run.terminal, 1, "终态只应有一条");
+    // M19 第三步的核心断言：**实测峰值必须落在预算内**。
+    // 预算是编译期可算的结构性上界（见 `cping_core::budget`），不是测量值——
+    // 所以这条断言与机器无关，可以进 CI。
+    assert!(
+        full_run.peak_bytes <= budget,
+        "65536 目标堆峰值 {} B 超出预算 {} B（预算由类型宽度推出，超了说明\
+         峰值里多出了一份没被计入的结构）",
+        full_run.peak_bytes,
+        budget
+    );
+
+    report.record(
+        "scheduler.65536.full.elapsed_ms",
+        full_run.elapsed_s * 1000.0,
+    );
+    report.record(
+        "scheduler.65536.full.result_events",
+        full_run.results as f64,
+    );
+    report.record(
+        "scheduler.65536.full.peak_bytes",
+        full_run.peak_bytes as f64,
+    );
 }
 
 /// 造 n 个目标地址。
@@ -699,11 +767,29 @@ fn bench_memory(report: &mut Report) {
         cping_core::EVENT_QUEUE_CAPACITY,
         human(queue)
     );
+    // M19 第三步：预算由**类型宽度**推出，所以这里打印出来与实测峰值对照。
+    let default_budget = cping_core::scan_memory_budget_bytes(cping_core::DEFAULT_CONCURRENCY);
+    let max_budget = cping_core::scan_memory_budget_bytes(cping_core::MAX_CONCURRENCY);
+    println!(
+        "   流式预算（默认并发 {}）  {}",
+        cping_core::DEFAULT_CONCURRENCY,
+        human(default_budget)
+    );
+    println!(
+        "   流式预算（满并发 {}）    {}",
+        cping_core::MAX_CONCURRENCY,
+        human(max_budget)
+    );
 
     report.record("memory.size_of_probe_result", one as f64);
     report.record("memory.size_of_probe_event", event as f64);
     report.record("memory.full_table_65536_bytes", (opt * 65_536) as f64);
     report.record("memory.event_queue_bound_bytes", queue as f64);
+    report.record(
+        "memory.budget_default_concurrency_bytes",
+        default_budget as f64,
+    );
+    report.record("memory.budget_max_concurrency_bytes", max_budget as f64);
 
     // 结构性断言（机器无关）：队列上限必须**远小于**整表，否则「有界」就失去
     // 意义——上限比结果本身还大，等于没有上限。

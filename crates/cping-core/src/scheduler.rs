@@ -279,11 +279,24 @@ impl ProbeScheduler {
             }
 
             let elapsed_ms = start.elapsed().as_millis() as u64;
-            let collected: Vec<ProbeResult> = {
+            // M19 第三步：这里**不再把整表克隆一份**只为算统计。
+            //
+            // 原来写的是 `slots.iter().flatten().cloned().collect()` 再
+            // `ScanStats::from_results_with_total(&collected, total)`——在终态路径上
+            // 凭空多出一份与结果表**同时存活**的整表副本：65536 目标下是 7.5 MiB，
+            // 直接把峰值翻倍。而这份副本唯一的作用就是被 `from_statuses` 数一遍。
+            //
+            // 现在持锁用第一步做好的**增量口径**逐条累加：O(1)/条、零分配，
+            // 并且与批量口径**逐字段相同**（由 `incremental_stats_match_the_batch_ones`
+            // 守着）。锁的持有时间只是这一次纯读循环，worker 此时已全部 join。
+            let stats = {
                 let slots = coord_shared.results.lock().expect("results poisoned");
-                slots.iter().flatten().cloned().collect()
+                let mut stats = ScanStats::for_total(coord_shared.total);
+                for slot in slots.iter().flatten() {
+                    stats.push_status(&slot.status);
+                }
+                stats
             };
-            let stats = ScanStats::from_results_with_total(&collected, coord_shared.total);
             let cancelled = coord_shared.cancel.load(Ordering::SeqCst);
             coord_shared.active.store(false, Ordering::SeqCst);
 

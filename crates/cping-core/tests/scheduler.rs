@@ -309,6 +309,41 @@ fn mixed_outcomes_are_counted_separately() {
     assert_eq!(by_host(6), Some(ResultClass::Error));
 }
 
+/// M19 第三步：终态事件里的统计**不再**由「克隆整表再全量数一遍」得出，
+/// 而是持锁用**增量口径**逐条累加——省掉 65536 目标下一次性 7.5 MiB 的整表副本。
+///
+/// 这条守的是那次改写的口径：把**调度器给出的终态统计**与「拿它给的结果按批量
+/// 口径重算」对一遍，必须逐字段相同。否则「调度器说完成 500、导出的报表里 498」
+/// 这种事会从核心层冒出来，而那时没人知道该信哪个。
+#[test]
+fn terminal_stats_match_a_batch_recompute_of_the_returned_results() {
+    let sched = ProbeScheduler::new(MockBackend::new(MockPolicy::Realistic {
+        online_percent: 30,
+        base_rtt_ms: 1,
+        span_ms: 100,
+    }));
+    let outcome = sched
+        .start(&cfg(16), targets("192.168.1", TargetRange::Standard))
+        .unwrap()
+        .run_to_completion();
+
+    let batch = ScanStats::from_results_with_total(&outcome.results, outcome.stats.total);
+    assert_eq!(
+        outcome.stats, batch,
+        "终态统计必须与「按结果重算」的批量口径逐字段相同"
+    );
+    assert_eq!(
+        outcome.stats.completed,
+        outcome.results.len(),
+        "completed 必须等于真实结果条数"
+    );
+    assert_eq!(
+        outcome.stats.completed + outcome.stats.pending,
+        outcome.stats.total,
+        "已完成 + 未完成必须恒等于总数"
+    );
+}
+
 #[test]
 fn results_are_ordered_by_index() {
     let sched = ProbeScheduler::new(MockBackend::new(MockPolicy::AllOnline {

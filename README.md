@@ -6,9 +6,9 @@
 
 Rust 核心 · TUI（ratatui）· 桌面 GUI（Tauri 2 + Vue 3）· Android
 
-[![Release](https://img.shields.io/badge/release-v2.6.0-111827)](../../releases)
+[![Release](https://img.shields.io/badge/release-v2.7.0-111827)](../../releases)
 [![CI](https://github.com/LingBrian/cping/actions/workflows/ci.yml/badge.svg)](https://github.com/LingBrian/cping/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-593%20passed-brightgreen)](docs/testing.md)
+[![Tests](https://img.shields.io/badge/tests-601%20passed-brightgreen)](docs/testing.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20Android-lightgrey)](docs/platform-compatibility.md)
 
@@ -127,9 +127,10 @@ cd apps/cping-gui && npm run tauri:android:build
 
 > 基准的回归判定分两层：**结构性断言**（结果事件一条不少、批量必须比增量慢 100× 以上、
 > 取消延迟 < 500 ms、进度事件必须被合并而不是每条结果一条、事件队列上限必须远小于
-> 结果整表）是机器无关的，已接进 CI；`--check` 的绝对值比对依赖机器，
-> 只作本地工具（只跳过亚毫秒的**时长**，计数类指标照常比对）。
-> 数字与口径见 [`docs/perf-baseline.txt`](docs/perf-baseline.txt)。
+> 结果整表、65536 目标的堆峰值必须落在**内存预算**内）是机器无关的，已接进 CI；
+> `--check` 的绝对值比对依赖机器，只作本地工具（只跳过亚毫秒的**时长**，计数类指标照常比对）。
+> 内存预算由 `cping_core::budget` 从**类型宽度**推出（不是测量值），默认并发下 11.12 MiB、
+> 满并发下 25.12 MiB。数字与口径见 [`docs/perf-baseline.txt`](docs/perf-baseline.txt)。
 
 > 常见构建坑（cargo 离线沙箱、npm postinstall、Android 符号校验等）的排查表
 > 见 [README 附表](#构建环境注意事项) 与 [`docs/testing.md`](docs/testing.md)。
@@ -324,7 +325,7 @@ TUI 与 CLI 共用同一套安全策略（M17）：默认限速、默认拒绝�
 | **v2.4.0** ✅ | M16 | 配置与模板：命名扫描模板、schema 版本与迁移、未知键保留、CLI 直接消费模板 |
 | **v2.5.0** ✅ | M17 | 安全与合规：默认限速与目标数上限、保留网段守卫、审计日志（JSONL）、首次授权告知、制品签名与清单 |
 | **v2.6.0** ✅ | M18 | 国际化与无障碍：中英双语（界面与错误信息）、三套主题（高对比 / 色盲友好）、字体缩放、键盘全导航、ARIA 标注 |
-| v2.7.0 | M19 | 规模化性能：万级目标分片流式扫描、背压与内存预算、基准用例 |
+| **v2.7.0** ✅ | M19 | 规模化性能：增量统计（O(n²) → O(1)）、有界事件通道与进度节流、内存预算与 65536 目标实测 |
 | v3.0.0 | M20 | 生态与开放：插件接口、脚本化任务、对外 API（主版本） |
 | v3.1.0 | M21 | 协议扩展：SNMP 只读、DNS 解析与校验、逐跳路径探测 |
 | v3.2.0 | M22 | 拓扑与可视化：自动成图（标注为推断）、机架布局、SVG/PNG 导出 |
@@ -345,7 +346,7 @@ v3.0.0 之后的主题转折（**从「单机工具」到「平台」**）与追
 | --- | --- |
 | [`docs/reverse-findings.md`](docs/reverse-findings.md) | 原版逆向结论（静态 + Frida 动态复核），确证行为 / 待验证 / 设计决策三清单 |
 | [`docs/plan.md`](docs/plan.md) | 分阶段计划、各阶段验收条件、路线图 |
-| [`docs/perf-baseline.txt`](docs/perf-baseline.txt) | 性能基线（M19）：统计口径、调度器吞吐、取消延迟、内存 |
+| [`docs/perf-baseline.txt`](docs/perf-baseline.txt) | 性能基线（M19）：统计口径、调度器吞吐、取消延迟、65536 端到端与内存预算 |
 | [`docs/platform-compatibility.md`](docs/platform-compatibility.md) | 各平台 ICMP 能力、权限要求与实测记录 |
 | [`docs/testing.md`](docs/testing.md) | 每阶段真实构建/测试记录与踩坑 |
 | [`docs/release.md`](docs/release.md) | 产物清单与发布说明 |
