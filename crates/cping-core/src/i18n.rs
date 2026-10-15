@@ -314,7 +314,145 @@ pub enum Key {
     RegistryIcmp6Missing,
     /// 摘要里的连接符
     RegistrySeparator,
+    /// 列表分隔符（设备推断依据那类并列短语用）。
+    ///
+    /// 中文用顿号「、」，英文用 `"; "`——和 [`Key::RegistrySeparator`] 同一个理由：
+    /// 把中文标点留在英文句子里，读起来是「一眼假」的机器翻译味。
+    ListSeparator,
+
+    /// 参数：`新上线数`、`已离线数`、`延迟变化数`、`状态变化数`、`仅旧数`、`仅新数`
+    DiffSummary,
+
+    // —— 自由文本（M18 第二步）——
+    //
+    // 第一步只把「枚举标签」本地化了；这些是**句子**——带参数、带语序的
+    // 完整陈述。它们以前是散在各模块里的 `format!`，英文界面下原样露出中文。
+    //
+    // 划界原则：**只有散文进字典，标点不进**。`{} → {} ms` 这种纯符号模板
+    // 留在代码里（`→` 在两种语言里都是 `→`），否则字典会被一堆
+    // 「中英一字不差」的条目撑爆，真正需要复核的条目反而被淹掉。
+    /// 参数：无
+    SpecNoTargets,
+    /// 参数：`网段数`、`目标数`
+    SpecSegmentsAndTargets,
+    /// 参数：`标签`、`个数`
+    SegmentDescribe,
+    ErrTcpPortZero,
+
+    // TCP 模式的状态名。**刻意与 ICMP 的状态名不同一套词**：
+    // `TCP-OPEN` 绝不能被读成「ICMP 可达」，所以这里不能直接复用
+    // `LabelStatusOnline`。
+    LabelModeTcpPending,
+    LabelModeTcpOpen,
+    LabelModeTcpTimeout,
+    LabelModeTcpClosed,
+
+    /// 参数：`地址`、`变化类型`、`细节`
+    ChangeSummary,
+
+    /// 参数：`片段`
+    ErrPortRangeStartNotNumber,
+    /// 参数：`片段`
+    ErrPortRangeEndNotNumber,
+    /// 参数：`片段`
+    ErrPortRangeInvalid,
+    /// 参数：`片段`、`上限`
+    ErrPortRangeTooWide,
+    /// 参数：`片段`
+    ErrPortNotNumber,
+    /// 参数：`片段`
+    ErrPortOutOfRange,
+    ErrPortListEmpty,
+
+    // —— 设备类型（推断结论的名字）——
+    LabelDeviceWindowsHost,
+    LabelDeviceNetworkGear,
+    LabelDeviceSamba,
+    LabelDeviceUnixHost,
+    LabelDevicePrinter,
+    LabelDeviceRemoteDesktop,
+    LabelDeviceDatabase,
+    LabelDeviceWeb,
+
+    /// 参数：`设备名`、`置信`、`依据`
+    DeviceGuessSummary,
+    /// 参数：`端口`、`服务名`
+    BasisPortOpen,
+    /// 参数：`端口`
+    BasisPortOpenNoService,
+    /// 参数：`厂商`
+    BasisVendor,
+
+    CapsNeedsPrivilege,
+    CapsIpv4And6,
+    CapsIpv4Only,
+    CapsIpv6Only,
+    CapsNotePlatformIcmpMissing,
+    CapsNoteIcmp6Missing,
+    CapsNoteTestOnly,
+    CapsNoteUnknownBackend,
+
+    /// 参数：`个数`
+    ProfileTargetCount,
+    ProfileSpecUnparsable,
+    /// 参数：`并发数`
+    ProfileConcurrency,
+
+    HintIcmpWindows,
+    HintIcmpAndroid,
+    HintIcmpLinux,
+    HintIcmpUnknown,
+
+    NotifyConsoleAvailable,
+    NotifySystemWindows,
+    NotifySystemLinuxFound,
+    NotifySystemLinuxMissing,
+    NotifySystemNone,
+    NotifyWebhookAvailable,
+    NotifyCommandAvailable,
+    NotifySmtpAvailable,
+
+    /// 参数：`实际头`
+    TsBadSignature,
+    /// 参数：`文件版本`、`当前版本`
+    TsBadVersion,
+    TsNoVersion,
+    TsEmpty,
+
+    /// 参数：`实际头`
+    AlertStateBadSignature,
+    /// 参数：`文件版本`、`当前版本`
+    AlertStateBadVersion,
+    /// 参数：`路径`、`原因`
+    AlertStateWriteFailed,
+    /// 参数：`路径`、`原因`
+    AlertStateReadFailed,
+    AlertStateNoVersion,
+    AlertStateEmpty,
+
+    /// 参数：`地址`
+    AlertAppeared,
+    /// 参数：`地址`、`状态`
+    AlertDisappeared,
+    /// 参数：`地址`、`状态`、`细节`
+    AlertDisappearedWithNote,
+    /// 参数：`地址`、`实测`、`阈值`
+    AlertLatencyAbove,
+    /// 参数：`地址`、`实测`、`阈值`
+    AlertUptimeBelow,
 }
+
+/// 中英**本来就该一模一样**的技术记号。
+///
+/// `TCP-OPEN`、`IPv4+IPv6` 是记号不是散文，两种语言下相同才是对的。
+/// 但 [`tests::chinese_entries_are_not_empty_and_not_ascii_only`] 会把这些
+/// 当成「中文栏被误填成英文」而报错。给它们一个显式白名单，
+/// 比放宽那条测试要好：**放宽之后就再也抓不到真正的误填了**。
+///
+/// 这个列表越长，那条检查就越没用——加条目必须能说出理由。
+/// [`tests::ascii_token_allowlist_is_exact`] 保证它不会腐烂：
+/// 白名单多一条或少一条都会失败。
+pub const ASCII_TOKEN_KEYS: &[Key] = &[Key::LabelModeTcpOpen, Key::CapsIpv4And6];
 
 /// 字典条目。
 #[derive(Debug, Clone, Copy)]
@@ -415,11 +553,79 @@ const fn ordinal(key: Key) -> usize {
         Key::RegistryTcpAvailable => 80,
         Key::RegistryIcmp6Missing => 81,
         Key::RegistrySeparator => 82,
+        Key::ListSeparator => 149,
+        Key::DiffSummary => 150,
+        Key::SpecNoTargets => 83,
+        Key::SpecSegmentsAndTargets => 84,
+        Key::SegmentDescribe => 85,
+        Key::ErrTcpPortZero => 86,
+        Key::LabelModeTcpPending => 87,
+        Key::LabelModeTcpOpen => 88,
+        Key::LabelModeTcpTimeout => 89,
+        Key::LabelModeTcpClosed => 90,
+        Key::ChangeSummary => 91,
+        Key::ErrPortRangeStartNotNumber => 92,
+        Key::ErrPortRangeEndNotNumber => 93,
+        Key::ErrPortRangeInvalid => 94,
+        Key::ErrPortRangeTooWide => 95,
+        Key::ErrPortNotNumber => 96,
+        Key::ErrPortOutOfRange => 97,
+        Key::ErrPortListEmpty => 98,
+        Key::LabelDeviceWindowsHost => 99,
+        Key::LabelDeviceNetworkGear => 100,
+        Key::LabelDeviceSamba => 101,
+        Key::LabelDeviceUnixHost => 102,
+        Key::LabelDevicePrinter => 103,
+        Key::LabelDeviceRemoteDesktop => 104,
+        Key::LabelDeviceDatabase => 105,
+        Key::LabelDeviceWeb => 106,
+        Key::DeviceGuessSummary => 107,
+        Key::BasisPortOpen => 108,
+        Key::BasisPortOpenNoService => 109,
+        Key::BasisVendor => 110,
+        Key::CapsNeedsPrivilege => 111,
+        Key::CapsIpv4And6 => 112,
+        Key::CapsIpv4Only => 113,
+        Key::CapsIpv6Only => 114,
+        Key::CapsNotePlatformIcmpMissing => 115,
+        Key::CapsNoteIcmp6Missing => 116,
+        Key::CapsNoteTestOnly => 117,
+        Key::CapsNoteUnknownBackend => 118,
+        Key::ProfileTargetCount => 119,
+        Key::ProfileSpecUnparsable => 120,
+        Key::ProfileConcurrency => 121,
+        Key::HintIcmpWindows => 122,
+        Key::HintIcmpAndroid => 123,
+        Key::HintIcmpLinux => 124,
+        Key::HintIcmpUnknown => 125,
+        Key::NotifyConsoleAvailable => 126,
+        Key::NotifySystemWindows => 127,
+        Key::NotifySystemLinuxFound => 128,
+        Key::NotifySystemLinuxMissing => 129,
+        Key::NotifySystemNone => 130,
+        Key::NotifyWebhookAvailable => 131,
+        Key::NotifyCommandAvailable => 132,
+        Key::NotifySmtpAvailable => 133,
+        Key::TsBadSignature => 134,
+        Key::TsBadVersion => 135,
+        Key::TsNoVersion => 136,
+        Key::TsEmpty => 137,
+        Key::AlertStateBadSignature => 138,
+        Key::AlertStateBadVersion => 139,
+        Key::AlertStateWriteFailed => 140,
+        Key::AlertStateReadFailed => 141,
+        Key::AlertStateNoVersion => 142,
+        Key::AlertStateEmpty => 143,
+        Key::AlertAppeared => 144,
+        Key::AlertDisappeared => 145,
+        Key::AlertDisappearedWithNote => 146,
+        Key::AlertLatencyAbove => 147,
+        Key::AlertUptimeBelow => 148,
     }
 }
 
 /// 字典里的键总数。
-pub const KEY_COUNT: usize = 83;
+pub const KEY_COUNT: usize = 151;
 
 /// 全部条目。
 ///
@@ -850,6 +1056,354 @@ pub static TABLE: &[Entry] = &[
         zh: "；",
         en: "; ",
     },
+    // —— 自由文本（M18 第二步）——
+    Entry {
+        key: Key::SpecNoTargets,
+        zh: "尚未设置目标",
+        en: "no targets set yet",
+    },
+    Entry {
+        key: Key::SpecSegmentsAndTargets,
+        zh: "{} 个网段 / {} 个目标",
+        en: "{} segments / {} targets",
+    },
+    Entry {
+        key: Key::SegmentDescribe,
+        zh: "{}（{} 个）",
+        en: "{} ({} targets)",
+    },
+    Entry {
+        key: Key::ErrTcpPortZero,
+        zh: "TCP 端口不能为 0",
+        en: "TCP port must not be zero",
+    },
+    Entry {
+        key: Key::LabelModeTcpPending,
+        zh: "等待",
+        en: "pending",
+    },
+    Entry {
+        // 技术记号：两种语言下都必须是 `TCP-OPEN`。
+        key: Key::LabelModeTcpOpen,
+        zh: "TCP-OPEN",
+        en: "TCP-OPEN",
+    },
+    Entry {
+        key: Key::LabelModeTcpTimeout,
+        zh: "TCP-超时",
+        en: "TCP-timeout",
+    },
+    Entry {
+        key: Key::LabelModeTcpClosed,
+        zh: "TCP-关闭",
+        en: "TCP-closed",
+    },
+    Entry {
+        key: Key::ChangeSummary,
+        zh: "{} {}（{}）",
+        en: "{} {} ({})",
+    },
+    Entry {
+        key: Key::ErrPortRangeStartNotNumber,
+        zh: "端口区间起点 {} 不是数字",
+        en: "port range start {} is not a number",
+    },
+    Entry {
+        key: Key::ErrPortRangeEndNotNumber,
+        zh: "端口区间终点 {} 不是数字",
+        en: "port range end {} is not a number",
+    },
+    Entry {
+        key: Key::ErrPortRangeInvalid,
+        zh: "端口区间 {} 无效（需 1-65535 且起点 ≤ 终点）",
+        en: "invalid port range {} (must be 1-65535 with start <= end)",
+    },
+    Entry {
+        key: Key::ErrPortRangeTooWide,
+        zh: "端口区间 {} 跨度超过上限 {}",
+        en: "port range {} spans more than the limit of {}",
+    },
+    Entry {
+        key: Key::ErrPortNotNumber,
+        zh: "端口 {} 不是数字",
+        en: "port {} is not a number",
+    },
+    Entry {
+        key: Key::ErrPortOutOfRange,
+        zh: "端口 {} 超出 1-65535",
+        en: "port {} is out of range 1-65535",
+    },
+    Entry {
+        key: Key::ErrPortListEmpty,
+        zh: "端口列表为空",
+        en: "port list is empty",
+    },
+    Entry {
+        key: Key::LabelDeviceWindowsHost,
+        zh: "Windows 主机",
+        en: "Windows host",
+    },
+    Entry {
+        key: Key::LabelDeviceNetworkGear,
+        zh: "网络设备（路由器/交换机）",
+        en: "network device (router/switch)",
+    },
+    Entry {
+        key: Key::LabelDeviceSamba,
+        zh: "Windows/Samba 文件服务",
+        en: "Windows/Samba file service",
+    },
+    Entry {
+        key: Key::LabelDeviceUnixHost,
+        zh: "Linux/Unix 主机",
+        en: "Linux/Unix host",
+    },
+    Entry {
+        key: Key::LabelDevicePrinter,
+        zh: "打印机",
+        en: "printer",
+    },
+    Entry {
+        key: Key::LabelDeviceRemoteDesktop,
+        zh: "远程桌面/VNC 端点",
+        en: "remote desktop / VNC endpoint",
+    },
+    Entry {
+        key: Key::LabelDeviceDatabase,
+        zh: "数据库服务器",
+        en: "database server",
+    },
+    Entry {
+        key: Key::LabelDeviceWeb,
+        zh: "Web 服务",
+        en: "web service",
+    },
+    Entry {
+        key: Key::DeviceGuessSummary,
+        zh: "{}（推断，置信{}；依据：{}）",
+        en: "{} (inferred, confidence: {}; basis: {})",
+    },
+    Entry {
+        key: Key::BasisPortOpen,
+        zh: "TCP {}({}) 开放",
+        en: "TCP {}({}) open",
+    },
+    Entry {
+        key: Key::BasisPortOpenNoService,
+        zh: "TCP {} 开放",
+        en: "TCP {} open",
+    },
+    Entry {
+        key: Key::BasisVendor,
+        zh: "厂商 {}",
+        en: "vendor {}",
+    },
+    Entry {
+        key: Key::CapsNeedsPrivilege,
+        zh: "需要权限",
+        en: "requires privileges",
+    },
+    Entry {
+        // 技术记号：`IPv4+IPv6` 不是散文，两种语言下都是它。
+        key: Key::CapsIpv4And6,
+        zh: "IPv4+IPv6",
+        en: "IPv4+IPv6",
+    },
+    Entry {
+        key: Key::CapsIpv4Only,
+        zh: "仅 IPv4",
+        en: "IPv4 only",
+    },
+    Entry {
+        key: Key::CapsIpv6Only,
+        zh: "仅 IPv6",
+        en: "IPv6 only",
+    },
+    Entry {
+        key: Key::CapsNotePlatformIcmpMissing,
+        zh: "该平台尚未实现原生 ICMP",
+        en: "native ICMP is not implemented on this platform",
+    },
+    Entry {
+        key: Key::CapsNoteIcmp6Missing,
+        zh: "ICMPv6 尚未实装，请用 TCP 方式探测 IPv6 目标",
+        en: "ICMPv6 is not implemented yet; probe IPv6 targets over TCP instead",
+    },
+    Entry {
+        key: Key::CapsNoteTestOnly,
+        zh: "仅测试用",
+        en: "for testing only",
+    },
+    Entry {
+        key: Key::CapsNoteUnknownBackend,
+        zh: "未知后端",
+        en: "unknown backend",
+    },
+    Entry {
+        key: Key::ProfileTargetCount,
+        zh: "{} 个目标",
+        en: "{} targets",
+    },
+    Entry {
+        key: Key::ProfileSpecUnparsable,
+        zh: "目标规格无法解析",
+        en: "target spec cannot be parsed",
+    },
+    Entry {
+        key: Key::ProfileConcurrency,
+        zh: "并发 {}",
+        en: "concurrency {}",
+    },
+    Entry {
+        key: Key::HintIcmpWindows,
+        zh: "Windows：优先 SOCK_DGRAM+IPPROTO_ICMP（普通用户），失败回退 SOCK_RAW（需管理员）",
+        en: "Windows: prefers SOCK_DGRAM+IPPROTO_ICMP (unprivileged), falls back to SOCK_RAW (needs administrator)",
+    },
+    Entry {
+        key: Key::HintIcmpAndroid,
+        zh: "Android：普通应用通常没有 CAP_NET_RAW。若两种套接字都返回 EPERM/EACCES，本工具的 ICMP 模式不可用，请改用独立的 TCP 连通性模式。",
+        en: "Android: ordinary apps usually lack CAP_NET_RAW. If both socket types return EPERM/EACCES, this tool's ICMP mode is unavailable; use the separate TCP connectivity mode instead.",
+    },
+    Entry {
+        key: Key::HintIcmpLinux,
+        zh: "Linux：需要 CAP_NET_RAW（root 或 setcap cap_net_raw+ep <exe>）",
+        en: "Linux: needs CAP_NET_RAW (root, or setcap cap_net_raw+ep <exe>)",
+    },
+    Entry {
+        key: Key::HintIcmpUnknown,
+        zh: "未知平台",
+        en: "unknown platform",
+    },
+    Entry {
+        key: Key::NotifyConsoleAvailable,
+        zh: "打印到标准输出，任何平台都可用",
+        en: "prints to stdout; available on every platform",
+    },
+    Entry {
+        key: Key::NotifySystemWindows,
+        zh: "通过 PowerShell 发 Windows Toast（需要 Windows 10 1607+）",
+        en: "sends a Windows toast through PowerShell (needs Windows 10 1607+)",
+    },
+    Entry {
+        key: Key::NotifySystemLinuxFound,
+        zh: "调用 notify-send",
+        en: "calls notify-send",
+    },
+    Entry {
+        key: Key::NotifySystemLinuxMissing,
+        zh: "未找到 notify-send（gnome/libnotify 未安装）",
+        en: "notify-send not found (gnome/libnotify not installed)",
+    },
+    Entry {
+        key: Key::NotifySystemNone,
+        zh: "本平台没有内置的系统通知通道（Android/iOS 请用界面内提示或 command 通道）",
+        en: "no built-in system notification channel on this platform (on Android/iOS use in-app alerts or the command channel)",
+    },
+    Entry {
+        key: Key::NotifyWebhookAvailable,
+        zh: "HTTP POST JSON；**仅 http://**，核心不含 TLS，https 会被明确拒绝",
+        en: "HTTP POST JSON; **http:// only** — the core has no TLS, https is rejected explicitly",
+    },
+    Entry {
+        key: Key::NotifyCommandAvailable,
+        zh: "执行外部命令并把事件 JSON 从 stdin 喂入——接 curl / msmtp 等自带 TLS 的工具",
+        en: "runs an external command and feeds the event JSON on stdin — pair it with curl / msmtp and similar tools that bring their own TLS",
+    },
+    Entry {
+        key: Key::NotifySmtpAvailable,
+        zh: "**明文** SMTP，不支持 TLS 与认证；仅适用于内网中继",
+        en: "**plaintext** SMTP; no TLS and no auth — suitable only for an internal relay",
+    },
+    Entry {
+        key: Key::TsBadSignature,
+        zh: "不是 CPing 时序文件（头 {}）",
+        en: "not a CPing time-series file (header {})",
+    },
+    Entry {
+        key: Key::TsBadVersion,
+        zh: "时序文件版本 {} 与当前 {} 不符，拒绝读取",
+        en: "time-series file version {} does not match the current {}; refusing to read",
+    },
+    Entry {
+        key: Key::TsNoVersion,
+        zh: "时序文件缺少版本号",
+        en: "time-series file is missing its version number",
+    },
+    Entry {
+        key: Key::TsEmpty,
+        zh: "时序文件为空",
+        en: "time-series file is empty",
+    },
+    Entry {
+        key: Key::AlertStateBadSignature,
+        zh: "不是 CPing 告警状态文件（头 {}）",
+        en: "not a CPing alert-state file (header {})",
+    },
+    Entry {
+        key: Key::AlertStateBadVersion,
+        zh: "告警状态文件版本 {} 与当前 {} 不符，拒绝读取",
+        en: "alert-state file version {} does not match the current {}; refusing to read",
+    },
+    Entry {
+        key: Key::AlertStateWriteFailed,
+        zh: "写入 {} 失败：{}",
+        en: "failed to write {}: {}",
+    },
+    Entry {
+        key: Key::AlertStateReadFailed,
+        zh: "读取 {} 失败：{}",
+        en: "failed to read {}: {}",
+    },
+    Entry {
+        key: Key::AlertStateNoVersion,
+        zh: "告警状态文件缺少版本号",
+        en: "alert-state file is missing its version number",
+    },
+    Entry {
+        key: Key::AlertStateEmpty,
+        zh: "告警状态文件为空",
+        en: "alert-state file is empty",
+    },
+    Entry {
+        key: Key::AlertAppeared,
+        zh: "新增主机 {} 上线",
+        en: "new host {} came online",
+    },
+    Entry {
+        key: Key::AlertDisappeared,
+        zh: "主机 {} 变为离线（{}）",
+        en: "host {} went offline ({})",
+    },
+    Entry {
+        key: Key::AlertDisappearedWithNote,
+        zh: "主机 {} 变为离线（{}：{}）",
+        en: "host {} went offline ({}: {})",
+    },
+    Entry {
+        key: Key::AlertLatencyAbove,
+        zh: "主机 {} 延迟 {} ms，超过阈值 {} ms",
+        en: "host {} latency {} ms exceeds the threshold {} ms",
+    },
+    Entry {
+        key: Key::AlertUptimeBelow,
+        zh: "主机 {} 可用率 {}%，低于阈值 {}%",
+        en: "host {} uptime {}% is below the threshold {}%",
+    },
+    // 注意：这一条必须留在**最后**——`TABLE` 是按下标取值的
+    // （`text()` 做 `TABLE[ordinal(key)]`），所以 **TABLE 的顺序必须与
+    // `ordinal` 完全一致**。往中间插条目会让后面所有键整体错位，
+    // 而错位不会崩——只会静默显示成邻居那条消息。这也是
+    // `table_covers_every_key` 之外我另外加一条测试的原因（见下）。
+    Entry {
+        key: Key::ListSeparator,
+        zh: "、",
+        en: "; ",
+    },
+    Entry {
+        key: Key::DiffSummary,
+        zh: "新上线 {} · 已离线 {} · 延迟变化 {} · 状态变化 {}（另：仅旧 {} / 仅新 {}）",
+        en: "appeared {} · disappeared {} · latency changed {} · status changed {} (plus: base only {} / next only {})",
+    },
 ];
 
 /// 取某个键在指定语言下的模板。
@@ -955,6 +1509,27 @@ mod tests {
     }
 
     #[test]
+    fn table_order_matches_ordinal() {
+        // `text()` 是 `TABLE[ordinal(key)]`——按下标取值，不是按 key 查找。
+        // 所以 TABLE 的**顺序必须与 ordinal 一致**，而这一点
+        // `table_covers_every_key` 是查不出来的：它只看序号集合是不是
+        // `0..KEY_COUNT` 的一个排列，把任意两条互换位置它照样通过。
+        //
+        // 这个坑真的踩过：给 `Key` 追加变体时顺手把新条目插在了表格中间，
+        // 结果后面所有键静默错位——`ICMP 需要权限`显示成了`厂商 {}`。
+        // 不崩、不报错，只是所有消息都变成了邻居那一条。
+        for (i, e) in TABLE.iter().enumerate() {
+            assert_eq!(
+                ordinal(e.key),
+                i,
+                "TABLE 第 {i} 条是 {:?}（序号 {}）——TABLE 必须严格按 ordinal 升序排列",
+                e.key,
+                ordinal(e.key)
+            );
+        }
+    }
+
+    #[test]
     fn placeholders_match() {
         // 中英条目的 `{}` 个数必须一致：不一致意味着某种语言下会显示出
         // 悬空的 `{}`，或者有个参数被静默丢掉。
@@ -984,15 +1559,54 @@ mod tests {
         // 反向检查：中文条目至少含一个中日韩字符。
         // 「英文条目漏译成了中文」由上一个测试抓，「中文条目被误填成英文」
         // 由这个抓——例如复制粘贴时把 en 的内容粘到了 zh 上。
+        //
+        // [`ASCII_TOKEN_KEYS`] 里的技术记号豁免（`TCP-OPEN` 本来就该长这样）。
         for e in TABLE {
             assert!(!e.zh.trim().is_empty(), "{:?} 的中文条目为空", e.key);
             assert!(!e.en.trim().is_empty(), "{:?} 的英文条目为空", e.key);
+            if ASCII_TOKEN_KEYS.contains(&e.key) {
+                continue;
+            }
             assert!(
                 has_cjk(e.zh).is_some(),
                 "{:?} 的中文条目里没有任何中日韩字符，疑似误填成英文：{:?}",
                 e.key,
                 e.zh
             );
+        }
+    }
+
+    #[test]
+    fn ascii_token_allowlist_is_exact() {
+        // 白名单是**精确匹配**的：多一条、少一条都失败。
+        //
+        // 少了：新写的技术记号会被 `chinese_entries_are_not_empty_and_not_ascii_only`
+        // 报错，逼作者回来看这里；多了：说明某个条目已经从记号变成了散文
+        // （或者条目被删了），白名单得跟着瘦下来。
+        // 没有这条，白名单会慢慢变成一张「哪些错可以不报」的清单。
+        let offenders: Vec<Key> = TABLE
+            .iter()
+            .filter(|e| has_cjk(e.zh).is_none())
+            .map(|e| e.key)
+            .collect();
+        for k in &offenders {
+            assert!(
+                ASCII_TOKEN_KEYS.contains(k),
+                "{k:?} 的中文条目不含中日韩字符，但它不在 ASCII_TOKEN_KEYS 里"
+            );
+        }
+        for k in ASCII_TOKEN_KEYS {
+            assert!(
+                offenders.contains(k),
+                "{k:?} 在 ASCII_TOKEN_KEYS 里，但它的中文条目已经有中日韩字符了，请从白名单删掉"
+            );
+            // 记号之所以是记号，就是因为两种语言下**完全一致**。
+            // 若某条 zh != en，说明这个键其实是散文，被错误地标成了记号。
+            let e = TABLE
+                .iter()
+                .find(|e| e.key == *k)
+                .expect("白名单键必在表里");
+            assert_eq!(e.zh, e.en, "{k:?} 标成了技术记号，但中英不一致");
         }
     }
 
@@ -1216,6 +1830,315 @@ mod tests {
                 "英文标签里仍有中日韩字符，说明漏接了本地化：{en:?}"
             );
             assert_ne!(zh, en, "中英标签完全一样，疑似漏译：{zh:?}");
+        }
+    }
+
+    /// 自由文本（句子，不是标签）的双语总闸。
+    ///
+    /// 与 [`tests::enum_labels_are_localized_both_ways`] 同一套思路：
+    /// 从**真实的输入**出发，一路走到最终字符串，断言英文里没有中日韩字符。
+    /// 只查字典表是不够的——`TargetSpec::summary_in` 忘了把 `lang` 传下去，
+    /// 表还是干净的，界面照样露中文。
+    #[test]
+    fn free_text_is_localized_both_ways() {
+        use crate::alerts::{
+            match_rule_in, AlertContext, AlertEngine, AlertKind, AlertRule, Severity,
+        };
+        use crate::fingerprint::{infer_device, DeviceKind, PortScanConfig};
+        use crate::monitor::{Change, ChangeKind};
+        use crate::profile::ScanProfile;
+        use crate::registry::BackendRegistry;
+        use crate::result::{ProbeResult, ProbeStatus};
+        use crate::spec::{parse_spec, ProbeMode};
+        use crate::target::TargetRange;
+        use crate::timeseries::TimeSeries;
+
+        let mut samples: Vec<(&'static str, String, String)> = Vec::new();
+
+        // —— 目标规格摘要 ——
+        let one = parse_spec("192.168.1", TargetRange::Standard).expect("合法前缀");
+        samples.push((
+            "TargetSpec::summary",
+            one.summary_in(Lang::Zh),
+            one.summary_in(Lang::En),
+        ));
+        samples.push((
+            "Segment::describe",
+            one.segments[0].describe_in(Lang::Zh),
+            one.segments[0].describe_in(Lang::En),
+        ));
+        let multi = parse_spec("10.0.0.1, 10.0.0.2", TargetRange::Standard).expect("多段");
+        samples.push((
+            "TargetSpec::summary(multi)",
+            multi.summary_in(Lang::Zh),
+            multi.summary_in(Lang::En),
+        ));
+        samples.push((
+            "TargetSpec::summary(empty)",
+            crate::spec::TargetSpec::default().summary_in(Lang::Zh),
+            crate::spec::TargetSpec::default().summary_in(Lang::En),
+        ));
+
+        // —— 变化事件摘要 ——
+        for kind in [ChangeKind::Appeared, ChangeKind::Disappeared] {
+            let c = Change {
+                round: 2,
+                index: 0,
+                ip: "10.0.0.7".parse().unwrap(),
+                kind,
+                from: ProbeStatus::Timeout,
+                to: ProbeStatus::Online { rtt_ms: 3 },
+            };
+            samples.push((
+                "Change::summary",
+                c.summary_in(Lang::Zh),
+                c.summary_in(Lang::En),
+            ));
+        }
+
+        // —— 探测方式的状态名（TCP 一套独立的词）——
+        let statuses = [
+            ProbeStatus::Pending,
+            ProbeStatus::Online { rtt_ms: 3 },
+            ProbeStatus::Timeout,
+            ProbeStatus::Unreachable,
+            ProbeStatus::PermissionDenied,
+            ProbeStatus::Unsupported,
+            ProbeStatus::Error("boom".into()),
+        ];
+        for mode in [ProbeMode::Icmp, ProbeMode::Tcp { port: 445 }] {
+            for st in &statuses {
+                samples.push((
+                    "ProbeMode::status_label",
+                    mode.status_label_in(st, Lang::Zh),
+                    mode.status_label_in(st, Lang::En),
+                ));
+            }
+        }
+
+        // —— 设备推断（名字与依据都是散文）——
+        for k in DeviceKind::ALL {
+            samples.push((
+                "DeviceKind::label",
+                k.label_in(Lang::Zh).to_string(),
+                k.label_in(Lang::En).to_string(),
+            ));
+        }
+        for g in [
+            infer_device(Some("TP-Link Technologies"), &[80, 443]),
+            infer_device(None, &[3389, 445, 135]),
+            infer_device(None, &[9100, 631]),
+        ] {
+            let g = g.expect("这些组合必然有结论");
+            samples.push((
+                "DeviceGuess::summary",
+                g.summary_in(Lang::Zh),
+                g.summary_in(Lang::En),
+            ));
+        }
+
+        // —— 后端能力（含 `note`）——
+        let reg = BackendRegistry::new();
+        for caps in reg.caps() {
+            samples.push((
+                "BackendCaps::describe",
+                caps.describe_in(Lang::Zh),
+                caps.describe_in(Lang::En),
+            ));
+            let (z, e) = (caps.note.label_in(Lang::Zh), caps.note.label_in(Lang::En));
+            if !z.is_empty() {
+                samples.push(("CapsNote::label", z.to_string(), e.to_string()));
+            }
+        }
+        samples.push((
+            "BackendRegistry::summary",
+            reg.summary_in(Lang::Zh),
+            reg.summary_in(Lang::En),
+        ));
+
+        // —— 模板摘要 ——
+        //
+        // 注意 `note` 用的是 ASCII：它是**用户自己写的数据**，不是界面文案，
+        // 不该被翻译。让它保持 ASCII，这条测试才是在检查「我们写的词」
+        // 有没有翻，而不是在检查「用户写的中文」——用户写什么语言是他的自由。
+        let profile = ScanProfile {
+            name: "prod".into(),
+            spec: "10.0.0.0/24".into(),
+            range: TargetRange::HostsOnly,
+            timeout_ms: 800,
+            concurrency: 64,
+            mode: ProbeMode::Tcp { port: 443 },
+            note: "production subnet".into(),
+            extra: Vec::new(),
+        };
+        samples.push((
+            "ScanProfile::describe",
+            profile.describe_in(Lang::Zh),
+            profile.describe_in(Lang::En),
+        ));
+
+        // —— 平台提示与通知通道说明 ——
+        samples.push((
+            "native_icmp_hint",
+            crate::native_icmp_hint_in(Lang::Zh).to_string(),
+            crate::native_icmp_hint_in(Lang::En).to_string(),
+        ));
+        let zh_notify = crate::notifications_available_in(Lang::Zh);
+        let en_notify = crate::notifications_available_in(Lang::En);
+        assert_eq!(zh_notify.len(), en_notify.len(), "通道条数不该跟语言变");
+        for (z, e) in zh_notify.iter().zip(en_notify.iter()) {
+            assert_eq!(z.0, e.0, "通道键是机器字段，不该跟语言变");
+            assert_eq!(z.1, e.1, "通道可用性是事实，不该跟语言变");
+            samples.push(("notifications_available", z.2.clone(), e.2.clone()));
+        }
+
+        // —— 解析错误（`Result<_, String>` 那一类）——
+        for bad in ["80x", "443-445x", "0-10", "1-99999", "70000", ""] {
+            let zh = PortScanConfig::parse_ports_in(bad, Lang::Zh).unwrap_err();
+            let en = PortScanConfig::parse_ports_in(bad, Lang::En).unwrap_err();
+            samples.push(("parse_ports", zh, en));
+        }
+
+        // —— 落盘格式的错误 ——
+        for (what, text) in [
+            ("TimeSeries::from_text(sig)", "WRONG 1\n"),
+            ("TimeSeries::from_text(version)", "CPING-SERIES 99\n"),
+            ("AlertEngine::from_text(version)", "CPING-ALERTS 99\n"),
+        ] {
+            let zh = if text.starts_with("CPING-SERIES") {
+                TimeSeries::from_text_in(text, Lang::Zh).unwrap_err()
+            } else if text.starts_with("CPING-ALERTS") {
+                AlertEngine::from_text_in(text, Lang::Zh).unwrap_err()
+            } else {
+                TimeSeries::from_text_in(text, Lang::Zh).unwrap_err()
+            };
+            let en = if text.starts_with("CPING-SERIES") {
+                TimeSeries::from_text_in(text, Lang::En).unwrap_err()
+            } else if text.starts_with("CPING-ALERTS") {
+                AlertEngine::from_text_in(text, Lang::En).unwrap_err()
+            } else {
+                TimeSeries::from_text_in(text, Lang::En).unwrap_err()
+            };
+            samples.push((what, zh, en));
+        }
+
+        // —— 告警正文（判定逻辑不变，只有措辞跟着语言走）——
+        let rule = |kind: AlertKind| AlertRule {
+            kind,
+            enabled: true,
+            threshold: 100,
+            cooldown_secs: 300,
+        };
+        let mk_result = |st: ProbeStatus| ProbeResult {
+            index: 3,
+            ip: "10.0.0.9".parse().unwrap(),
+            mac: None,
+            vendor: None,
+            hostname: None,
+            status: st,
+        };
+        // 每条规则各自构造命中它的上下文——「命不命中」是规则的事，
+        // 这里只想拿到它命中的那句话。
+        let cases: Vec<(AlertKind, ProbeResult, Option<bool>, Option<f64>)> = vec![
+            (
+                AlertKind::Appeared,
+                mk_result(ProbeStatus::Online { rtt_ms: 5 }),
+                None, // 从没见过 → 首次上线
+                Some(1.0),
+            ),
+            (
+                AlertKind::Disappeared,
+                mk_result(ProbeStatus::Timeout),
+                Some(true),
+                Some(0.5),
+            ),
+            (
+                AlertKind::LatencyAbove,
+                mk_result(ProbeStatus::Online { rtt_ms: 500 }),
+                Some(true),
+                Some(1.0),
+            ),
+            (
+                AlertKind::UptimeBelow,
+                mk_result(ProbeStatus::Online { rtt_ms: 5 }),
+                Some(true),
+                Some(0.5),
+            ),
+        ];
+        for (kind, current, was_online, uptime_ratio) in &cases {
+            let r = rule(*kind);
+            let ctx = AlertContext {
+                ip: current.ip,
+                index: current.index,
+                current,
+                was_online: *was_online,
+                uptime_ratio: *uptime_ratio,
+                at_ms: 0,
+                round: 2,
+            };
+            let zh = match_rule_in(&r, &ctx, Lang::Zh);
+            let en = match_rule_in(&r, &ctx, Lang::En);
+            assert_eq!(
+                zh.is_some(),
+                en.is_some(),
+                "{kind:?} 的命中与否不该跟语言有关"
+            );
+            let (z, e) = (zh.expect("样本必须命中"), en.expect("样本必须命中"));
+            assert_eq!(z.severity, e.severity, "严重级不该跟语言变");
+            assert_eq!(z.value, e.value, "实测值不该跟语言变");
+            samples.push(("AlertEvent::message", z.message, e.message));
+        }
+        // 顺带确认 `AlertEngine` 与 `Severity` 都在作用域里可用
+        let _ = Severity::Info;
+        let _ = AlertEngine::default();
+
+        // —— 差异摘要 ——
+        let mk = |idx: u16, ip: &str, st: ProbeStatus| ProbeResult {
+            index: idx,
+            ip: ip.parse().unwrap(),
+            mac: None,
+            vendor: None,
+            hostname: None,
+            status: st,
+        };
+        let base = vec![
+            mk(0, "10.0.0.1", ProbeStatus::Online { rtt_ms: 3 }),
+            mk(1, "10.0.0.2", ProbeStatus::Online { rtt_ms: 3 }),
+        ];
+        let next = vec![
+            mk(0, "10.0.0.1", ProbeStatus::Online { rtt_ms: 900 }),
+            mk(2, "10.0.0.3", ProbeStatus::Timeout),
+        ];
+        let diff = crate::diff::diff_reports(&base, &next, &crate::classify::Thresholds::default());
+        samples.push((
+            "ScanDiff::summary",
+            diff.summary_in(Lang::Zh),
+            diff.summary_in(Lang::En),
+        ));
+
+        assert!(
+            samples.len() >= 45,
+            "样本太少（{}）：新增的自由文本要补进这里",
+            samples.len()
+        );
+        for (what, zh, en) in samples {
+            assert!(
+                has_cjk(&en).is_none(),
+                "{what}：英文渲染里仍有中日韩字符，说明漏接了本地化：{en:?}"
+            );
+            if zh == en {
+                // 中英一字不差只可能是技术记号（`TCP-OPEN`）。允许，
+                // 但要求它**纯 ASCII**——否则就是把中文粘到了英文栏。
+                assert!(
+                    zh.is_ascii(),
+                    "{what}：中英渲染完全相同且含非 ASCII 字符，疑似漏译：{zh:?}"
+                );
+            } else {
+                assert!(
+                    has_cjk(&zh).is_some(),
+                    "{what}：中文渲染里没有中日韩字符，疑似漏传 Lang：{zh:?}"
+                );
+            }
         }
     }
 }

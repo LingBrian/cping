@@ -29,6 +29,7 @@
 use crate::i18n::{self, Key, Lang};
 use crate::probe::ProbeBackend;
 use crate::spec::ProbeMode;
+use std::fmt;
 use std::net::IpAddr;
 
 /// 后端标识。
@@ -100,7 +101,66 @@ pub struct BackendCaps {
     /// 是否需要提权（原始套接字）。
     pub needs_privilege: bool,
     /// 不可用时的人话说明。
-    pub note: &'static str,
+    pub note: CapsNote,
+}
+
+/// 后端「为什么不可用」的说明。
+///
+/// M18 之前这里是 `&'static str` 的中文常量，英文界面下原样露出中文。
+/// 改成枚举之后有两个好处：一是**漏翻变成编译期问题**（match 是穷尽的），
+/// 二是调用方没法再随手往里塞一句没翻译的字符串。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CapsNote {
+    /// 可用，没有要说的。
+    #[default]
+    None,
+    /// 该平台没有原生 ICMP 实现。
+    PlatformIcmpMissing,
+    /// ICMPv6 未实装。
+    Icmp6Missing,
+    /// Mock 后端。
+    TestOnly,
+    /// 查不到这个后端（注册表里没有）。
+    UnknownBackend,
+}
+
+impl CapsNote {
+    /// 有没有话要说。空说明不该被拼进展示文本。
+    pub const fn is_empty(self) -> bool {
+        matches!(self, CapsNote::None)
+    }
+
+    /// 对应的字典键；[`CapsNote::None`] 没有键。
+    pub const fn key(self) -> Option<Key> {
+        match self {
+            CapsNote::None => None,
+            CapsNote::PlatformIcmpMissing => Some(Key::CapsNotePlatformIcmpMissing),
+            CapsNote::Icmp6Missing => Some(Key::CapsNoteIcmp6Missing),
+            CapsNote::TestOnly => Some(Key::CapsNoteTestOnly),
+            CapsNote::UnknownBackend => Some(Key::CapsNoteUnknownBackend),
+        }
+    }
+
+    /// 按语言渲染；`None` 渲染成空串（不是 `"None"`）。
+    pub fn label_in(self, lang: Lang) -> &'static str {
+        match self.key() {
+            Some(k) => i18n::text(lang, k),
+            None => "",
+        }
+    }
+
+    /// 中文（等价于 `label_in(Lang::Zh)`）。
+    pub fn label_zh(self) -> &'static str {
+        self.label_in(Lang::Zh)
+    }
+}
+
+impl fmt::Display for CapsNote {
+    /// `Display` 就是中文渲染——两处各自 `match` 的结果是改了其一、
+    /// 另一处悄悄留在旧措辞上。
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label_in(Lang::Zh))
+    }
 }
 
 impl BackendCaps {
@@ -111,18 +171,25 @@ impl BackendCaps {
 
     /// 一行展示文本，例如 `原生 ICMP（IPv4）· 需要权限 · IPv4`。
     pub fn describe(&self) -> String {
-        let mut parts = vec![self.id.label_zh()];
+        self.describe_in(Lang::Zh)
+    }
+
+    /// 按语言渲染的一行展示文本。
+    ///
+    /// 分隔符 ` · ` 在两种语言下一致，留在代码里——它是标点不是散文。
+    pub fn describe_in(&self, lang: Lang) -> String {
+        let mut parts = vec![self.id.label_in(lang).to_string()];
         if self.needs_privilege {
-            parts.push("需要权限");
+            parts.push(i18n::text(lang, Key::CapsNeedsPrivilege).to_string());
         }
         match (self.ipv4, self.ipv6) {
-            (true, true) => parts.push("IPv4+IPv6"),
-            (true, false) => parts.push("仅 IPv4"),
-            (false, true) => parts.push("仅 IPv6"),
+            (true, true) => parts.push(i18n::text(lang, Key::CapsIpv4And6).to_string()),
+            (true, false) => parts.push(i18n::text(lang, Key::CapsIpv4Only).to_string()),
+            (false, true) => parts.push(i18n::text(lang, Key::CapsIpv6Only).to_string()),
             (false, false) => {}
         }
         if !self.available && !self.note.is_empty() {
-            parts.push(self.note);
+            parts.push(self.note.label_in(lang).to_string());
         }
         parts.join(" · ")
     }
@@ -154,9 +221,9 @@ impl BackendRegistry {
                 ipv6: false,
                 needs_privilege: true,
                 note: if icmp4_available {
-                    ""
+                    CapsNote::None
                 } else {
-                    "该平台尚未实现原生 ICMP"
+                    CapsNote::PlatformIcmpMissing
                 },
             },
             BackendCaps {
@@ -166,7 +233,7 @@ impl BackendRegistry {
                 ipv4: false,
                 ipv6: false,
                 needs_privilege: true,
-                note: "ICMPv6 尚未实装，请用 TCP 方式探测 IPv6 目标",
+                note: CapsNote::Icmp6Missing,
             },
             BackendCaps {
                 id: BackendId::Tcp,
@@ -174,7 +241,7 @@ impl BackendRegistry {
                 ipv4: true,
                 ipv6: true,
                 needs_privilege: false,
-                note: "",
+                note: CapsNote::None,
             },
             BackendCaps {
                 id: BackendId::Mock,
@@ -182,7 +249,7 @@ impl BackendRegistry {
                 ipv4: true,
                 ipv6: true,
                 needs_privilege: false,
-                note: "仅测试用",
+                note: CapsNote::TestOnly,
             },
         ]
     }
@@ -198,7 +265,7 @@ impl BackendRegistry {
                 ipv4: false,
                 ipv6: false,
                 needs_privilege: false,
-                note: "未知后端",
+                note: CapsNote::UnknownBackend,
             })
     }
 
@@ -344,7 +411,7 @@ mod tests {
         let icmp6 = reg.caps_of(BackendId::Icmp6);
         assert!(!icmp6.available);
         assert!(!icmp6.ipv6);
-        assert!(icmp6.note.contains("未实装"));
+        assert!(icmp6.note.label_zh().contains("未实装"));
     }
 
     #[test]

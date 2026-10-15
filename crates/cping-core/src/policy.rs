@@ -1152,7 +1152,12 @@ mod tests {
 
     #[test]
     fn audit_log_refuses_a_file_it_did_not_write() {
-        let dir = std::env::temp_dir().join("cping_policy_audit_test");
+        // 目录名必须带上进程号：固定名会让「同一台机器上并行跑两份测试」
+        // （本地并行、或 CI 上同一 job 的两次调用）共用同一个目录，
+        // 一方在结尾删文件、另一方正好在读，就会随机失败。
+        // `snapshot.rs` 的临时目录早就带了 `process::id()`，此处对齐。
+        let dir =
+            std::env::temp_dir().join(format!("cping_policy_audit_test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let foreign = dir.join("foreign.log");
         std::fs::write(&foreign, "some other tool's log\n").unwrap();

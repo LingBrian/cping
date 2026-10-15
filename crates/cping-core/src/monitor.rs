@@ -144,20 +144,38 @@ pub struct Change {
 impl Change {
     /// 人类可读摘要，例如 `192.168.1.7 上线（- → 3 ms）`。
     pub fn summary(&self) -> String {
-        format!("{} {}（{}）", self.ip, self.kind.label_zh(), self.detail())
+        self.summary_in(Lang::Zh)
     }
 
-    fn detail(&self) -> String {
+    /// 按语言渲染摘要，例如 `192.168.1.7 came online (- → 3 ms)`。
+    ///
+    /// 中间那层 `（…）` 与 `→` 由字典给（中文全角括号、英文半角括号），
+    /// 但箭头两侧的 `{} ms` 模板留在 [`Self::detail_in`] 里——
+    /// 箭头与单位在两种语言下完全一致，把它们也塞进字典只会让
+    /// 字典多出一批「中英一字不差」的条目。
+    pub fn summary_in(&self, lang: Lang) -> String {
+        i18n::render(
+            lang,
+            Key::ChangeSummary,
+            &[
+                &self.ip.to_string(),
+                self.kind.label_in(lang),
+                &self.detail_in(lang),
+            ],
+        )
+    }
+
+    fn detail_in(&self, lang: Lang) -> String {
         match (&self.from, &self.to) {
             (_, ProbeStatus::Online { rtt_ms }) if self.kind == ChangeKind::Appeared => {
-                format!("{} → {rtt_ms} ms", self.from.label_zh())
+                format!("{} → {rtt_ms} ms", self.from.label_in(lang))
             }
             (ProbeStatus::Online { rtt_ms: a }, ProbeStatus::Online { rtt_ms: b })
                 if self.kind == ChangeKind::RttClassChanged =>
             {
                 format!("{a} ms → {b} ms")
             }
-            _ => format!("{} → {}", self.from.label_zh(), self.to.label_zh()),
+            _ => format!("{} → {}", self.from.label_in(lang), self.to.label_in(lang)),
         }
     }
 }

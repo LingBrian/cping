@@ -10,6 +10,7 @@
 //! 报文构造与解析写成不依赖平台的纯函数，因此可以在任意平台上做单元测试。
 
 use crate::error::ProbeError;
+use crate::i18n::{self, Key, Lang};
 use crate::probe::{ProbeBackend, ProbeOutcome};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -759,21 +760,23 @@ pub const fn platform_default_mode() -> crate::spec::ProbeMode {
 ///
 /// 真正的判定必须依据 `probe()` 返回的错误种类。
 pub fn native_icmp_hint() -> &'static str {
-    #[cfg(windows)]
-    {
-        "Windows：优先 SOCK_DGRAM+IPPROTO_ICMP（普通用户），失败回退 SOCK_RAW（需管理员）"
-    }
-    #[cfg(target_os = "android")]
-    {
-        "Android：普通应用通常没有 CAP_NET_RAW。若两种套接字都返回 EPERM/EACCES，\
-         本工具的 ICMP 模式不可用，请改用独立的 TCP 连通性模式。"
-    }
-    #[cfg(target_os = "linux")]
-    {
-        "Linux：需要 CAP_NET_RAW（root 或 setcap cap_net_raw+ep <exe>）"
-    }
-    #[cfg(not(any(windows, target_os = "linux", target_os = "android")))]
-    {
-        "未知平台"
-    }
+    native_icmp_hint_in(Lang::Zh)
+}
+
+/// 按语言渲染的平台提示。
+///
+/// 平台分支用 `cfg!` 而不是 `#[cfg]`：四种分支都编译进二进制、
+/// 由运行时挑一个。这样开发机上也能测到「英文 + Android 那一句」，
+/// 而 `#[cfg]` 写法下非本平台的分支根本编不进来，漏翻要等发布才发现。
+pub fn native_icmp_hint_in(lang: Lang) -> &'static str {
+    let key = if cfg!(windows) {
+        Key::HintIcmpWindows
+    } else if cfg!(target_os = "android") {
+        Key::HintIcmpAndroid
+    } else if cfg!(target_os = "linux") {
+        Key::HintIcmpLinux
+    } else {
+        Key::HintIcmpUnknown
+    };
+    i18n::text(lang, key)
 }

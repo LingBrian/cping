@@ -534,12 +534,16 @@ impl ScanReport {
             }));
             let device = match &fp.device {
                 Some(d) => Json::object([
-                    ("kind", Json::str(d.kind)),
+                    // 导出**刻意固定用中文**：CSV / JSON 是给脚本读的数据契约，
+                    // 同一份报表在中英文机器上必须逐字节一致，否则
+                    // 「在同事的机器上跑出来的 diff 和我不一样」。
+                    // 语言偏好只影响**界面**，不影响落盘。
+                    ("kind", Json::str(d.kind.label_zh())),
                     ("confidence", Json::str(d.confidence.label_zh())),
                     ("is_inference", Json::Bool(true)),
                     (
                         "basis",
-                        Json::array(d.basis.iter().map(|b| Json::str(b.clone()))),
+                        Json::array(d.basis.iter().map(|b| Json::str(b.render_zh()))),
                     ),
                 ]),
                 None => Json::Null,

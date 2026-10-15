@@ -53,9 +53,52 @@ pub fn draw(f: &mut Frame, app: &App) {
         draw_trend(f, app, f.area());
     } else if app.show_alerts {
         draw_alerts(f, app, f.area());
+    } else if app.show_profiles {
+        draw_profiles(f, app, f.area());
+    } else if app.show_policy {
+        draw_policy(f, app, f.area());
     } else if app.show_help {
         draw_help(f, app, f.area());
     }
+}
+
+/// M16 扫描模板选择面板。
+///
+/// 面板里同时标出「光标」与「当前生效的模板」：两者是不同的事，混在一起
+/// 会让人以为「选到就等于应用了」。
+fn draw_profiles(f: &mut Frame, app: &App, area: Rect) {
+    let lines = app.profile_lines();
+    let popup = centered(area, 88, (lines.len() as u16 + 2).min(area.height));
+    f.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(app.t(Key::ProfilesTitle));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let text: Vec<Line> = lines
+        .into_iter()
+        .map(|t| Line::from(Span::raw(truncate_display(&t, inner.width as usize))))
+        .collect();
+    f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), inner);
+}
+
+/// M17 安全策略设置面板。
+fn draw_policy(f: &mut Frame, app: &App, area: Rect) {
+    let lines = app.policy_lines();
+    let popup = centered(area, 92, (lines.len() as u16 + 2).min(area.height));
+    f.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(app.t(Key::PolicyTitle));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let text: Vec<Line> = lines
+        .into_iter()
+        .map(|t| Line::from(Span::raw(truncate_display(&t, inner.width as usize))))
+        .collect();
+    f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), inner);
 }
 
 /// M15 告警面板。
@@ -140,6 +183,12 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     } else {
         String::new()
     };
+    // M16：把「当前用的是哪个模板」摆在输入区——状态栏太靠右，窄终端一截就没了，
+    // 而这里无论多窄都看得见。「没有模板」也照实写出来，不写空白让人猜。
+    let profile_tag = match &app.profile_name {
+        Some(name) => format!(" [{}]", app.r(Key::ProfileInUse, &[name])),
+        None => format!(" [{}]", app.t(Key::ProfileNone)),
+    };
     let line = Line::from(vec![
         Span::styled(
             app.t(Key::InputLabelTarget),
@@ -151,6 +200,12 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             Style::default()
                 .add_modifier(Modifier::BOLD)
                 .fg(Color::Cyan),
+        ),
+        Span::styled(
+            profile_tag,
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .fg(Color::Magenta),
         ),
         Span::styled(hint, Style::default().fg(Color::DarkGray)),
     ]);
@@ -251,14 +306,15 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
         let (status, rtt, mac) = match result {
             Some(r) => (
                 // M9：TCP 模式下状态必须显示成 TCP-OPEN / TCP-关闭，
-                // 否则会被读成 ICMP 可达。M18：这两套名字现在由 TUI 字典提供
-                // （核心只给中文 `label_zh()`），但 `TCP-OPEN` 仍是常量。
-                i18n::status_label(app.lang, app.mode().is_tcp(), &r.status),
+                // 否则会被读成 ICMP 可达。两套名字现在由**核心**给出
+                // （`ProbeMode::status_label_in`），TUI 只挑语言。
+                app.mode().status_label_in(&r.status, app.lang),
                 r.status.rtt_ms().map(|v| v.to_string()).unwrap_or_default(),
                 r.mac.clone().unwrap_or_default(),
             ),
             None => (
-                app.t(Key::StPending).to_string(),
+                app.mode()
+                    .status_label_in(&cping_core::ProbeStatus::Pending, app.lang),
                 String::new(),
                 String::new(),
             ),
@@ -266,9 +322,7 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
         let vendor = result.and_then(|r| r.vendor.clone()).unwrap_or_default();
         let hostname = result.and_then(|r| r.hostname.clone()).unwrap_or_default();
 
-        let class_label = class
-            .map(|c| app.t(i18n::result_class_key(c)))
-            .unwrap_or("-");
+        let class_label = class.map(|c| c.label_in(app.lang)).unwrap_or("-");
         let selected = idx == start;
         let base_style = app.style_for(class);
         // M8：本轮刚变化的行加粗 + 后缀标记，颜色之外还有形状，无颜色终端同样可读
@@ -279,7 +333,7 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
             (false, None) => base_style,
         };
         let marker = match change {
-            Some(k) => format!(" [{}]", app.t(i18n::change_kind_key(k))),
+            Some(k) => format!(" [{}]", k.label_in(app.lang)),
             None => String::new(),
         };
         let mut spans = vec![
@@ -462,9 +516,6 @@ fn draw_restore_prompt(f: &mut Frame, app: &App, pending: &PendingRestore, area:
 }
 
 fn draw_help(f: &mut Frame, app: &App, area: Rect) {
-    // 高度随内容增长：帮助面板里的每一条都是要让人看到的，截断等于没说
-    let popup = centered(area, 78, 60);
-    f.render_widget(Clear, popup);
     // M12：如实告诉用户「现在用的是哪个后端、它能干什么、不能干什么」。
     // M18：后端能力行由 TUI 用注册表的公开字段拼（核心的 `describe()` /
     // `summary_zh()` 只有中文），判定仍全部来自核心。
@@ -480,6 +531,10 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         Line::from(app.t(Key::HelpLineSS)),
         Line::from(app.t(Key::HelpLineJH)),
         Line::from(app.t(Key::HelpLineScroll)),
+        // M16/M17 的两个面板键：放在最常用的快捷键段里，好让「帮助里查不到
+        // 新按键」这件事不发生。
+        Line::from(app.t(Key::HelpM16P)),
+        Line::from(app.t(Key::HelpM17G)),
         Line::from(""),
         Line::from(app.t(Key::HeadingM13)),
         Line::from(app.t(Key::HelpM13F)),
@@ -542,6 +597,16 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
             ],
         )),
     ]);
+    // 高度**随内容增长**：帮助里每条都是要让人看到的，写死一个高度会在加了
+    // 新段落之后悄悄把末尾（退出、符号表）截掉。上限仍是终端高度。
+    // `Text::height()` 是 `usize`，而 `centered()` 收 `u16`；这里用 `try_from` 而不是
+    // `as` 强制转换，越界时退化成 `u16::MAX`（随后仍会被 `centered` 夹到终端高度），
+    // 避免溢出静默截断成一个小数字。
+    let height = u16::try_from(text.height())
+        .unwrap_or(u16::MAX)
+        .saturating_add(2);
+    let popup = centered(area, 78, height);
+    f.render_widget(Clear, popup);
     let block = Block::default()
         .borders(Borders::ALL)
         .title(app.t(Key::HelpTitle));
@@ -585,12 +650,12 @@ fn draw_changes(f: &mut Frame, app: &App, area: Rect) {
         // 行内两列用固定宽度对齐（15 / 6），这是排版而不是文案；英文类别名比
         // 中文长时 `{:<6}` 只是不再补空格，不会串位。
         let ip = format!("{:<15}", c.ip);
-        let kind = format!("{:<6}", app.t(i18n::change_kind_key(c.kind)));
-        // 事件流里的状态名恒用 ICMP 那一套（等价于核心的 `label_zh()`），
-        // **不**随当前探测方式切换——这是既有行为，改了会让同一条历史事件
-        // 在不同模式下读出不同的字。
-        let from = i18n::status_label(app.lang, false, &c.from);
-        let to = i18n::status_label(app.lang, false, &c.to);
+        let kind = format!("{:<6}", c.kind.label_in(app.lang));
+        // 事件流里的状态名恒用 ICMP 那一套，**不**随当前探测方式切换——
+        // 这是既有行为，改了会让同一条历史事件在不同模式下读出不同的字。
+        let icmp = cping_core::ProbeMode::Icmp;
+        let from = icmp.status_label_in(&c.from, app.lang);
+        let to = icmp.status_label_in(&c.to, app.lang);
         let row = app.r(
             Key::ChangeRow,
             &[&c.round.to_string(), &ip, &kind, &from, &to],

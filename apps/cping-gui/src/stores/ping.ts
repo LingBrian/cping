@@ -673,6 +673,39 @@ export const usePingStore = defineStore('ping', () => {
     else status.value = t('status.modeChanged', modeLabel.value)
   }
 
+  /**
+   * 切换语言后，把「文本由后端渲染」的那几份数据重新拉一遍。
+   *
+   * 为什么需要这一步：界面文案由模板里的 `t()` 响应式重渲染，但
+   * `specSummary` / `changes` / `backendSummary` 这些是后端**按当时的语言
+   * 渲染好的成品**——前端没有、也不该有「它对应哪个键」的信息。不重拉的话，
+   * 切到英文后这些**已经拿到的**文本会继续显示中文，直到用户碰巧再操作一次。
+   *
+   * 边界（每一条都是有意选择的）：
+   * - **扫描进行中不碰快照**：`refreshSnapshot` 会整体覆盖 `results`，
+   *   与事件流写入竞争（见上面那条注释）。
+   * - **趋势 / 告警只在「已经看过」时才拉**：与 `resyncFromBackend` 同一条规矩，
+   *   不为了切语言白花 IPC。
+   * - **不重拉端口指纹**：那是真实端口扫描的产物，重拉等于再扫一遍网段，
+   *   代价与收益不成比例；要换语言就得用户自己再点一次「指纹」。
+   * - **不回溯改写 `status` / `enrichNote`**：它们是事件日志，记录事件发生
+   *   那一刻的语言（既有约定，见 `status` 的声明处）。
+   */
+  async function refreshLocalizedViews(): Promise<void> {
+    await loadBackendCaps()
+    if (!running.value) {
+      try {
+        await refreshSnapshot()
+      } catch (e) {
+        // 与 `resyncFromBackend` 一致：拉不到就留着旧数据，不把界面清空
+        status.value = t('status.resyncFailed', String(e))
+      }
+    }
+    await loadChanges(200)
+    if (trend.value !== null) await loadTrend()
+    if (alerts.value !== null) await loadAlerts()
+  }
+
   /** 在常用端口之间轮换（`T` 之外的鼠标友好路径）。 */
   function cycleTcpPort(pool: readonly number[]): void {
     const idx = pool.indexOf(tcpPort.value)
@@ -1116,6 +1149,8 @@ export const usePingStore = defineStore('ping', () => {
     closeChanges,
     loadConfig,
     persistConfig,
+    // 切语言后重拉「由后端渲染文本」的那几份数据
+    refreshLocalizedViews,
     exportTo,
     exportToApp,
     exportDiffTo,

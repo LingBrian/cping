@@ -162,14 +162,25 @@ impl ScanDiff {
 
     /// 一行摘要，供界面标题与 CLI 输出。
     pub fn summary(&self) -> String {
-        format!(
-            "新上线 {} · 已离线 {} · 延迟变化 {} · 状态变化 {}（另：仅旧 {} / 仅新 {}）",
-            self.count_of(DiffKind::Appeared),
-            self.count_of(DiffKind::Disappeared),
-            self.count_of(DiffKind::LatencyChanged),
-            self.count_of(DiffKind::StatusChanged),
-            self.count_of(DiffKind::OnlyInBase),
-            self.count_of(DiffKind::OnlyInNext),
+        self.summary_in(Lang::Zh)
+    }
+
+    /// 按语言渲染的一行摘要。
+    ///
+    /// 差异的**判定**（谁算变化、阈值多少）全在 [`diff_reports`] 里，
+    /// 这里只负责把已经算好的计数说成人话——界面侧不必也不再重拼这一句。
+    pub fn summary_in(&self, lang: Lang) -> String {
+        i18n::render(
+            lang,
+            Key::DiffSummary,
+            &[
+                &self.count_of(DiffKind::Appeared).to_string(),
+                &self.count_of(DiffKind::Disappeared).to_string(),
+                &self.count_of(DiffKind::LatencyChanged).to_string(),
+                &self.count_of(DiffKind::StatusChanged).to_string(),
+                &self.count_of(DiffKind::OnlyInBase).to_string(),
+                &self.count_of(DiffKind::OnlyInNext).to_string(),
+            ],
         )
     }
 

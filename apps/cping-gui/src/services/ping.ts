@@ -3,6 +3,7 @@
 
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { currentLang } from '../i18n'
 import type {
   AlertDto,
   AlertEventDto,
@@ -26,28 +27,48 @@ export function isTauri(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 }
 
+/**
+ * 统一的 `invoke` 包装：把**当前界面语言**随每个命令一起发给 Rust。
+ *
+ * 为什么要包一层，而不是在 30 多个命令里各自手写 `lang`：
+ * 逐个手写必然会漏，而漏掉的表现是「就那一屏回到中文」——只有切到英文、
+ * 又刚好走到那个功能才会发现，是最难靠肉眼回归的一类缺陷。
+ * 包一层之后，「新命令忘了带语言」在代码形状上根本不存在。
+ *
+ * 多带一个字段是无害的：Rust 侧按参数名逐个取自己声明的项
+ * （Tauri 的 `CommandItem` 对每个形参做一次 `payload.get(key)`），
+ * 没有 `lang` 形参的命令直接忽略它。于是「后端接没接语言」与
+ * 「前端带没带语言」可以各自独立推进，不必同步发版。
+ *
+ * 语言在**调用那一刻**取（`currentLang()` 实时读 ref），而不是在模块加载时
+ * 缓存成一个常量：否则切换语言后这一整个会话都会继续用旧语言。
+ */
+function invokeT<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
+  return invoke<T>(cmd, { ...args, lang: currentLang() })
+}
+
 export async function parsePrefix(input: string): Promise<string> {
-  return invoke<string>('parse_prefix_cmd', { input })
+  return invokeT<string>('parse_prefix_cmd', { input })
 }
 
 /** M9：解析完整目标规格（网段 / 单主机 / CIDR / 多网段）。 */
 export async function parseSpec(input: string): Promise<SpecDto> {
-  return invoke<SpecDto>('parse_spec_cmd', { input })
+  return invokeT<SpecDto>('parse_spec_cmd', { input })
 }
 
 /** 平台默认探测方式：桌面为 ICMP，Android 为 TCP:80。 */
 export async function defaultProbeMode(): Promise<[ProbeModeKey, number]> {
-  return invoke<[ProbeModeKey, number]>('default_probe_mode')
+  return invokeT<[ProbeModeKey, number]>('default_probe_mode')
 }
 
 /** M12：当前平台全部内置后端的能力（含不可用的，前端自行过滤）。 */
 export async function backendCaps(): Promise<BackendCapsDto[]> {
-  return invoke<BackendCapsDto[]>('backend_caps')
+  return invokeT<BackendCapsDto[]>('backend_caps')
 }
 
 /** M12：面向界面的一行能力摘要。 */
 export async function backendSummary(): Promise<string> {
-  return invoke<string>('backend_summary')
+  return invokeT<string>('backend_summary')
 }
 
 /** M13：对在线主机做端口指纹。`indices` 为空表示对全部在线主机做。 */
@@ -57,7 +78,7 @@ export async function fingerprintHosts(
   grabBanner = true,
   timeoutMs = 800,
 ): Promise<FingerprintDto[]> {
-  return invoke<FingerprintDto[]>('fingerprint_hosts_cmd', {
+  return invokeT<FingerprintDto[]>('fingerprint_hosts_cmd', {
     indices,
     ports,
     grabBanner,
@@ -67,22 +88,22 @@ export async function fingerprintHosts(
 
 /** M13：清空指纹结果。 */
 export async function clearFingerprints(): Promise<void> {
-  return invoke<void>('clear_fingerprints')
+  return invokeT<void>('clear_fingerprints')
 }
 
 /** M13：当前指纹结果的规模：主机数 / 端口数 / 是否抓横幅。 */
 export async function fingerprintState(): Promise<[number, number, boolean]> {
-  return invoke<[number, number, boolean]>('fingerprint_state')
+  return invokeT<[number, number, boolean]>('fingerprint_state')
 }
 
 /** M12：本构建是否带可选异步调度（编译期决定）。 */
 export async function asyncSchedulerAvailable(): Promise<boolean> {
-  return invoke<boolean>('async_scheduler_available')
+  return invokeT<boolean>('async_scheduler_available')
 }
 
 /** 矩阵视图能表示的目标数上限（256）。 */
 export async function matrixViewMax(): Promise<number> {
-  return invoke<number>('matrix_view_max')
+  return invokeT<number>('matrix_view_max')
 }
 
 export async function startScan(
@@ -92,7 +113,7 @@ export async function startScan(
   mode?: ProbeModeKey,
   tcpPort?: number,
 ): Promise<string> {
-  return invoke<string>('start_scan', {
+  return invokeT<string>('start_scan', {
     prefix,
     timeoutMs,
     concurrency,
@@ -103,24 +124,24 @@ export async function startScan(
 
 /** M8：变化事件流（最近 limit 条，新的在前）。 */
 export async function recentChanges(limit: number): Promise<ChangeDto[]> {
-  return invoke<ChangeDto[]>('recent_changes', { limit })
+  return invokeT<ChangeDto[]>('recent_changes', { limit })
 }
 
 /** M10：导出「上一轮 → 本轮」差异报告（.csv）。 */
 export async function exportDiff(path: string): Promise<string> {
-  return invoke<string>('export_diff', { path })
+  return invokeT<string>('export_diff', { path })
 }
 
 export async function cancelScan(): Promise<void> {
-  await invoke('cancel_scan')
+  await invokeT('cancel_scan')
 }
 
 export async function snapshot(): Promise<SnapshotDto> {
-  return invoke<SnapshotDto>('snapshot')
+  return invokeT<SnapshotDto>('snapshot')
 }
 
 export async function exportResults(path: string): Promise<string> {
-  return invoke<string>('export_results', { path })
+  return invokeT<string>('export_results', { path })
 }
 
 /**
@@ -128,19 +149,19 @@ export async function exportResults(path: string): Promise<string> {
  * 由 Rust 侧写到应用可写的公共目录并回报完整路径。
  */
 export async function exportToAppDir(format: ExportFormatKey): Promise<string> {
-  return invoke<string>('export_to_app_dir', { format })
+  return invokeT<string>('export_to_app_dir', { format })
 }
 
 export async function loadConfig(): Promise<AppConfigDto> {
-  return invoke<AppConfigDto>('load_config')
+  return invokeT<AppConfigDto>('load_config')
 }
 
 export async function saveConfig(config: AppConfigDto): Promise<void> {
-  await invoke('save_config', { config })
+  await invokeT('save_config', { config })
 }
 
 export async function localAddresses(): Promise<string[]> {
-  return invoke<string[]>('get_local_addresses')
+  return invokeT<string[]>('get_local_addresses')
 }
 
 // ---------------------------------------------------------------------------
@@ -152,7 +173,7 @@ export async function localAddresses(): Promise<string[]> {
  * 可重复调用：只补空缺，不会覆盖已有值。
  */
 export async function enrichResults(): Promise<EnrichReportDto> {
-  return invoke<EnrichReportDto>('enrich_results')
+  return invokeT<EnrichReportDto>('enrich_results')
 }
 
 /** 反查单个目标的主机名。阻塞在后端的独立线程里，最多等 timeoutMs。 */
@@ -160,7 +181,7 @@ export async function lookupHostnameFor(
   index: number,
   timeoutMs = 2000,
 ): Promise<HostnameLookupDto> {
-  return invoke<HostnameLookupDto>('lookup_hostname_for', { index, timeoutMs })
+  return invokeT<HostnameLookupDto>('lookup_hostname_for', { index, timeoutMs })
 }
 
 // ---------------------------------------------------------------------------
@@ -169,22 +190,22 @@ export async function lookupHostnameFor(
 
 /** 启动时检查有没有上次没处理完的结果；没有则返回 null。 */
 export async function pendingSnapshot(): Promise<PendingSnapshotDto | null> {
-  return invoke<PendingSnapshotDto | null>('pending_snapshot')
+  return invokeT<PendingSnapshotDto | null>('pending_snapshot')
 }
 
 /** 保存快照到指定路径（桌面端走文件对话框拿到路径）。 */
 export async function saveSnapshot(path: string): Promise<SnapshotSavedDto> {
-  return invoke<SnapshotSavedDto>('save_snapshot', { path })
+  return invokeT<SnapshotSavedDto>('save_snapshot', { path })
 }
 
 /** 移动端：写到应用可写目录并回报完整路径。 */
 export async function saveSnapshotToAppDir(): Promise<SnapshotSavedDto> {
-  return invoke<SnapshotSavedDto>('save_snapshot_to_app_dir')
+  return invokeT<SnapshotSavedDto>('save_snapshot_to_app_dir')
 }
 
 /** 用户选择「不恢复」。deleteFile 时顺手删掉自动落盘文件。 */
 export async function dismissSnapshot(deleteFile: boolean): Promise<void> {
-  await invoke('dismiss_snapshot', { deleteFile })
+  await invokeT('dismiss_snapshot', { deleteFile })
 }
 
 /**
@@ -192,7 +213,7 @@ export async function dismissSnapshot(deleteFile: boolean): Promise<void> {
  * 恢复是**显式动作**：界面必须在用户确认后调用，不做自动恢复。
  */
 export async function restoreSnapshot(path?: string): Promise<SnapshotDto> {
-  return invoke<SnapshotDto>('restore_snapshot', { path: path ?? null })
+  return invokeT<SnapshotDto>('restore_snapshot', { path: path ?? null })
 }
 
 export function onProbeEvent(cb: (event: ProbeEventDto) => void): Promise<UnlistenFn> {
@@ -210,17 +231,17 @@ export function onProbeEvent(cb: (event: ProbeEventDto) => void): Promise<Unlist
  * 界面必须画成断线，不能连起来也不能补 0。
  */
 export async function trendState(chartWidth = 160): Promise<TrendDto> {
-  return invoke<TrendDto>('trend_state', { chartWidth })
+  return invokeT<TrendDto>('trend_state', { chartWidth })
 }
 
 /** 清空趋势历史，返回清掉的点数。 */
 export async function clearTrend(): Promise<number> {
-  return invoke<number>('clear_trend')
+  return invokeT<number>('clear_trend')
 }
 
 /** 导出可用率报表（.csv / .html，按扩展名决定）。 */
 export async function exportUptimeReport(path: string): Promise<string> {
-  return invoke<string>('export_uptime_report', { path })
+  return invokeT<string>('export_uptime_report', { path })
 }
 
 // ---------------------------------------------------------------------------
@@ -229,17 +250,17 @@ export async function exportUptimeReport(path: string): Promise<string> {
 
 /** 告警页数据。`limit` 为返回的最新事件条数上限（默认 200）。 */
 export async function alertState(limit = 200): Promise<AlertDto> {
-  return invoke<AlertDto>('alert_state', { limit })
+  return invokeT<AlertDto>('alert_state', { limit })
 }
 
 /** 开/关告警。不重置任何状态——关掉再打开不会丢掉冷却记录与基线。 */
 export async function setAlertsEnabled(enabled: boolean): Promise<AlertDto> {
-  return invoke<AlertDto>('set_alerts_enabled', { enabled })
+  return invokeT<AlertDto>('set_alerts_enabled', { enabled })
 }
 
 /** 静音开关：规则照常求值，只是不产生事件。 */
 export async function setAlertMuted(muted: boolean): Promise<AlertDto> {
-  return invoke<AlertDto>('set_alert_muted', { muted })
+  return invokeT<AlertDto>('set_alert_muted', { muted })
 }
 
 /**
@@ -254,12 +275,12 @@ export async function updateAlertRules(patch: {
   cooldownSecs?: number
   kinds?: string[]
 }): Promise<AlertDto> {
-  return invoke<AlertDto>('update_alert_rules', patch)
+  return invokeT<AlertDto>('update_alert_rules', patch)
 }
 
 /** 清空告警记录（只丢事件，不动基线与冷却）。 */
 export async function clearAlerts(): Promise<AlertDto> {
-  return invoke<AlertDto>('clear_alerts')
+  return invokeT<AlertDto>('clear_alerts')
 }
 
 /** 订阅告警事件：一轮扫描里触发的告警会打包成一批推过来。 */

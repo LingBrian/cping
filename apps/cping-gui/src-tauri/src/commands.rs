@@ -23,7 +23,54 @@ use cping_core::scheduler::{CancelToken, ProbeScheduler, SchedulerHandle};
 use cping_core::snapshot::{load_from_path, save_to_path, Snapshot};
 use cping_core::spec::{parse_spec, ProbeMode, Segment, TargetSpec, MATRIX_VIEW_MAX};
 use cping_core::target::{matrix_slots, parse_prefix, TargetRange};
-use cping_core::ProbeEvent;
+use cping_core::{Lang, ProbeEvent};
+
+use crate::i18n::{self, Key};
+
+// ---------------------------------------------------------------------------
+// 语言
+// ---------------------------------------------------------------------------
+
+/// 解析命令收到的 `lang` 参数。
+///
+/// - 前端**没发**这个字段（旧版前端）→ 退化为 [`Lang::from_env`]，而不是报错。
+///   向后兼容在这里是硬要求：旧界面配新后端必须照常能扫，语言只是显示层的差异。
+/// - 发了一个**认不出的值**（例如 `de`、`C`）→ 同样走环境推断。
+///   [`Lang::parse`] 对 `C` / `POSIX` / 空串返回 `None`，那是「没有本地化偏好」，
+///   不是「请用英文」——猜错语言比回退到默认更糟。
+/// - 环境变量也给不出线索 → [`Lang::default`]（中文）。
+fn parse_lang(lang: Option<String>) -> Lang {
+    lang.as_deref()
+        .and_then(Lang::parse)
+        .unwrap_or_else(Lang::from_env)
+}
+
+/// 导出格式的展示名。
+///
+/// `CSV` / `TXT` / `JSON` 是**技术记号**，两种语言下一样，直接沿用核心的
+/// [`cping_core::export::ExportFormat::label_zh`] 取值（它返回的就是这几个记号）；
+/// 只有 `HTML 报告` 是散文，需要查 GUI 字典。
+///
+/// 为什么不干脆统一走核心：核心的 `label_zh()` 是**导出产物（数据契约）**用的接口，
+/// 它必须恒为中文。界面提示要跟着语言走，所以这里只在「确实是记号」时复用它。
+fn export_format_label(fmt: cping_core::export::ExportFormat, lang: Lang) -> String {
+    match fmt {
+        cping_core::export::ExportFormat::Html => {
+            i18n::text(lang, Key::ExportFormatHtml).to_string()
+        }
+        other => other.label_zh().to_string(),
+    }
+}
+
+/// 差异摘要——直接交给核心层。
+///
+/// 这里曾经是 GUI 侧自己用 `count_of` 重拼的一句（当时核心的
+/// `ScanDiff::summary()` 还没有 `_in` 变体）。现在核心补上了
+/// `summary_in(lang)`，**中文只剩一处来源**：界面侧不再持有任何一份
+/// 与核心重复的措辞。两份措辞迟早漂移，而漂移了没人会发现。
+fn diff_summary(diff: &ScanDiff, lang: Lang) -> String {
+    diff.summary_in(lang)
+}
 
 // ---------------------------------------------------------------------------
 // DTO
@@ -46,7 +93,12 @@ pub struct ProbeResultDto {
     pub class_key: Option<String>,
 }
 
-fn to_result_dto(r: &ProbeResult, thresholds: &Thresholds, mode: ProbeMode) -> ProbeResultDto {
+fn to_result_dto(
+    r: &ProbeResult,
+    thresholds: &Thresholds,
+    mode: ProbeMode,
+    lang: Lang,
+) -> ProbeResultDto {
     ProbeResultDto {
         index: r.index,
         ip: r.ip.to_string(),
@@ -55,8 +107,10 @@ fn to_result_dto(r: &ProbeResult, thresholds: &Thresholds, mode: ProbeMode) -> P
         hostname: r.hostname.clone(),
         status_key: r.status.key().to_string(),
         // M9：TCP 模式下「在线」必须显示成 TCP-OPEN，否则会被读成 ICMP 可达
-        status_label: mode.status_label(&r.status),
+        status_label: mode.status_label_in(&r.status, lang),
         rtt_ms: r.status.rtt_ms(),
+        // `note()` 里装的是**后端/操作系统的原始细节**（例如 `No such file`），
+        // 按约定原样透传：翻了反而更难查，而且它本来也不是我们写的句子。
         note: r.status.note().map(|s| s.to_string()),
         class_key: classify_status(&r.status, thresholds).map(|c| c.key().to_string()),
     }
@@ -163,18 +217,20 @@ pub struct ChangeDto {
     pub summary: String,
 }
 
-impl From<&Change> for ChangeDto {
-    fn from(c: &Change) -> Self {
-        Self {
-            round: c.round,
-            index: c.index,
-            ip: c.ip.to_string(),
-            kind: c.kind.key().to_string(),
-            kind_label: c.kind.label_zh().to_string(),
-            from_label: c.from.label_zh().to_string(),
-            to_label: c.to.label_zh().to_string(),
-            summary: c.summary(),
-        }
+/// 变化记录 → DTO。
+///
+/// 由 `impl From<&Change>` 改成带 `lang` 的自由函数：语言是**每次调用**的入参，
+/// 不是 `Change` 自身的属性，塞进 `From` 只能靠全局变量，那才是真坑。
+fn change_dto(c: &Change, lang: Lang) -> ChangeDto {
+    ChangeDto {
+        round: c.round,
+        index: c.index,
+        ip: c.ip.to_string(),
+        kind: c.kind.key().to_string(),
+        kind_label: c.kind.label_in(lang).to_string(),
+        from_label: c.from.label_in(lang).to_string(),
+        to_label: c.to.label_in(lang).to_string(),
+        summary: c.summary_in(lang),
     }
 }
 
@@ -226,6 +282,7 @@ impl EnrichReportDto {
         report: EnrichReport,
         results: &[Option<ProbeResult>],
         autosaved_to: Option<String>,
+        lang: Lang,
     ) -> Self {
         let with_mac = results.iter().flatten().filter(|r| r.mac.is_some()).count();
         let with_vendor = results
@@ -240,20 +297,25 @@ impl EnrichReportDto {
             .count();
 
         let message = if !report.table_ok {
-            format!(
-                "读取邻居表失败：{}",
-                report.error.as_deref().unwrap_or("未知原因")
-            )
+            // `report.error` 来自操作系统（读 /proc、注册表或命令输出），原样透传，
+            // 只把外面那层「读取邻居表失败」翻掉。
+            let reason = report
+                .error
+                .as_deref()
+                .unwrap_or(i18n::text(lang, Key::UnknownReason));
+            i18n::render(lang, Key::EnrichReadFailed, &[reason])
         } else if report.mac_filled == 0 && report.vendor_filled == 0 {
             // 诚实说明：ARP 表只包含近期真正通信过的地址，空表是正常现象
-            format!(
-                "邻居表 {} 条，没有可回填的目标（ARP 表只记录近期通信过的地址）",
-                report.entries
-            )
+            i18n::render(lang, Key::EnrichNoFill, &[&report.entries.to_string()])
         } else {
-            format!(
-                "邻居表 {} 条，新填 MAC {} 条、厂商 {} 条",
-                report.entries, report.mac_filled, report.vendor_filled
+            i18n::render(
+                lang,
+                Key::EnrichFilled,
+                &[
+                    &report.entries.to_string(),
+                    &report.mac_filled.to_string(),
+                    &report.vendor_filled.to_string(),
+                ],
             )
         };
 
@@ -353,7 +415,12 @@ pub enum ProbeEventDto {
     },
 }
 
-fn to_event_dto(ev: &ProbeEvent, thresholds: &Thresholds, mode: ProbeMode) -> ProbeEventDto {
+fn to_event_dto(
+    ev: &ProbeEvent,
+    thresholds: &Thresholds,
+    mode: ProbeMode,
+    lang: Lang,
+) -> ProbeEventDto {
     match ev {
         ProbeEvent::Started { task_id, total } => ProbeEventDto::Started {
             task_id: task_id.clone(),
@@ -361,7 +428,7 @@ fn to_event_dto(ev: &ProbeEvent, thresholds: &Thresholds, mode: ProbeMode) -> Pr
         },
         ProbeEvent::Result { task_id, result } => ProbeEventDto::Result {
             task_id: task_id.clone(),
-            result: to_result_dto(result, thresholds, mode),
+            result: to_result_dto(result, thresholds, mode, lang),
         },
         ProbeEvent::Progress {
             task_id,
@@ -635,8 +702,7 @@ impl AppState {
                 cancel: None,
                 mode: cping_core::platform_default_mode(),
                 spec: TargetSpec::default(),
-                monitor: MonitorState::new(MonitorConfig::default())
-                    .expect("默认监控配置必然合法"),
+                monitor: MonitorState::new(MonitorConfig::default()).expect("默认监控配置必然合法"),
                 last_diff: None,
                 fingerprints: Vec::new(),
                 fingerprint_ports: 0,
@@ -661,25 +727,30 @@ impl Default for AppState {
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub fn parse_prefix_cmd(input: String) -> Result<String, String> {
+pub fn parse_prefix_cmd(input: String, lang: Option<String>) -> Result<String, String> {
+    let lang = parse_lang(lang);
     parse_prefix(&input)
         .map(|p| p.to_string())
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.localized(lang))
 }
 
 /// M9：解析完整目标规格（网段 / 单主机 / CIDR / 多网段）。
 #[tauri::command]
-pub fn parse_spec_cmd(input: String) -> Result<SpecDto, String> {
-    let spec = parse_spec(&input, TargetRange::Standard).map_err(|e| e.to_string())?;
-    Ok(spec_dto(&spec))
+pub fn parse_spec_cmd(input: String, lang: Option<String>) -> Result<SpecDto, String> {
+    let lang = parse_lang(lang);
+    let spec = parse_spec(&input, TargetRange::Standard).map_err(|e| e.localized(lang))?;
+    Ok(spec_dto(&spec, lang))
 }
 
-fn spec_dto(spec: &TargetSpec) -> SpecDto {
+fn spec_dto(spec: &TargetSpec, lang: Lang) -> SpecDto {
     SpecDto {
-        summary: spec.summary(),
+        summary: spec.summary_in(lang),
         total: spec.len(),
+        // `SegmentDto.label` 是网段本身的标签（`192.168.1`），不是句子，
+        // 两种语言下完全相同，因此不需要语言。
         segments: spec.segments.iter().map(SegmentDto::from).collect(),
         matrix_compatible: spec.matrix_compatible(),
+        // `span_text` / 首尾地址都是地址本身，没有散文，无需语言。
         span: spec.span_text().unwrap_or_default(),
         first: spec.targets.first().map(|ip| ip.to_string()),
         last: spec.targets.last().map(|ip| ip.to_string()),
@@ -719,20 +790,23 @@ pub struct BackendCapsDto {
 /// 「不可用」是**事实**而不是错误：ICMPv6 本版未实装，就如实登记为不可用，
 /// 界面据此提示用户改用 TCP，而不是等扫完才发现清一色「不支持」。
 #[tauri::command]
-pub fn backend_caps() -> Result<Vec<BackendCapsDto>, String> {
+pub fn backend_caps(lang: Option<String>) -> Result<Vec<BackendCapsDto>, String> {
+    let lang = parse_lang(lang);
     let reg = BackendRegistry::new();
     Ok(reg
         .caps()
         .into_iter()
         .map(|c| BackendCapsDto {
+            // `key()` 是机器可读标识，不是文案，不跟语言变。
             id: c.id.key().to_string(),
-            label: c.id.label_zh().to_string(),
+            label: c.id.label_in(lang).to_string(),
             available: c.available,
             ipv4: c.ipv4,
             ipv6: c.ipv6,
             needs_privilege: c.needs_privilege,
-            note: c.note.to_string(),
-            describe: c.describe(),
+            // `note` 已经是枚举 `CapsNote`：漏翻是编译期问题，不再是运行期的中文残留。
+            note: c.note.label_in(lang).to_string(),
+            describe: c.describe_in(lang),
         })
         .collect())
 }
@@ -782,7 +856,9 @@ pub fn fingerprint_hosts_cmd(
     ports: Option<Vec<u16>>,
     grab_banner: Option<bool>,
     timeout_ms: Option<u64>,
+    lang: Option<String>,
 ) -> Result<Vec<FingerprintDto>, String> {
+    let lang = parse_lang(lang);
     let cfg = {
         let mut cfg = cping_core::PortScanConfig {
             timeout: Duration::from_millis(timeout_ms.unwrap_or(800).clamp(100, 10_000)),
@@ -816,7 +892,7 @@ pub fn fingerprint_hosts_cmd(
         }
     };
     if hosts.is_empty() {
-        return Err("没有在线主机可做端口指纹（先扫描，或先选中在线行）".into());
+        return Err(i18n::render(lang, Key::FingerprintNoOnlineHosts, &[]));
     }
 
     let scanned = cfg.ports.len();
@@ -840,15 +916,24 @@ pub fn fingerprint_hosts_cmd(
                     connect_rtt_ms: f.connect_rtt_ms,
                 })
                 .collect(),
+            // `open_ports_summary` 是纯技术串（`22(ssh) 80(http)`），两种语言一样
             open_ports_summary: fp.open_ports_summary(),
-            device_kind: fp.device.as_ref().map(|d| d.kind.to_string()),
-            device_confidence: fp.device.as_ref().map(|d| d.confidence.label_zh().to_string()),
+            device_kind: fp
+                .device
+                .as_ref()
+                .map(|d| d.kind.label_in(lang).to_string()),
+            device_confidence: fp
+                .device
+                .as_ref()
+                .map(|d| d.confidence.label_in(lang).to_string()),
             device_is_inference: true,
-            device_summary: fp.device_summary(),
+            device_summary: fp.device_summary_in(lang),
+            // 依据是**结构化信号**（厂商名 / 端口组合），渲染成哪种语言由这里决定。
+            // 厂商名本身来自 OUI 库，是数据不是文案，原样保留。
             device_basis: fp
                 .device
                 .as_ref()
-                .map(|d| d.basis.clone())
+                .map(|d| d.basis.iter().map(|b| b.render_in(lang)).collect())
                 .unwrap_or_default(),
         })
         .collect();
@@ -886,8 +971,8 @@ pub fn fingerprint_state(state: State<'_, AppState>) -> Result<(usize, usize, bo
 
 /// 面向界面的一行能力摘要（例如「ICMP 可用（需要权限，仅 IPv4）；ICMPv6 未实装…」）。
 #[tauri::command]
-pub fn backend_summary() -> Result<String, String> {
-    Ok(BackendRegistry::new().summary_zh())
+pub fn backend_summary(lang: Option<String>) -> Result<String, String> {
+    Ok(BackendRegistry::new().summary_in(parse_lang(lang)))
 }
 
 /// v2.0.0 是否带上可选异步调度（编译期决定，供「关于」页如实显示）。
@@ -897,6 +982,10 @@ pub fn async_scheduler_available() -> Result<bool, String> {
 }
 
 #[tauri::command]
+// 8 个参数确实偏多，但这里**不能**合并成一个结构体：命令参数名就是前端
+// `invoke` 传上来的字段名，改成嵌套结构会改变 IPC 载荷的形状——
+// 那是「行为」的一部分，本轮明确不许动。多出来的那个是 `lang`。
+#[allow(clippy::too_many_arguments)]
 pub fn start_scan(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -905,8 +994,12 @@ pub fn start_scan(
     concurrency: usize,
     mode: Option<String>,
     tcp_port: Option<u16>,
+    lang: Option<String>,
 ) -> Result<String, String> {
-    let spec = parse_spec(&prefix, TargetRange::Standard).map_err(|e| e.to_string())?;
+    // 语言是**本次任务**的属性：整轮扫描期间推送的事件文案都用它，
+    // 因此 `Lang` 是 `Copy` 的，直接随闭包一起 `move` 进后台线程即可。
+    let lang = parse_lang(lang);
+    let spec = parse_spec(&prefix, TargetRange::Standard).map_err(|e| e.localized(lang))?;
     let targets = spec.targets.clone();
     let total = targets.len();
 
@@ -926,7 +1019,7 @@ pub fn start_scan(
             mode = ProbeMode::Tcp { port: 80 };
         }
     }
-    mode.validate().map_err(|e| e.to_string())?;
+    mode.validate_in(lang).map_err(|e| e.localized(lang))?;
 
     let thresholds = {
         let sh = state.shared.lock().expect("state poisoned");
@@ -960,7 +1053,7 @@ pub fn start_scan(
     let scheduler = ProbeScheduler::new(select_backend(mode));
     let handle: SchedulerHandle = scheduler
         .start(&config, targets.clone())
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.localized(lang))?;
 
     let task_id = handle.task_id.clone();
     let token = handle.cancel_token();
@@ -1062,20 +1155,30 @@ pub fn start_scan(
                     let round = sh.monitor.round();
                     // 先把阈值复制出来：下面 `alerts` 是可变借用，再借 `sh.thresholds` 会冲突
                     let thresholds_now = sh.thresholds;
-                    fired =
-                        sh.alerts
-                            .evaluate(at, round, &[], &current, &thresholds_now, &uptime);
+                    // 正文按当前界面语言产出。**告警状态文件里不存 message**
+                    // （只存 kind / ip / 时间戳），所以这里跟着语言走不会改变
+                    // 落盘内容，数据契约不受影响。
+                    fired = sh.alerts.evaluate_in(
+                        at,
+                        round,
+                        &[],
+                        &current,
+                        &thresholds_now,
+                        &uptime,
+                        lang,
+                    );
                 }
                 // 进程随时可能被系统回收（Android 上销毁 Activity 即退出进程），
                 // 所以结果一落地就顺手写盘，不依赖退出钩子。
-                let _ = autosave(&app, &sh);
+                let _ = autosave(&app, &sh, lang);
             }
 
-            let dto = to_event_dto(&event, &thresholds, mode);
+            let dto = to_event_dto(&event, &thresholds, mode, lang);
             let _ = app.emit("probe-event", dto);
             // 告警单独走一条事件：前端可以据此弹提示，而不必轮询。
             if !fired.is_empty() {
-                let fired: Vec<AlertEventDto> = fired.iter().map(alert_event_dto).collect();
+                let fired: Vec<AlertEventDto> =
+                    fired.iter().map(|e| alert_event_dto(e, lang)).collect();
                 let _ = app.emit("alert-event", fired);
             }
             if terminal {
@@ -1096,18 +1199,18 @@ pub fn cancel_scan(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
-fn snapshot_dto(sh: &Shared) -> SnapshotDto {
+fn snapshot_dto(sh: &Shared, lang: Lang) -> SnapshotDto {
     let results = sh
         .results
         .iter()
         .flatten()
-        .map(|r| to_result_dto(r, &sh.thresholds, sh.mode))
+        .map(|r| to_result_dto(r, &sh.thresholds, sh.mode, lang))
         .collect();
     let diff_summary = sh
         .last_diff
         .as_ref()
         .filter(|d| !d.is_empty())
-        .map(|d| d.summary())
+        .map(|d| diff_summary(d, lang))
         .unwrap_or_default();
     SnapshotDto {
         task_id: sh.task_id.clone(),
@@ -1121,9 +1224,10 @@ fn snapshot_dto(sh: &Shared) -> SnapshotDto {
         cell_slots: sh.cell_slots.clone(),
         targets: sh.targets.iter().map(|ip| ip.to_string()).collect(),
         mode: sh.mode.key().to_string(),
+        // `describe()` 产出 `ICMP` / `TCP:445`——技术记号，两种语言一致。
         mode_label: sh.mode.describe(),
         tcp_port: sh.mode.tcp_port(),
-        spec_summary: sh.spec.summary(),
+        spec_summary: sh.spec.summary_in(lang),
         segments: sh.spec.segments.iter().map(SegmentDto::from).collect(),
         matrix_compatible: sh.spec.matrix_compatible(),
         round: sh.monitor.round(),
@@ -1131,7 +1235,7 @@ fn snapshot_dto(sh: &Shared) -> SnapshotDto {
             .monitor
             .last_round_changes()
             .iter()
-            .map(ChangeDto::from)
+            .map(|c| change_dto(c, lang))
             .collect(),
         change_total: sh.monitor.log().total_seen(),
         diff_summary,
@@ -1139,21 +1243,27 @@ fn snapshot_dto(sh: &Shared) -> SnapshotDto {
 }
 
 #[tauri::command]
-pub fn snapshot(state: State<'_, AppState>) -> Result<SnapshotDto, String> {
+pub fn snapshot(state: State<'_, AppState>, lang: Option<String>) -> Result<SnapshotDto, String> {
+    let lang = parse_lang(lang);
     let sh = state.shared.lock().expect("state poisoned");
-    Ok(snapshot_dto(&sh))
+    Ok(snapshot_dto(&sh, lang))
 }
 
 /// 变化事件流（最近 N 条，新的在前）。
 #[tauri::command]
-pub fn recent_changes(state: State<'_, AppState>, limit: usize) -> Result<Vec<ChangeDto>, String> {
+pub fn recent_changes(
+    state: State<'_, AppState>,
+    limit: usize,
+    lang: Option<String>,
+) -> Result<Vec<ChangeDto>, String> {
+    let lang = parse_lang(lang);
     let sh = state.shared.lock().expect("state poisoned");
     Ok(sh
         .monitor
         .log()
         .iter_recent_first()
         .take(limit.max(1))
-        .map(ChangeDto::from)
+        .map(|c| change_dto(c, lang))
         .collect())
 }
 
@@ -1162,10 +1272,15 @@ fn collect_results(sh: &Shared) -> Vec<ProbeResult> {
 }
 
 /// 构造导出用的报告（M10：CSV/TXT/JSON/HTML 走同一个构造点）。
-fn build_report(sh: &Shared) -> Result<ScanReport, String> {
+///
+/// `lang` **只用于「没有结果可导出」这条错误提示**，报告本身的内容恒为中文：
+/// 报表是**数据契约**——同一份 CSV / JSON 在中文与英文机器上必须逐字节一致，
+/// 否则下游脚本就得按语言分支。所以 `target_desc` 仍走
+/// `TargetSpec::summary()`（即 `summary_in(Lang::Zh)`）。
+fn build_report(sh: &Shared, lang: Lang) -> Result<ScanReport, String> {
     let done = collect_results(sh);
     if done.is_empty() {
-        return Err("尚无已完成的结果可导出".into());
+        return Err(i18n::render(lang, Key::ExportNoResults, &[]));
     }
     let meta = ExportMeta {
         scan_time: sh.scan_time.clone(),
@@ -1184,49 +1299,64 @@ fn build_report(sh: &Shared) -> Result<ScanReport, String> {
     .with_fingerprints(sh.fingerprints.clone()))
 }
 
-fn write_export(sh: &Shared, path: &str) -> Result<String, String> {
+fn write_export(sh: &Shared, path: &str, lang: Lang) -> Result<String, String> {
     let format = ExportFormat::from_path(path)
-        .ok_or_else(|| "仅支持 .csv / .txt / .json / .html 扩展名".to_string())?;
-    let report = build_report(sh)?;
+        .ok_or_else(|| i18n::render(lang, Key::ExportBadExtension, &[]))?;
+    let report = build_report(sh, lang)?;
     let rows = report.results.len();
     let bytes = report
         .render(format, &ColorConfig::default())
-        .map_err(|e| e.to_string())?;
-    std::fs::write(path, &bytes).map_err(|e| format!("写入 {path} 失败：{e}"))?;
-    Ok(format!(
-        "已导出 {rows} 条结果（{}）→ {path}",
-        format.label_zh()
+        .map_err(|e| e.localized(lang))?;
+    std::fs::write(path, &bytes)
+        .map_err(|e| i18n::render(lang, Key::WriteFailed, &[path, &e.to_string()]))?;
+    Ok(i18n::render(
+        lang,
+        Key::ExportDone,
+        &[&rows.to_string(), &export_format_label(format, lang), path],
     ))
 }
 
 #[tauri::command]
-pub fn export_results(state: State<'_, AppState>, path: String) -> Result<String, String> {
+pub fn export_results(
+    state: State<'_, AppState>,
+    path: String,
+    lang: Option<String>,
+) -> Result<String, String> {
+    let lang = parse_lang(lang);
     let sh = state.shared.lock().expect("state poisoned");
-    write_export(&sh, &path)
+    write_export(&sh, &path, lang)
 }
 
 /// M10：把「上一轮 → 本轮」的差异导出成 CSV / JSON（按扩展名决定）。
 #[tauri::command]
-pub fn export_diff(state: State<'_, AppState>, path: String) -> Result<String, String> {
+pub fn export_diff(
+    state: State<'_, AppState>,
+    path: String,
+    lang: Option<String>,
+) -> Result<String, String> {
+    let lang = parse_lang(lang);
     let sh = state.shared.lock().expect("state poisoned");
     let diff = sh
         .last_diff
         .as_ref()
-        .ok_or_else(|| "还没有可对比的上一轮结果（至少完成两轮扫描）".to_string())?;
+        .ok_or_else(|| i18n::render(lang, Key::DiffNoBaseline, &[]))?;
     let bytes = match ExportFormat::from_path(&path) {
-        Some(ExportFormat::Csv) => diff.to_csv().map_err(|e| e.to_string())?,
+        Some(ExportFormat::Csv) => diff.to_csv().map_err(|e| e.localized(lang))?,
         Some(other) => {
-            return Err(format!(
-                "差异报告目前只支持 .csv，收到 {}（差异也含在 JSON/HTML 报告的 changes 段里）",
-                other.label_zh()
+            return Err(i18n::render(
+                lang,
+                Key::DiffOnlyCsv,
+                &[&export_format_label(other, lang)],
             ))
         }
-        None => return Err("请用 .csv 扩展名".into()),
+        None => return Err(i18n::render(lang, Key::DiffNeedCsv, &[])),
     };
-    std::fs::write(&path, &bytes).map_err(|e| format!("写入 {path} 失败：{e}"))?;
-    Ok(format!(
-        "已导出差异报告（{} 项）→ {path}",
-        diff.entries.len()
+    std::fs::write(&path, &bytes)
+        .map_err(|e| i18n::render(lang, Key::WriteFailed, &[&path, &e.to_string()]))?;
+    Ok(i18n::render(
+        lang,
+        Key::DiffExportDone,
+        &[&diff.entries.len().to_string(), &path],
     ))
 }
 
@@ -1278,7 +1408,12 @@ pub struct TrendDto {
 
 /// 趋势页数据（M14）。`chart_width` 由前端按容器宽度给定，默认 160。
 #[tauri::command]
-pub fn trend_state(state: State<'_, AppState>, chart_width: Option<u32>) -> Result<TrendDto, String> {
+pub fn trend_state(
+    state: State<'_, AppState>,
+    chart_width: Option<u32>,
+    lang: Option<String>,
+) -> Result<TrendDto, String> {
+    let lang = parse_lang(lang);
     let sh = state.shared.lock().expect("state poisoned");
     let width = chart_width.unwrap_or(160).clamp(60, 640);
     let report = sh.series.report();
@@ -1291,6 +1426,8 @@ pub fn trend_state(state: State<'_, AppState>, chart_width: Option<u32>) -> Resu
                 samples: r.samples,
                 online: r.online,
                 uptime_percent: r.uptime_percent(),
+                // `*_text` 全是纯数值记号（`99.5%` / `12.3` / `-`），
+                // 两种语言下一样，没有散文可翻。
                 uptime_text: r.uptime_text(),
                 avg_rtt_ms: r.avg_rtt_ms,
                 avg_rtt_text: r.avg_rtt_text(),
@@ -1311,7 +1448,7 @@ pub fn trend_state(state: State<'_, AppState>, chart_width: Option<u32>) -> Resu
         span_hours: sh.series.span_ms() as f64 / 3_600_000.0,
         retention_days: sh.series.retention_secs / 86_400,
         empty_hint: if rows.is_empty() {
-            Some("还没有历史数据：先扫描一轮，开持续监控可累积更多轮次。".into())
+            Some(i18n::render(lang, Key::TrendEmptyHint, &[]))
         } else {
             None
         },
@@ -1333,24 +1470,32 @@ pub fn clear_trend(state: State<'_, AppState>) -> Result<usize, String> {
 pub fn export_uptime_report(
     state: State<'_, AppState>,
     path: String,
+    lang: Option<String>,
 ) -> Result<String, String> {
+    let lang = parse_lang(lang);
     let sh = state.shared.lock().expect("state poisoned");
     if sh.series.is_empty() {
-        return Err("还没有历史数据可导出（先完成至少一轮扫描）".into());
+        return Err(i18n::render(lang, Key::TrendNoData, &[]));
     }
     let report = sh.series.report();
+    // 报表内容（CSV 列名 / HTML 标题正文）固定中文，理由见 `build_report`。
     let bytes = if path.to_ascii_lowercase().ends_with(".html") {
         cping_core::report_html(&sh.series, &report).into_bytes()
     } else if path.to_ascii_lowercase().ends_with(".csv") {
         cping_core::report_csv(&report)
     } else {
-        return Err("可用率报表只支持 .csv / .html".into());
+        return Err(i18n::render(lang, Key::UptimeReportOnlyCsvHtml, &[]));
     };
-    std::fs::write(&path, &bytes).map_err(|e| format!("写入 {path} 失败：{e}"))?;
-    Ok(format!(
-        "已导出可用率报表（{} 台主机 · {} 轮）→ {path}",
-        report.len(),
-        sh.series.total_rounds()
+    std::fs::write(&path, &bytes)
+        .map_err(|e| i18n::render(lang, Key::WriteFailed, &[&path, &e.to_string()]))?;
+    Ok(i18n::render(
+        lang,
+        Key::UptimeReportDone,
+        &[
+            &report.len().to_string(),
+            &sh.series.total_rounds().to_string(),
+            &path,
+        ],
     ))
 }
 
@@ -1414,24 +1559,33 @@ pub struct AlertDto {
     pub empty_hint: Option<String>,
 }
 
-fn alert_event_dto(e: &cping_core::AlertEvent) -> AlertEventDto {
+fn alert_event_dto(e: &cping_core::AlertEvent, lang: Lang) -> AlertEventDto {
     AlertEventDto {
         kind: e.kind.key().to_string(),
-        kind_label: e.kind.label_zh().to_string(),
+        kind_label: e.kind.label_in(lang).to_string(),
         severity: e.severity.key().to_string(),
-        severity_label: e.severity.label_zh().to_string(),
+        severity_label: e.severity.label_in(lang).to_string(),
         ip: e.ip.to_string(),
         at_ms: e.at_ms,
         time: cping_core::format_unix_local(e.at_ms / 1000),
         round: e.round,
         value: e.value,
         threshold: e.threshold,
+        // `message` 由核心的 `AlertEngine::evaluate` 组装，而它内部用的是
+        // **不带语言**的 `match_rule`（核心目前只有 `match_rule_in` 这个自由函数，
+        // 引擎没有 `evaluate_in`）。界面**不能**重写它——那等于把告警文案在
+        // GUI 里复刻一遍，两处一旦改措辞就会漂移。
+        //
+        // 而且这条消息还会原样落进告警状态文件（数据契约），本就该恒为一种语言。
+        // 所以它保持原样，是本次改动的**已知边界**；跟着语言变的是外面的
+        // `kind_label` / `severity_label` 与整页的其它文案。
+        // TUI 侧有一模一样的处理与说明（`apps/cping-tui/src/app.rs`）。
         message: e.message.clone(),
     }
 }
 
 /// 把引擎状态折成 DTO。`limit` 限制返回的事件条数（最新的在前）。
-fn alert_dto(sh: &Shared, limit: usize) -> AlertDto {
+fn alert_dto(sh: &Shared, limit: usize, lang: Lang) -> AlertDto {
     let engine = &sh.alerts;
     let rules: Vec<AlertRuleDto> = engine
         .config()
@@ -1439,7 +1593,7 @@ fn alert_dto(sh: &Shared, limit: usize) -> AlertDto {
         .iter()
         .map(|r| AlertRuleDto {
             kind: r.kind.key().to_string(),
-            label: r.kind.label_zh().to_string(),
+            label: r.kind.label_in(lang).to_string(),
             enabled: r.enabled,
             uses_threshold: r.kind.uses_threshold(),
             threshold: r.threshold,
@@ -1450,7 +1604,7 @@ fn alert_dto(sh: &Shared, limit: usize) -> AlertDto {
         .log()
         .iter_recent_first()
         .take(limit)
-        .map(alert_event_dto)
+        .map(|e| alert_event_dto(e, lang))
         .collect();
     let threshold_of = |k: cping_core::AlertKind| {
         engine
@@ -1480,9 +1634,9 @@ fn alert_dto(sh: &Shared, limit: usize) -> AlertDto {
         rules,
         empty_hint: if events.is_empty() {
             Some(if sh.alerts_enabled {
-                "还没有告警。第一轮只建立基线：新增主机规则从第二轮起才生效（否则扫个 /24 会一次刷出 255 条）。".into()
+                i18n::render(lang, Key::AlertEmptyPrimed, &[])
             } else {
-                "告警尚未启用。打开后按默认规则（新增主机 / 离线 / 延迟>200ms / 可用率<90%）监测。".into()
+                i18n::render(lang, Key::AlertEmptyDisabled, &[])
             })
         } else {
             None
@@ -1493,9 +1647,18 @@ fn alert_dto(sh: &Shared, limit: usize) -> AlertDto {
 
 /// 告警页数据。`limit` 默认 200。
 #[tauri::command]
-pub fn alert_state(state: State<'_, AppState>, limit: Option<u32>) -> Result<AlertDto, String> {
+pub fn alert_state(
+    state: State<'_, AppState>,
+    limit: Option<u32>,
+    lang: Option<String>,
+) -> Result<AlertDto, String> {
+    let lang = parse_lang(lang);
     let sh = state.shared.lock().expect("state poisoned");
-    Ok(alert_dto(&sh, limit.unwrap_or(200).clamp(1, 2000) as usize))
+    Ok(alert_dto(
+        &sh,
+        limit.unwrap_or(200).clamp(1, 2000) as usize,
+        lang,
+    ))
 }
 
 /// 开/关告警。**不重置任何状态**：关掉再打开不该丢掉冷却记录与基线。
@@ -1503,19 +1666,26 @@ pub fn alert_state(state: State<'_, AppState>, limit: Option<u32>) -> Result<Ale
 pub fn set_alerts_enabled(
     state: State<'_, AppState>,
     enabled: bool,
+    lang: Option<String>,
 ) -> Result<AlertDto, String> {
+    let lang = parse_lang(lang);
     let mut sh = state.shared.lock().expect("state poisoned");
     sh.alerts_enabled = enabled;
-    Ok(alert_dto(&sh, 200))
+    Ok(alert_dto(&sh, 200, lang))
 }
 
 /// 静音开关。规则照常求值、冷却照常推进，只是不产生事件——
 /// 所以解除静音**不会**补报一堆积压告警（核心有对应回归测试）。
 #[tauri::command]
-pub fn set_alert_muted(state: State<'_, AppState>, muted: bool) -> Result<AlertDto, String> {
+pub fn set_alert_muted(
+    state: State<'_, AppState>,
+    muted: bool,
+    lang: Option<String>,
+) -> Result<AlertDto, String> {
+    let lang = parse_lang(lang);
     let mut sh = state.shared.lock().expect("state poisoned");
     sh.alerts.set_muted(muted);
-    Ok(alert_dto(&sh, 200))
+    Ok(alert_dto(&sh, 200, lang))
 }
 
 /// 改阈值 / 冷却 / 启用哪几类。
@@ -1530,11 +1700,17 @@ pub fn update_alert_rules(
     uptime_pct: Option<u32>,
     cooldown_secs: Option<u64>,
     kinds: Option<Vec<String>>,
+    lang: Option<String>,
 ) -> Result<AlertDto, String> {
+    let lang = parse_lang(lang);
     let mut sh = state.shared.lock().expect("state poisoned");
     if let Some(pct) = uptime_pct {
         if pct > 100 {
-            return Err(format!("可用率阈值必须在 0-100 之间，得到 {pct}"));
+            return Err(i18n::render(
+                lang,
+                Key::AlertBadUptimeThreshold,
+                &[&pct.to_string()],
+            ));
         }
     }
     let mut cfg = sh.alerts.config().clone();
@@ -1564,22 +1740,29 @@ pub fn update_alert_rules(
                 .map(|k| k.key())
                 .collect::<Vec<_>>()
                 .join("/");
-            return Err(format!("告警类别只支持 {known}，得到 {names:?}"));
+            // `names` 是用户/前端传进来的**数据**，用 `{:?}` 原样展示
+            // （它可能是任何字符串，翻不了也不该翻）。
+            return Err(i18n::render(
+                lang,
+                Key::AlertUnsupportedKinds,
+                &[&known, &format!("{names:?}")],
+            ));
         }
         // 空列表 = 关掉全部规则。这是用户的明确意图，照做。
         cfg.with_kinds(&parsed);
     }
     sh.alerts.apply_config(cfg);
-    Ok(alert_dto(&sh, 200))
+    Ok(alert_dto(&sh, 200, lang))
 }
 
 /// 清空告警记录。**只丢事件**：`seen` 基线与冷却记录照旧保留，
 /// 否则下一轮会把整段在线主机当成「新增」重新刷一遍。
 #[tauri::command]
-pub fn clear_alerts(state: State<'_, AppState>) -> Result<AlertDto, String> {
+pub fn clear_alerts(state: State<'_, AppState>, lang: Option<String>) -> Result<AlertDto, String> {
+    let lang = parse_lang(lang);
     let mut sh = state.shared.lock().expect("state poisoned");
     sh.alerts.log_mut().clear();
-    Ok(alert_dto(&sh, 200))
+    Ok(alert_dto(&sh, 200, lang))
 }
 
 /// Android 等无桌面文件对话框的场景：写到平台提供的可写目录并回报完整路径。
@@ -1588,13 +1771,21 @@ pub fn export_to_app_dir(
     app: AppHandle,
     state: State<'_, AppState>,
     format: String,
+    lang: Option<String>,
 ) -> Result<String, String> {
+    let lang = parse_lang(lang);
     let dir: PathBuf = app
         .path()
         .document_dir()
         .or_else(|_| app.path().app_data_dir())
-        .map_err(|e| format!("无法确定保存目录：{e}"))?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建目录 {}：{e}", dir.display()))?;
+        .map_err(|e| i18n::render(lang, Key::CannotDetermineSaveDir, &[&e.to_string()]))?;
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        i18n::render(
+            lang,
+            Key::CannotCreateDir,
+            &[&dir.display().to_string(), &e.to_string()],
+        )
+    })?;
 
     let fmt = match format.as_str() {
         "txt" => ExportFormat::Txt,
@@ -1607,25 +1798,32 @@ pub fn export_to_app_dir(
     let path_str = path.to_string_lossy().to_string();
 
     let sh = state.shared.lock().expect("state poisoned");
-    write_export(&sh, &path_str)?;
+    write_export(&sh, &path_str, lang)?;
     Ok(path_str)
 }
 
-fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
+fn config_path(app: &AppHandle, lang: Lang) -> Result<PathBuf, String> {
     let dir = app
         .path()
         .app_config_dir()
-        .map_err(|e| format!("无法确定配置目录：{e}"))?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建配置目录：{e}"))?;
+        .map_err(|e| i18n::render(lang, Key::CannotDetermineConfigDir, &[&e.to_string()]))?;
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        i18n::render(
+            lang,
+            Key::CannotCreateConfigDir,
+            &[&dir.display().to_string(), &e.to_string()],
+        )
+    })?;
     Ok(dir.join("cping.toml"))
 }
 
 #[tauri::command]
-pub fn load_config(app: AppHandle) -> Result<AppConfigDto, String> {
-    let path = config_path(&app)?;
+pub fn load_config(app: AppHandle, lang: Option<String>) -> Result<AppConfigDto, String> {
+    let lang = parse_lang(lang);
+    let path = config_path(&app, lang)?;
     let mut cfg = if path.exists() {
         let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        AppConfig::from_toml(&text).map_err(|e| e.to_string())?
+        AppConfig::from_toml(&text).map_err(|e| e.localized(lang))?
     } else {
         AppConfig::default()
     };
@@ -1646,11 +1844,17 @@ pub fn save_config(
     app: AppHandle,
     state: State<'_, AppState>,
     config: AppConfigDto,
+    lang: Option<String>,
 ) -> Result<(), String> {
+    let lang = parse_lang(lang);
     let cfg = config_from_dto(config);
-    cfg.validate().map_err(|e| e.to_string())?;
-    let path = config_path(&app)?;
-    std::fs::write(&path, cfg.to_toml()).map_err(|e| format!("写入配置失败：{e}"))?;
+    // 核心的 `AppConfig::validate` 没有 `_in` 变体，所以外层这层框
+    // （`配置无效：…`）按语言渲染，里面的**细节**仍是核心给的中文原话
+    // ——不在这里替它重写：那句话的所有权在核心，复刻一遍必然漂移。
+    cfg.validate().map_err(|e| e.localized(lang))?;
+    let path = config_path(&app, lang)?;
+    std::fs::write(&path, cfg.to_toml())
+        .map_err(|e| i18n::render(lang, Key::WriteConfigFailed, &[&e.to_string()]))?;
 
     let mut sh = state.shared.lock().expect("state poisoned");
     sh.thresholds = cfg.probe.thresholds;
@@ -1677,10 +1881,12 @@ pub fn get_local_addresses() -> Result<Vec<String>, String> {
 pub fn enrich_results(
     app: AppHandle,
     state: State<'_, AppState>,
+    lang: Option<String>,
 ) -> Result<EnrichReportDto, String> {
+    let lang = parse_lang(lang);
     let mut sh = state.shared.lock().expect("state poisoned");
     if sh.results.is_empty() {
-        return Err("尚无扫描结果可补全".into());
+        return Err(i18n::render(lang, Key::EnrichNoResults, &[]));
     }
     // 取出 → 补全 → 按原下标写回：下标即目标的低 8 位，位置绝不能变。
     let mut done = collect_results(&sh);
@@ -1690,11 +1896,12 @@ pub fn enrich_results(
             *slot = Some(r);
         }
     }
-    let autosaved_to = autosave(&app, &sh);
+    let autosaved_to = autosave(&app, &sh, lang);
     Ok(EnrichReportDto::from_report(
         report,
         &sh.results,
         autosaved_to,
+        lang,
     ))
 }
 
@@ -1705,7 +1912,9 @@ pub fn lookup_hostname_for(
     state: State<'_, AppState>,
     index: u16,
     timeout_ms: u64,
+    lang: Option<String>,
 ) -> Result<HostnameLookupDto, String> {
+    let lang = parse_lang(lang);
     let timeout = Duration::from_millis(timeout_ms.clamp(200, 10_000));
 
     // 1) 锁内只取出副本，绝不在持锁状态下做 DNS 查询
@@ -1715,7 +1924,7 @@ pub fn lookup_hostname_for(
             .results
             .get(index as usize)
             .and_then(|s| s.as_ref())
-            .ok_or_else(|| format!("下标 {index} 尚无结果"))?;
+            .ok_or_else(|| i18n::render(lang, Key::IndexNoResult, &[&index.to_string()]))?;
         (r.ip, r.clone(), sh.task_id.clone())
     };
 
@@ -1724,14 +1933,14 @@ pub fn lookup_hostname_for(
     // 2) 写回前确认中间没有开始新一轮扫描，否则会把旧结果写进新任务
     let mut sh = state.shared.lock().expect("state poisoned");
     if sh.task_id != task_id {
-        return Err("扫描任务已切换，本次主机名未写回".into());
+        return Err(i18n::render(lang, Key::TaskSwitched, &[]));
     }
     if let Some(slot) = sh.results.get_mut(index as usize) {
         if let Some(cur) = slot.as_mut() {
             cur.hostname = probe.hostname.clone();
         }
     }
-    autosave(&app, &sh);
+    autosave(&app, &sh, lang);
 
     Ok(HostnameLookupDto {
         index,
@@ -1750,17 +1959,23 @@ const AUTOSAVE_FILE: &str = "cping-autosave.snap";
 /// 「已处理过」的快照指纹。作用：同一份结果只询问一次，避免每次启动都弹框。
 const HANDLED_FILE: &str = "cping-autosave.handled";
 
-fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+fn app_data_dir(app: &AppHandle, lang: Lang) -> Result<PathBuf, String> {
     let dir = app
         .path()
         .app_data_dir()
-        .map_err(|e| format!("无法确定应用数据目录：{e}"))?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建目录 {}：{e}", dir.display()))?;
+        .map_err(|e| i18n::render(lang, Key::CannotDetermineAppDataDir, &[&e.to_string()]))?;
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        i18n::render(
+            lang,
+            Key::CannotCreateDir,
+            &[&dir.display().to_string(), &e.to_string()],
+        )
+    })?;
     Ok(dir)
 }
 
-fn autosave_path(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(app_data_dir(app)?.join(AUTOSAVE_FILE))
+fn autosave_path(app: &AppHandle, lang: Lang) -> Result<PathBuf, String> {
+    Ok(app_data_dir(app, lang)?.join(AUTOSAVE_FILE))
 }
 
 fn default_snapshot_name() -> String {
@@ -1798,47 +2013,60 @@ fn fingerprint(snap: &Snapshot) -> String {
 }
 
 /// 记下「这份快照用户已经处理过」。写失败不致命，最多下次多问一次。
-fn mark_handled(app: &AppHandle, snap: &Snapshot) {
-    if let Ok(path) = app_data_dir(app).map(|d| d.join(HANDLED_FILE)) {
+///
+/// 这里的 `lang` 只用于格式化那个**被丢掉**的错误——保留参数是为了让
+/// 这条链路与其它落盘路径口径一致（错误文案在产生处就按语言定好，
+/// 而不是等某个调用方想起来再翻）。
+fn mark_handled(app: &AppHandle, snap: &Snapshot, lang: Lang) {
+    if let Ok(path) = app_data_dir(app, lang).map(|d| d.join(HANDLED_FILE)) {
         let _ = std::fs::write(path, fingerprint(snap));
     }
 }
 
-fn read_handled(app: &AppHandle) -> Option<String> {
-    let path = app_data_dir(app).ok()?.join(HANDLED_FILE);
+fn read_handled(app: &AppHandle, lang: Lang) -> Option<String> {
+    let path = app_data_dir(app, lang).ok()?.join(HANDLED_FILE);
     std::fs::read_to_string(path)
         .ok()
         .map(|s| s.trim().to_string())
 }
 
-fn write_snapshot_file(path: &FsPath, snap: &Snapshot) -> Result<(), String> {
+fn write_snapshot_file(path: &FsPath, snap: &Snapshot, lang: Lang) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         if !dir.as_os_str().is_empty() {
-            std::fs::create_dir_all(dir)
-                .map_err(|e| format!("无法创建目录 {}：{e}", dir.display()))?;
+            std::fs::create_dir_all(dir).map_err(|e| {
+                i18n::render(
+                    lang,
+                    Key::CannotCreateDir,
+                    &[&dir.display().to_string(), &e.to_string()],
+                )
+            })?;
         }
     }
-    save_to_path(snap, &path.to_string_lossy()).map_err(|e| e.to_string())
+    save_to_path(snap, &path.to_string_lossy()).map_err(|e| e.localized(lang))
 }
 
 /// 自动落盘：无目标或结果为空时不落盘（避免用一份空快照盖掉上次的真实结果）。
-fn autosave(app: &AppHandle, sh: &Shared) -> Option<String> {
+fn autosave(app: &AppHandle, sh: &Shared, lang: Lang) -> Option<String> {
     let snap = build_snapshot(sh);
     if snap.total == 0 || snap.results.is_empty() {
         return None;
     }
-    let path = autosave_path(app).ok()?;
-    write_snapshot_file(&path, &snap).ok()?;
+    let path = autosave_path(app, lang).ok()?;
+    write_snapshot_file(&path, &snap, lang).ok()?;
     Some(path.to_string_lossy().to_string())
 }
 
 /// 供窗口失焦/关闭时调用：只在后台做一次落盘，不改动任何界面状态。
+///
+/// 这里**没有**前端传来的 `lang`（不是用户触发的命令），只能靠环境推断；
+/// 而且本函数的错误本来就被丢弃（自动落盘失败不该打扰用户），
+/// 所以语言只影响那个不会被显示出来的错误串。
 pub fn autosave_on_background(app: &AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
     let Ok(sh) = state.shared.lock() else { return };
-    autosave(app, &sh);
+    autosave(app, &sh, Lang::from_env());
 }
 
 /// 显式保存到指定路径（桌面端走文件对话框）。
@@ -1847,19 +2075,34 @@ pub fn save_snapshot(
     app: AppHandle,
     state: State<'_, AppState>,
     path: String,
+    lang: Option<String>,
+) -> Result<SnapshotSavedDto, String> {
+    save_snapshot_in(&app, &state, &path, parse_lang(lang))
+}
+
+/// [`save_snapshot`] 的实现体。
+///
+/// 拆出来是为了让 [`save_snapshot_to_app_dir`] 复用同一段逻辑时**不必**
+/// 把已经解析好的 `Lang` 再编码成字符串、让下游重新解析一遍——
+/// 那种「往返编码」是两处推断可能不一致的温床。
+fn save_snapshot_in(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    path: &str,
+    lang: Lang,
 ) -> Result<SnapshotSavedDto, String> {
     if path.trim().is_empty() {
-        return Err("未指定保存路径".into());
+        return Err(i18n::render(lang, Key::SnapshotNoPath, &[]));
     }
     let sh = state.shared.lock().expect("state poisoned");
     let snap = build_snapshot(&sh);
     if snap.total == 0 {
-        return Err("尚无扫描结果可保存".into());
+        return Err(i18n::render(lang, Key::SnapshotNoResults, &[]));
     }
-    let target = PathBuf::from(&path);
-    write_snapshot_file(&target, &snap)?;
+    let target = PathBuf::from(path);
+    write_snapshot_file(&target, &snap, lang)?;
     // 显式保存过就说明结果已经落到用户指定的地方，不再提示恢复
-    mark_handled(&app, &snap);
+    mark_handled(app, &snap, lang);
     Ok(SnapshotSavedDto {
         path: target.to_string_lossy().to_string(),
         rows: snap.results.len(),
@@ -1872,35 +2115,37 @@ pub fn save_snapshot(
 pub fn save_snapshot_to_app_dir(
     app: AppHandle,
     state: State<'_, AppState>,
+    lang: Option<String>,
 ) -> Result<SnapshotSavedDto, String> {
+    let lang = parse_lang(lang);
     let dir: PathBuf = app
         .path()
         .document_dir()
         .or_else(|_| app.path().app_data_dir())
-        .map_err(|e| format!("无法确定保存目录：{e}"))?;
-    save_snapshot(
-        app,
-        state,
-        dir.join(default_snapshot_name())
-            .to_string_lossy()
-            .to_string(),
-    )
+        .map_err(|e| i18n::render(lang, Key::CannotDetermineSaveDir, &[&e.to_string()]))?;
+    let target = dir.join(default_snapshot_name());
+    save_snapshot_in(&app, &state, &target.to_string_lossy(), lang)
 }
 
 /// 启动时检查是否存在「上次没处理完」的快照；没有则返回 None。
 #[tauri::command]
-pub fn pending_snapshot(app: AppHandle) -> Result<Option<PendingSnapshotDto>, String> {
-    let path = autosave_path(&app)?;
+pub fn pending_snapshot(
+    app: AppHandle,
+    lang: Option<String>,
+) -> Result<Option<PendingSnapshotDto>, String> {
+    let lang = parse_lang(lang);
+    let path = autosave_path(&app, lang)?;
     if !path.exists() {
         return Ok(None);
     }
     let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
+        // 文件读不出来是**操作系统的原话**（`Access is denied.`），原样透传。
         Err(e) => return Ok(Some(PendingSnapshotDto::unreadable(&path, e.to_string()))),
+        Ok(t) => t,
     };
     match Snapshot::parse(&text) {
         Ok(snap) => {
-            if read_handled(&app).as_deref() == Some(fingerprint(&snap).as_str()) {
+            if read_handled(&app, lang).as_deref() == Some(fingerprint(&snap).as_str()) {
                 return Ok(None);
             }
             Ok(Some(PendingSnapshotDto {
@@ -1915,24 +2160,38 @@ pub fn pending_snapshot(app: AppHandle) -> Result<Option<PendingSnapshotDto>, St
                 cancelled: snap.cancelled,
             }))
         }
-        Err(e) => Ok(Some(PendingSnapshotDto::unreadable(&path, e.to_string()))),
+        Err(e) => Ok(Some(PendingSnapshotDto::unreadable(
+            &path,
+            e.localized(lang),
+        ))),
     }
 }
 
 /// 用户选择「不恢复」。`delete_file=true` 时顺手删掉快照文件。
 #[tauri::command]
-pub fn dismiss_snapshot(app: AppHandle, delete_file: bool) -> Result<(), String> {
-    let path = autosave_path(&app)?;
+pub fn dismiss_snapshot(
+    app: AppHandle,
+    delete_file: bool,
+    lang: Option<String>,
+) -> Result<(), String> {
+    let lang = parse_lang(lang);
+    let path = autosave_path(&app, lang)?;
     if let Ok(text) = std::fs::read_to_string(&path) {
         if let Ok(snap) = Snapshot::parse(&text) {
-            mark_handled(&app, &snap);
+            mark_handled(&app, &snap, lang);
         }
     }
     if delete_file {
         match std::fs::remove_file(&path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("删除快照失败：{e}")),
+            Err(e) => {
+                return Err(i18n::render(
+                    lang,
+                    Key::SnapshotDeleteFailed,
+                    &[&e.to_string()],
+                ))
+            }
         }
     }
     Ok(())
@@ -1944,28 +2203,33 @@ pub fn restore_snapshot(
     app: AppHandle,
     state: State<'_, AppState>,
     path: Option<String>,
+    lang: Option<String>,
 ) -> Result<SnapshotDto, String> {
+    let lang = parse_lang(lang);
     let target = match path.as_deref().map(str::trim) {
         Some(p) if !p.is_empty() => PathBuf::from(p),
-        _ => autosave_path(&app)?,
+        _ => autosave_path(&app, lang)?,
     };
-    let snap = load_from_path(&target.to_string_lossy()).map_err(|e| e.to_string())?;
+    let snap = load_from_path(&target.to_string_lossy()).map_err(|e| e.localized(lang))?;
 
     // 目标列表必须能由「网段 + 当前规则」完整重建，否则下标与 IP 会对不上，
     // 这种快照宁可拒绝恢复，也不能给出一份看似正常的错位数据。
+    //
+    // 占位符只有 `{}` 一种，所以原来 `{:?}` 的引号由调用方先格式化好再传进去
+    // ——两种语言下都保持 `"192.168.1"` 这个带引号的样子。
+    let quoted = format!("{:?}", snap.prefix);
     let parsed = parse_prefix(&snap.prefix)
-        .map_err(|e| format!("快照中的网段 {:?} 无法解析：{e}", snap.prefix))?;
+        .map_err(|e| i18n::render(lang, Key::SnapshotBadPrefix, &[&quoted, &e.localized(lang)]))?;
     // 快照里只存三段网段，所以这里固定用 Standard 规则重建
     let rebuilt = parse_spec(&snap.prefix, TargetRange::Standard)
         .or_else(|_| parse_spec(&parsed.to_string(), TargetRange::Standard))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.localized(lang))?;
     let targets = rebuilt.targets.clone();
     if targets.len() != snap.total {
-        return Err(format!(
-            "快照与当前目标规则不一致（快照记录 {} 个目标，按网段 {:?} 算出 {} 个）",
-            snap.total,
-            snap.prefix,
-            targets.len()
+        return Err(i18n::render(
+            lang,
+            Key::SnapshotTargetMismatch,
+            &[&snap.total.to_string(), &quoted, &targets.len().to_string()],
         ));
     }
     let total = targets.len();
@@ -1974,7 +2238,11 @@ pub fn restore_snapshot(
     for r in snap.results.iter() {
         let idx = r.index as usize;
         if idx >= total {
-            return Err(format!("快照中的下标 {idx} 超出目标范围（0..{total}）"));
+            return Err(i18n::render(
+                lang,
+                Key::SnapshotIndexOutOfRange,
+                &[&idx.to_string(), &total.to_string()],
+            ));
         }
         slots[idx] = Some(r.clone());
     }
@@ -1998,12 +2266,12 @@ pub fn restore_snapshot(
         sh.spec = rebuilt;
         sh.monitor.reset_baseline();
         sh.last_diff = None;
-        snapshot_dto(&sh)
+        snapshot_dto(&sh, lang)
     };
 
     // 恢复后立刻重新落盘：这份数据又回到内存里了，同样经不起进程被杀。
     // 同时记为「已处理」，避免下次启动重复询问同一份结果。
-    mark_handled(&app, &snap);
+    mark_handled(&app, &snap, lang);
     Ok(dto)
 }
 
@@ -2011,6 +2279,11 @@ pub fn restore_snapshot(
 // 时间工具（不引入 chrono，保持依赖面最小）
 // ---------------------------------------------------------------------------
 
+/// 本机地址标签。真实网卡枚举（M5）之前恒为「未知」。
+///
+/// **刻意不本地化**：它只进两个地方——导出报表的 `local_ip` 字段与快照文件，
+/// 两者都是**数据契约**（同一份产物在中英文机器上必须逐字节一致）。
+/// 界面上显示的本机地址走的是 `get_local_addresses` + 前端文案，与此无关。
 fn local_ip_label() -> String {
     "未知".to_string()
 }

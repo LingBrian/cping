@@ -599,7 +599,10 @@ impl Session {
                 i18n::render(
                     self.args.lang,
                     Key::ErrBackendUnavailable,
-                    &[&stats.total.to_string(), cping_core::native_icmp_hint()]
+                    &[
+                        &stats.total.to_string(),
+                        cping_core::native_icmp_hint_in(self.args.lang)
+                    ]
                 )
             );
             return EXIT_BACKEND;
@@ -768,13 +771,16 @@ impl Session {
         } else {
             self.series.uptime_map()
         };
-        let events = engine.evaluate(
+        // 正文按当前语言产出。告警**状态文件里不存 message**（只存
+        // kind / ip / 时间戳），所以这里跟着语言走不会改变落盘内容。
+        let events = engine.evaluate_in(
             now_ms(),
             self.round,
             &self.previous,
             current,
             thresholds,
             &uptime,
+            self.args.lang,
         );
 
         if !self.args.quiet {
@@ -792,9 +798,13 @@ impl Session {
                     )
                 );
                 for e in &events {
-                    // 严重度标签与事件正文都由核心层产出（核心层只提供中文），
-                    // 这里原样透传——见 i18n.rs 顶部「核心层只有中文的摘要」一节。
-                    println!("    [{}] {}", e.severity.label_zh(), e.message);
+                    // 严重度标签与事件正文都来自核心层、按当前语言渲染——
+                    // 界面侧不再持有任何一份自己的译法。
+                    println!(
+                        "    [{}] {}",
+                        e.severity.label_in(self.args.lang),
+                        e.message
+                    );
                 }
             }
             let cd = engine.suppressed_by_cooldown();
@@ -926,13 +936,13 @@ fn print_notify_channels(lang: Lang) {
         i18n::text(lang, Key::ColAvailable),
         i18n::text(lang, Key::ColNote)
     );
-    for (key, ok, note) in cping_core::notifications_available() {
+    for (key, ok, note) in cping_core::notifications_available_in(lang) {
         let yes_no = if ok {
             i18n::text(lang, Key::BoolYes)
         } else {
             i18n::text(lang, Key::BoolNo)
         };
-        // `note` 由核心层给出（目前只有中文），原样透传。
+        // 通道**键**是机器字段（永远不翻译），**说明**由核心层按语言给出。
         println!("{:<10} {:<6} {}", key, yes_no, note);
     }
     println!();
@@ -1012,8 +1022,9 @@ fn print_profiles(args: &Args) -> Result<(), String> {
         } else {
             ""
         };
-        // `ScanProfile::describe()` 由核心层给出（目前只有中文），原样透传。
-        println!("{}{tag}", p.describe());
+        // 模板摘要由核心层按语言渲染（列宽与 `·` 分隔符两种语言共用，
+        // 只有词跟着语言走）。
+        println!("{}{tag}", p.describe_in(lang));
     }
     println!();
     println!("{}", i18n::render(lang, Key::ProfilesUsage, &[path]));
@@ -1146,8 +1157,7 @@ fn print_round(
             &[
                 &round.to_string(),
                 &args.mode.describe(),
-                // `TargetSpec::summary()` 由核心层给出（目前只有中文），原样透传。
-                &spec.summary(),
+                &spec.summary_in(lang),
                 &secs,
                 cancelled,
             ]
@@ -1176,8 +1186,7 @@ fn print_round(
             i18n::render(lang, Key::RoundChanges, &[&changes.len().to_string()])
         );
         for c in changes.iter().take(20) {
-            // `Change::summary()` 由核心层给出（目前只有中文），原样透传。
-            println!("    {}", c.summary());
+            println!("    {}", c.summary_in(lang));
         }
         if changes.len() > 20 {
             let more = (changes.len() - 20).to_string();
@@ -1199,13 +1208,13 @@ fn print_round(
             } else {
                 format!("  {}", r.hostname_or_empty())
             };
-            // 这一行的格式串是纯 ASCII，不该进字典；状态标签由核心层给出
-            // （`ProbeMode::status_label` 目前只有中文），原样透传。
+            // 这一行的格式串是纯 ASCII，不该进字典；状态标签由核心层按
+            // **当前语言**给出（TCP 模式有自己一套词，见 `status_label_in`）。
             println!(
                 "    {:<15} {:>6} ms  {}{}{}",
                 r.ip,
                 rtt,
-                args.mode.status_label(&r.status),
+                args.mode.status_label_in(&r.status, lang),
                 vendor,
                 host
             );
@@ -1223,7 +1232,8 @@ fn print_round(
                 );
                 continue;
             }
-            // 端口列表与设备摘要由核心层给出（目前只有中文），原样透传。
+            // 端口列表是纯技术串（`22(ssh)`），两种语言一致，不进字典；
+            // 设备摘要（散文）按当前语言渲染。
             println!("    {:<15} {}", fp.ip(), fp.open_ports_summary());
             for f in &fp.report.findings {
                 if let Some(banner) = &f.banner {
@@ -1232,7 +1242,7 @@ fn print_round(
             }
         }
         for fp in outcome.fingerprints.iter().filter(|f| f.device.is_some()) {
-            println!("    {} → {}", fp.ip(), fp.device_summary());
+            println!("    {} → {}", fp.ip(), fp.device_summary_in(lang));
         }
     }
 }
@@ -1248,8 +1258,8 @@ fn print_backends(lang: Lang) {
         std::env::consts::OS,
         std::env::consts::ARCH
     );
-    // `summary_zh()` 由核心层给出（目前只有中文），原样透传。
-    println!("{}", reg.summary_zh());
+    // 后端能力摘要由核心层按语言给出——这里**不再自己拼**。
+    println!("{}", reg.summary_in(lang));
     println!();
     println!(
         "{:<8} {:<22} {:<8} {:<14} {}",
@@ -1274,8 +1284,9 @@ fn print_backends(lang: Lang) {
         println!(
             "{:<8} {:<22} {:<8} {:<14} {}",
             caps.id.key(),
-            // 后端名与备注由核心层给出（目前只有中文），原样透传。
-            caps.id.label_zh(),
+            // 后端名与备注都来自核心层、按当前语言渲染——
+            // 界面侧不再持有任何一份自己的译法。
+            caps.id.label_in(lang),
             yes_no,
             family,
             if caps.note.is_empty() {
@@ -1285,7 +1296,7 @@ fn print_backends(lang: Lang) {
                     "—"
                 }
             } else {
-                caps.note
+                caps.note.label_in(lang)
             }
         );
     }
@@ -1371,7 +1382,9 @@ mod tests {
     }
 
     fn m16_dir() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join("cping_cli_m16_dump_test");
+        // 带进程号：同机并行跑两份测试时不共用目录（见 `policy.rs` 同名说明）。
+        let dir =
+            std::env::temp_dir().join(format!("cping_cli_m16_dump_test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }

@@ -284,6 +284,15 @@ impl AlertEvent {
 ///
 /// 不含冷却、不含静音、不读时钟——那些都是 [`AlertEngine`] 的职责。
 pub fn match_rule(rule: &AlertRule, ctx: &AlertContext) -> Option<AlertEvent> {
+    match_rule_in(rule, ctx, Lang::Zh)
+}
+
+/// 按语言产出告警文本的 [`match_rule`]。
+///
+/// **判定逻辑一字不改**，只有 `message` 一项跟着语言走。
+/// 判定与措辞分开是很要紧的：措辞是最常改的东西，判定一旦跟着改，
+/// 「上周还能报出来的告警这周不报了」就没人查得出来。
+pub fn match_rule_in(rule: &AlertRule, ctx: &AlertContext, lang: Lang) -> Option<AlertEvent> {
     if !rule.enabled {
         return None;
     }
@@ -300,28 +309,25 @@ pub fn match_rule(rule: &AlertRule, ctx: &AlertContext) -> Option<AlertEvent> {
                 Severity::Info,
                 None,
                 None,
-                format!("新增主机 {} 上线", ctx.ip),
+                i18n::render(lang, Key::AlertAppeared, &[&ctx.ip.to_string()]),
             )
         }
         AlertKind::Disappeared => {
             if ctx.was_online != Some(true) || online || !ctx.current.status.is_final() {
                 return None;
             }
+            let status = ctx.current.status.label_in(lang);
             (
                 Severity::Critical,
                 None,
                 None,
                 if note.is_empty() {
-                    format!(
-                        "主机 {} 变为离线（{}）",
-                        ctx.ip,
-                        ctx.current.status.label_zh()
-                    )
+                    i18n::render(lang, Key::AlertDisappeared, &[&ctx.ip.to_string(), status])
                 } else {
-                    format!(
-                        "主机 {} 变为离线（{}：{note}）",
-                        ctx.ip,
-                        ctx.current.status.label_zh()
+                    i18n::render(
+                        lang,
+                        Key::AlertDisappearedWithNote,
+                        &[&ctx.ip.to_string(), status, note],
                     )
                 },
             )
@@ -339,9 +345,14 @@ pub fn match_rule(rule: &AlertRule, ctx: &AlertContext) -> Option<AlertEvent> {
                 Severity::Warning,
                 Some(f64::from(rtt)),
                 Some(rule.threshold),
-                format!(
-                    "主机 {} 延迟 {rtt} ms，超过阈值 {} ms",
-                    ctx.ip, rule.threshold
+                i18n::render(
+                    lang,
+                    Key::AlertLatencyAbove,
+                    &[
+                        &ctx.ip.to_string(),
+                        &rtt.to_string(),
+                        &rule.threshold.to_string(),
+                    ],
                 ),
             )
         }
@@ -356,9 +367,14 @@ pub fn match_rule(rule: &AlertRule, ctx: &AlertContext) -> Option<AlertEvent> {
                 Severity::Warning,
                 Some(pct),
                 Some(rule.threshold),
-                format!(
-                    "主机 {} 可用率 {pct:.1}%，低于阈值 {}%",
-                    ctx.ip, rule.threshold
+                i18n::render(
+                    lang,
+                    Key::AlertUptimeBelow,
+                    &[
+                        &ctx.ip.to_string(),
+                        &format!("{pct:.1}"),
+                        &rule.threshold.to_string(),
+                    ],
                 ),
             )
         }
@@ -545,8 +561,35 @@ impl AlertEngine {
         round: u64,
         previous: &[ProbeResult],
         current: &[ProbeResult],
+        thresholds: &Thresholds,
+        uptime: &BTreeMap<IpAddr, f64>,
+    ) -> Vec<AlertEvent> {
+        self.evaluate_in(
+            at_ms,
+            round,
+            previous,
+            current,
+            thresholds,
+            uptime,
+            Lang::Zh,
+        )
+    }
+
+    /// 按语言产出告警正文的 [`Self::evaluate`]。
+    ///
+    /// 判定、冷却、静音、基线推进**一字不改**，只有 `message` 跟着语言走。
+    /// 界面侧以前只能拿到中文正文（因为引擎内部调的是中文版 `match_rule`），
+    /// 于是英文界面下的告警栏一直在露中文——它的成因就在这里，不在界面。
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_in(
+        &mut self,
+        at_ms: u64,
+        round: u64,
+        previous: &[ProbeResult],
+        current: &[ProbeResult],
         _thresholds: &Thresholds,
         uptime: &BTreeMap<IpAddr, f64>,
+        lang: Lang,
     ) -> Vec<AlertEvent> {
         let prev_online: BTreeMap<IpAddr, bool> = previous
             .iter()
@@ -575,7 +618,7 @@ impl AlertEngine {
                 if suppress_appeared && rule.kind == AlertKind::Appeared {
                     continue;
                 }
-                let Some(event) = match_rule(rule, &ctx) else {
+                let Some(event) = match_rule_in(rule, &ctx, lang) else {
                     continue;
                 };
                 // 冷却：同一 (类型, 主机) 在窗口内只报一次
@@ -664,6 +707,11 @@ impl AlertEngine {
     /// 与 M14 的时序文件同一套策略：**版本不符显式拒绝**，坏行只跳过并计数。
     /// 状态文件坏掉的代价只是「冷却窗口重新开始」，远小于拒绝启动。
     pub fn from_text(text: &str) -> Result<(Self, usize), String> {
+        Self::from_text_in(text, Lang::Zh)
+    }
+
+    /// 按语言产出错误文本的 [`Self::from_text`]。
+    pub fn from_text_in(text: &str, lang: Lang) -> Result<(Self, usize), String> {
         let mut engine = Self::new(AlertConfig::default());
         let mut skipped = 0usize;
         let mut lines = text.lines();
@@ -673,19 +721,25 @@ impl AlertEngine {
                 let mut parts = first.split('\t');
                 let sig = parts.next().unwrap_or("");
                 if sig != ALERT_STATE_SIGNATURE {
-                    return Err(format!("不是 CPing 告警状态文件（头 {sig:?}）"));
+                    return Err(i18n::render(
+                        lang,
+                        Key::AlertStateBadSignature,
+                        &[&format!("{sig:?}")],
+                    ));
                 }
                 match parts.next().and_then(|v| v.parse::<u32>().ok()) {
                     Some(v) if v == ALERT_STATE_FORMAT_VERSION => {}
                     Some(v) => {
-                        return Err(format!(
-                        "告警状态文件版本 {v} 与当前 {ALERT_STATE_FORMAT_VERSION} 不符，拒绝读取"
-                    ))
+                        return Err(i18n::render(
+                            lang,
+                            Key::AlertStateBadVersion,
+                            &[&v.to_string(), &ALERT_STATE_FORMAT_VERSION.to_string()],
+                        ))
                     }
-                    None => return Err("告警状态文件缺少版本号".into()),
+                    None => return Err(i18n::text(lang, Key::AlertStateNoVersion).to_string()),
                 }
             }
-            None => return Err("告警状态文件为空".into()),
+            None => return Err(i18n::text(lang, Key::AlertStateEmpty).to_string()),
         }
 
         for line in lines {
@@ -737,12 +791,24 @@ impl AlertEngine {
     }
 
     pub fn save_to_path(&self, path: &str) -> Result<(), String> {
-        std::fs::write(path, self.to_text()).map_err(|e| format!("写入 {path} 失败：{e}"))
+        self.save_to_path_in(path, Lang::Zh)
+    }
+
+    /// 按语言产出错误文本的落盘。
+    pub fn save_to_path_in(&self, path: &str, lang: Lang) -> Result<(), String> {
+        std::fs::write(path, self.to_text())
+            .map_err(|e| i18n::render(lang, Key::AlertStateWriteFailed, &[path, &e.to_string()]))
     }
 
     pub fn load_from_path(path: &str) -> Result<(Self, usize), String> {
-        let text = std::fs::read_to_string(path).map_err(|e| format!("读取 {path} 失败：{e}"))?;
-        Self::from_text(&text)
+        Self::load_from_path_in(path, Lang::Zh)
+    }
+
+    /// 按语言产出错误文本的读取。
+    pub fn load_from_path_in(path: &str, lang: Lang) -> Result<(Self, usize), String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| i18n::render(lang, Key::AlertStateReadFailed, &[path, &e.to_string()]))?;
+        Self::from_text_in(&text, lang)
     }
 }
 

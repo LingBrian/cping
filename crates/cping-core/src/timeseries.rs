@@ -16,6 +16,7 @@
 
 use crate::classify::Thresholds;
 use crate::history::RoundRecord;
+use crate::i18n::{self, Key, Lang};
 use crate::result::{ProbeResult, ProbeStatus};
 use std::collections::BTreeMap;
 use std::net::IpAddr;
@@ -450,6 +451,11 @@ impl TimeSeries {
     /// **坏行只跳过、不报错**：一份历史里的个别坏行不该让整份数据不可用。
     /// 但**版本不符会报错**：格式变了就必须显式拒绝，不能猜着读。
     pub fn from_text(text: &str) -> Result<(Self, usize), String> {
+        Self::from_text_in(text, Lang::Zh)
+    }
+
+    /// 按语言产出错误文本（其余行为与 [`Self::from_text`] 完全一致）。
+    pub fn from_text_in(text: &str, lang: Lang) -> Result<(Self, usize), String> {
         let mut series = TimeSeries::new();
         let mut skipped = 0usize;
         let mut lines = text.lines();
@@ -460,19 +466,25 @@ impl TimeSeries {
                 let mut parts = first.split_whitespace();
                 let sig = parts.next().unwrap_or("");
                 if sig != SERIES_SIGNATURE {
-                    return Err(format!("不是 CPing 时序文件（头 {sig:?}）"));
+                    return Err(i18n::render(
+                        lang,
+                        Key::TsBadSignature,
+                        &[&format!("{sig:?}")],
+                    ));
                 }
                 match parts.next().and_then(|v| v.parse::<u32>().ok()) {
                     Some(v) if v == SERIES_FORMAT_VERSION => {}
                     Some(v) => {
-                        return Err(format!(
-                            "时序文件版本 {v} 与当前 {SERIES_FORMAT_VERSION} 不符，拒绝读取"
+                        return Err(i18n::render(
+                            lang,
+                            Key::TsBadVersion,
+                            &[&v.to_string(), &SERIES_FORMAT_VERSION.to_string()],
                         ))
                     }
-                    None => return Err("时序文件缺少版本号".into()),
+                    None => return Err(i18n::text(lang, Key::TsNoVersion).to_string()),
                 }
             }
-            None => return Err("时序文件为空".into()),
+            None => return Err(i18n::text(lang, Key::TsEmpty).to_string()),
         }
 
         for line in lines {

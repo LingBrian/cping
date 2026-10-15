@@ -57,6 +57,10 @@ pub enum Action {
     ShowAlerts,
     /// M15：切换告警静音（规则照常求值，只是不通知）
     ToggleAlertMute,
+    /// M16：打开扫描模板选择面板（配置里的 `[[profiles]]`）
+    ShowProfiles,
+    /// M17：打开安全策略设置面板（限速 / 目标数上限 / 保留网段）
+    ShowPolicy,
     Char(char),
     Backspace,
 }
@@ -105,6 +109,12 @@ pub fn map_key(key: KeyEvent) -> Action {
         // M15 告警：A 看告警面板，! 切静音
         KeyCode::Char('A') => Action::ShowAlerts,
         KeyCode::Char('!') => Action::ToggleAlertMute,
+        // M16/M17：P 选模板、G 开策略面板。
+        // 为什么是大小写分开的 P/G 而不是别的键：既有键已把常用字母占满，
+        // 「同字母大小写分工」是本界面已有的约定（f/F、s/S、m/M、t/T、u/U）。
+        // 注意 `S` 已经是「导出 TXT」，所以策略面板**不能**用 S。
+        KeyCode::Char('P') => Action::ShowProfiles,
+        KeyCode::Char('G') => Action::ShowPolicy,
         // 确认框用：y 恢复、N 不恢复（小写 n 在确认框里也当「不恢复」，
         // 由 app 层按当前状态解释，见 App::on_key）
         KeyCode::Char('y') | KeyCode::Char('Y') => Action::PromptYes,
@@ -176,6 +186,17 @@ mod tests {
         assert_eq!(press('f'), Action::ToggleFilter);
         assert_eq!(press('q'), Action::Quit);
         assert_eq!(press('?'), Action::ToggleHelp);
+    }
+
+    #[test]
+    fn m16_m17_panel_keys_do_not_take_over_existing_ones() {
+        assert_eq!(press('P'), Action::ShowProfiles);
+        assert_eq!(press('G'), Action::ShowPolicy);
+        // 回归：小写 p 仍是「轮换 TCP 端口」，小写 g 仍是矩阵视图
+        assert_eq!(press('p'), Action::CyclePort);
+        assert_eq!(press('g'), Action::ViewMatrix);
+        // 回归：S 必须仍是导出 TXT——策略面板刻意避开它
+        assert_eq!(press('S'), Action::SaveTxt);
     }
 
     #[test]

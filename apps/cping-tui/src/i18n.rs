@@ -31,12 +31,6 @@
 
 use cping_core::i18n::Lang;
 
-/// TCP 模式下「在线」的展示文本。
-///
-/// 刻意**不进字典**：它是协议层的事实（TCP 握手成功），不是给人读的句子，
-/// 两种语言下必须一模一样——翻译它反而会让人以为 ICMP 可达。
-pub const TCP_OPEN: &str = "TCP-OPEN";
-
 /// TUI 面向用户的消息键。
 ///
 /// 新增变体后必须同时做两件事，否则测试会失败：
@@ -59,59 +53,20 @@ pub enum Key {
     FingerprintTitle,
     AlertsTitle,
     HelpTitle,
-
     // —— 状态栏 ——
     StateScanning,
     StateMonitoring,
     StateIdle,
     MonitorWatch,
-    /// 参数：`状态`、`轮次`、`方式`、`在线`、`超时`、`不可达`、`错误`、
-    /// `变化`、`用时`、`后端`、`本机`、`厂商`、`主机名`、`监控`、`告警`
     StatusDetail,
     ShortcutBar,
     StatusReady,
-
-    // —— 结果分类（表格末列） ——
-    ClassLow,
-    ClassMid,
-    ClassHigh,
-    ClassOffline,
-    ClassError,
-
-    // —— 探测状态（表格状态列） ——
-    StPending,
-    StOnline,
-    StTimeout,
-    StUnreachable,
-    StPermissionDenied,
-    StUnsupported,
-    StError,
-    StTcpTimeout,
-    StTcpClosed,
-
-    // —— 变化类型 ——
-    ChangeAppeared,
-    ChangeDisappeared,
-    ChangeRttClass,
-    ChangeStatus,
-
-    // —— 告警类别 ——
-    AlertKindAppeared,
-    AlertKindDisappeared,
-    AlertKindLatency,
-    AlertKindUptime,
-
     // —— 表格详情行 ——
-    /// 参数：`厂商`
     DetailVendor,
-    /// 参数：`主机名`
     DetailHostname,
-
     // —— 状态栏消息 ——
-    /// 参数：`核心错误`
     StatusPolicyInvalid,
     StatusCantSwitchMode,
-    /// 参数：`探测方式`
     StatusModeSwitched,
     StatusResized,
     StatusInputConfirmed,
@@ -124,16 +79,12 @@ pub enum Key {
     StatusTrendEmpty,
     StatusFingerprintBusy,
     StatusFingerprintNoHosts,
-    /// 参数：`主机数`、`端口数`
     StatusFingerprintRunning,
-    /// 参数：`主机数`、`端口数`、`开放端口数`、`有开放端口的主机数`
     StatusFingerprintDone,
     StatusFingerprintThreadFail,
     FingerprintLinesHeader,
     FingerprintLinesEmpty,
-    /// 参数：`地址`
     FingerprintNoOpenPorts,
-    /// 参数：`跨度`、`时间点数`、`轮数`、`保留天数`
     TrendHeader,
     TrendEmpty1,
     TrendEmpty2,
@@ -143,13 +94,11 @@ pub enum Key {
     TrendColAvgRtt,
     TrendColWorstRtt,
     TrendColJitter,
-    /// 参数：`曲线宽度`
     TrendLegend,
     AlertLinesDisabled1,
     AlertLinesDisabled2,
     AlertStateMuted,
     AlertStateActive,
-    /// 参数：`状态`、`规则数`、`规则名`、`累计告警`、`冷却挡下`
     AlertStatusLine,
     AlertColTime,
     AlertColRound,
@@ -157,95 +106,59 @@ pub enum Key {
     AlertColKind,
     AlertLinesEmpty1,
     AlertLinesEmpty2,
-    /// 参数：`消息`
     AlertLinesLatest,
     AlertNone,
-    /// 参数：`告警数`、`静音后缀`
     AlertNote,
     AlertNoteMutedSuffix,
     StatusMonitorOff,
-    /// 参数：`秒`
     StatusMonitorOn,
-    /// 参数：`秒`
     StatusInterval,
-    /// 参数：`核心错误`
     StatusInvalidInput,
-    /// 参数：`目标摘要`、`探测方式`、`后端`
     StatusScanStarted,
-    /// 参数：`核心错误`
     StatusStartFailed,
     StatusCancelRequested,
-    /// 参数：`轮次`、`目标数`、`在线数`、`用时`、`补全说明`、`变化说明`
     StatusRoundDone,
-    /// 参数：`已完成`、`总数`、`在线数`、`补全说明`
     StatusCancelled,
-    /// 参数：`变化数`、`上线数`、`离线数`
     ChangeNote,
     StatusNoResultsEnrich,
-    /// 参数：`原因`
     EnrichTableFailed,
     EnrichUnknownReason,
-    /// 参数：`邻居表条数`
     EnrichNoFill,
-    /// 参数：`邻居表条数`、`MAC 条数`、`厂商条数`
     EnrichFilled,
     StatusHostnameBusy,
     StatusHostnameNoRow,
     StatusHostnameNoResult,
-    /// 参数：`地址`、`主机名`
     StatusHostnameAlready,
-    /// 参数：`地址`
     StatusHostnameLooking,
-    /// 参数：`地址`
     StatusHostnameNotFound,
     StatusHostnameThreadFail,
     StatusNoResultsToSave,
-    /// 参数：`结果数`、`目标数`、`路径`
     StatusSnapshotSaved,
-    /// 参数：`核心错误`
     StatusSnapshotSaveFailed,
     StatusPendingFound,
     StatusPendingUnreadable,
-    /// 参数：`原因`
     StatusRestoreUnreadable,
-    /// 参数：`核心错误`
     StatusRestoreFailed,
-    /// 参数：`核心错误`
     StatusRestoreBadPrefix,
-    /// 参数：`核心错误`
     StatusRestoreSpecFailed,
-    /// 参数：`快照目标数`、`算出目标数`
     StatusRestoreMismatch,
-    /// 参数：`下标`
     StatusRestoreIndexOob,
-    /// 参数：`扫描时间`、`结果数`、`目标数`、`用时`
     StatusRestored,
-    /// 参数：`路径`
     StatusNoSnapshot,
     StatusDismissed,
-
     // —— 恢复确认框 ——
     RestoreDetected,
-    /// 参数：`原因`
     RestoreUnreadable,
-    /// 参数：`扫描时间`
     RestoreScanTime,
-    /// 参数：`网段`
     RestorePrefix,
-    /// 参数：`结果数`、`目标数`
     RestoreRows,
-    /// 参数：`用时`
     RestoreElapsed,
-    /// 参数：`路径`
     RestoreFile,
     RestoreSayError,
     RestoreSayOk,
-
     // —— 变化事件流 ——
     ChangesEmpty,
-    /// 参数：`轮次`、`地址`、`类型`、`原状态`、`新状态`
     ChangeRow,
-
     // —— 帮助面板 ——
     HelpKeysHeading,
     HelpLineEnter,
@@ -278,12 +191,10 @@ pub enum Key {
     HelpM9T,
     HelpM9P,
     HeadingM12,
-    /// 参数：`能力描述`
     HelpM12Current,
     HelpM12Options,
     HelpM12V6,
     HelpM12Icmp6,
-    /// 参数：`能力摘要`
     HelpM12Local,
     HeadingM8,
     HelpM8M,
@@ -298,70 +209,65 @@ pub enum Key {
     HelpLineHelpHint,
     HelpLineQuit,
     HelpLineCtrlC,
-    /// 参数：`低延迟符号`、`中延迟符号`、`高延迟符号`、`无回应符号`、
-    /// `错误符号`、`未探测符号`
     HelpSymbols,
-
-    // —— 目标摘要（核心只会吐中文，这里按公开字段自己拼一份可本地化的） ——
-    /// 参数：`段标签`、`目标数`
-    SpecSummarySingle,
-    /// 参数：`段数`、`目标数`
-    SpecSummaryMulti,
-    SpecSummaryEmpty,
-
-    // —— 后端能力（同上：核心只吐中文） ——
-    BackendPrivilege,
-    BackendFamiliesBoth,
-    BackendFamiliesV4,
-    BackendFamiliesV6,
-    BackendUnavailable,
-    BackendSummaryIcmpPrivileged,
-    BackendSummaryIcmp,
-    BackendSummaryIcmpUnavailable,
-    BackendSummaryTcp,
-    BackendSummaryIcmp6Missing,
-
     // —— `--help` 文本 ——
     CliHelpTop,
     CliHelpOptions,
     CliHelpBackend,
     CliHelpTargets,
-    /// 参数：`自动落盘文件名`
     CliHelpSnapshot,
     CliHelpWarning,
     CliHelpKeys,
-
     // —— 命令行参数告警（参数名本身不翻译，作为 `{}` 传进来） ——
-    /// 参数：`参数名`、`实际取值`
     ArgIntExpected,
-    /// 参数：`参数名`
     ArgMissingValue,
-    /// 参数：`参数名`、`实际取值`
     ArgLangInvalid,
-    /// 多条命令行告警之间的分隔符（中文用全角分号，英文用半角分号加空格）。
     ArgWarnSeparator,
-
     // —— 告警面板的状态栏提示 ——
     StatusAlertsEnabled,
     StatusAlertsEmpty,
     StatusAlertsPanel,
     StatusAlertsMuted,
     StatusAlertsUnmuted,
-
     // —— 导出与「本机地址」占位文本 ——
     StatusNothingToExport,
     StatusNoDoneResults,
-    /// 参数：`结果数`、`路径`、`字节数`
     StatusExported,
-    /// 参数：`操作系统错误详情`、`路径`
     StatusWriteFailed,
-    /// 参数：`核心错误`
     StatusExportFailed,
     LocalIpUnknown,
     LocalIpUnknownM5,
-
-    /// 帮助面板末尾指向命令行参数的提示（帮助里要能查到 `--lang`）。
     HelpCliFlags,
+    // —— M16 模板选择面板（TUI 自己的界面文案） ——
+    ProfilesTitle,
+    ProfilesHint,
+    ProfilesEmpty,
+    ProfilesNoConfig,
+    ProfilesFilePath,
+    ProfilesCurrentMark,
+    ProfilesCliNote,
+    ProfileNone,
+    ProfileInUse,
+    StatusProfileApplied,
+    StatusProfileBlocked,
+    StatusConfigUnreadable,
+    StatusConfigNotes,
+    // —— M17 安全策略面板（TUI 自己的界面文案） ——
+    PolicyTitle,
+    PolicyHint,
+    PolicyLinesCurrent,
+    PolicyLinesDefaults,
+    PolicyFieldPps,
+    PolicyFieldTargets,
+    PolicyFieldReserved,
+    PolicyFieldLine,
+    PolicyOn,
+    PolicyOff,
+    PolicyWarnReserved,
+    StatusPolicyApplied,
+    // —— 新增面板的帮助行 ——
+    HelpM16P,
+    HelpM17G,
 }
 
 /// 字典条目。
@@ -401,221 +307,212 @@ pub const fn ordinal(key: Key) -> usize {
         Key::StatusDetail => 19,
         Key::ShortcutBar => 20,
         Key::StatusReady => 21,
-        Key::ClassLow => 22,
-        Key::ClassMid => 23,
-        Key::ClassHigh => 24,
-        Key::ClassOffline => 25,
-        Key::ClassError => 26,
-        Key::StPending => 27,
-        Key::StOnline => 28,
-        Key::StTimeout => 29,
-        Key::StUnreachable => 30,
-        Key::StPermissionDenied => 31,
-        Key::StUnsupported => 32,
-        Key::StError => 33,
-        Key::StTcpTimeout => 34,
-        Key::StTcpClosed => 35,
-        Key::ChangeAppeared => 36,
-        Key::ChangeDisappeared => 37,
-        Key::ChangeRttClass => 38,
-        Key::ChangeStatus => 39,
-        Key::AlertKindAppeared => 40,
-        Key::AlertKindDisappeared => 41,
-        Key::AlertKindLatency => 42,
-        Key::AlertKindUptime => 43,
-        Key::DetailVendor => 44,
-        Key::DetailHostname => 45,
-        Key::StatusPolicyInvalid => 46,
-        Key::StatusCantSwitchMode => 47,
-        Key::StatusModeSwitched => 48,
-        Key::StatusResized => 49,
-        Key::StatusInputConfirmed => 50,
-        Key::StatusQuitConfirm => 51,
-        Key::StatusAlreadyRunning => 52,
-        Key::StatusNoTask => 53,
-        Key::StatusEditingPrefix => 54,
-        Key::StatusFilterOn => 55,
-        Key::StatusFilterOff => 56,
-        Key::StatusTrendEmpty => 57,
-        Key::StatusFingerprintBusy => 58,
-        Key::StatusFingerprintNoHosts => 59,
-        Key::StatusFingerprintRunning => 60,
-        Key::StatusFingerprintDone => 61,
-        Key::StatusFingerprintThreadFail => 62,
-        Key::FingerprintLinesHeader => 63,
-        Key::FingerprintLinesEmpty => 64,
-        Key::FingerprintNoOpenPorts => 65,
-        Key::TrendHeader => 66,
-        Key::TrendEmpty1 => 67,
-        Key::TrendEmpty2 => 68,
-        Key::TrendColHost => 69,
-        Key::TrendColUptime => 70,
-        Key::TrendColOnlineTotal => 71,
-        Key::TrendColAvgRtt => 72,
-        Key::TrendColWorstRtt => 73,
-        Key::TrendColJitter => 74,
-        Key::TrendLegend => 75,
-        Key::AlertLinesDisabled1 => 76,
-        Key::AlertLinesDisabled2 => 77,
-        Key::AlertStateMuted => 78,
-        Key::AlertStateActive => 79,
-        Key::AlertStatusLine => 80,
-        Key::AlertColTime => 81,
-        Key::AlertColRound => 82,
-        Key::AlertColHost => 83,
-        Key::AlertColKind => 84,
-        Key::AlertLinesEmpty1 => 85,
-        Key::AlertLinesEmpty2 => 86,
-        Key::AlertLinesLatest => 87,
-        Key::AlertNone => 88,
-        Key::AlertNote => 89,
-        Key::AlertNoteMutedSuffix => 90,
-        Key::StatusMonitorOff => 91,
-        Key::StatusMonitorOn => 92,
-        Key::StatusInterval => 93,
-        Key::StatusInvalidInput => 94,
-        Key::StatusScanStarted => 95,
-        Key::StatusStartFailed => 96,
-        Key::StatusCancelRequested => 97,
-        Key::StatusRoundDone => 98,
-        Key::StatusCancelled => 99,
-        Key::ChangeNote => 100,
-        Key::StatusNoResultsEnrich => 101,
-        Key::EnrichTableFailed => 102,
-        Key::EnrichUnknownReason => 103,
-        Key::EnrichNoFill => 104,
-        Key::EnrichFilled => 105,
-        Key::StatusHostnameBusy => 106,
-        Key::StatusHostnameNoRow => 107,
-        Key::StatusHostnameNoResult => 108,
-        Key::StatusHostnameAlready => 109,
-        Key::StatusHostnameLooking => 110,
-        Key::StatusHostnameNotFound => 111,
-        Key::StatusHostnameThreadFail => 112,
-        Key::StatusNoResultsToSave => 113,
-        Key::StatusSnapshotSaved => 114,
-        Key::StatusSnapshotSaveFailed => 115,
-        Key::StatusPendingFound => 116,
-        Key::StatusPendingUnreadable => 117,
-        Key::StatusRestoreUnreadable => 118,
-        Key::StatusRestoreFailed => 119,
-        Key::StatusRestoreBadPrefix => 120,
-        Key::StatusRestoreSpecFailed => 121,
-        Key::StatusRestoreMismatch => 122,
-        Key::StatusRestoreIndexOob => 123,
-        Key::StatusRestored => 124,
-        Key::StatusNoSnapshot => 125,
-        Key::StatusDismissed => 126,
-        Key::RestoreDetected => 127,
-        Key::RestoreUnreadable => 128,
-        Key::RestoreScanTime => 129,
-        Key::RestorePrefix => 130,
-        Key::RestoreRows => 131,
-        Key::RestoreElapsed => 132,
-        Key::RestoreFile => 133,
-        Key::RestoreSayError => 134,
-        Key::RestoreSayOk => 135,
-        Key::ChangesEmpty => 136,
-        Key::ChangeRow => 137,
-        Key::HelpKeysHeading => 138,
-        Key::HelpLineEnter => 139,
-        Key::HelpLineI => 140,
-        Key::HelpLineEsc => 141,
-        Key::HelpLineGt => 142,
-        Key::HelpLineF => 143,
-        Key::HelpLineSS => 144,
-        Key::HelpLineJH => 145,
-        Key::HelpLineScroll => 146,
-        Key::HeadingM13 => 147,
-        Key::HelpM13F => 148,
-        Key::HelpM13NoteA => 149,
-        Key::HelpM13NoteB => 150,
-        Key::HeadingM14 => 151,
-        Key::HelpM14U => 152,
-        Key::HelpM14NoteA => 153,
-        Key::HelpM14NoteB => 154,
-        Key::HelpM14NoteC => 155,
-        Key::HeadingM15 => 156,
-        Key::HelpM15A => 157,
-        Key::HelpM15B => 158,
-        Key::HelpM15Mute => 159,
-        Key::HelpM15MuteB => 160,
-        Key::HelpM15Note => 161,
-        Key::HelpM15NoteB => 162,
-        Key::HeadingM9 => 163,
-        Key::HelpM9Input => 164,
-        Key::HelpM9InputB => 165,
-        Key::HelpM9T => 166,
-        Key::HelpM9P => 167,
-        Key::HeadingM12 => 168,
-        Key::HelpM12Current => 169,
-        Key::HelpM12Options => 170,
-        Key::HelpM12V6 => 171,
-        Key::HelpM12Icmp6 => 172,
-        Key::HelpM12Local => 173,
-        Key::HeadingM8 => 174,
-        Key::HelpM8M => 175,
-        Key::HelpM8Bracket => 176,
-        Key::HelpM8E => 177,
-        Key::HeadingM7 => 178,
-        Key::HelpM7M => 179,
-        Key::HelpM7N => 180,
-        Key::HelpM7Wl => 181,
-        Key::HelpM7Note => 182,
-        Key::HelpM7NoteB => 183,
-        Key::HelpLineHelpHint => 184,
-        Key::HelpLineQuit => 185,
-        Key::HelpLineCtrlC => 186,
-        Key::HelpSymbols => 187,
-        Key::SpecSummarySingle => 188,
-        Key::SpecSummaryMulti => 189,
-        Key::SpecSummaryEmpty => 190,
-        Key::BackendPrivilege => 191,
-        Key::BackendFamiliesBoth => 192,
-        Key::BackendFamiliesV4 => 193,
-        Key::BackendFamiliesV6 => 194,
-        Key::BackendUnavailable => 195,
-        Key::BackendSummaryIcmpPrivileged => 196,
-        Key::BackendSummaryIcmp => 197,
-        Key::BackendSummaryIcmpUnavailable => 198,
-        Key::BackendSummaryTcp => 199,
-        Key::BackendSummaryIcmp6Missing => 200,
-        Key::CliHelpTop => 201,
-        Key::CliHelpOptions => 202,
-        Key::CliHelpBackend => 203,
-        Key::CliHelpTargets => 204,
-        Key::CliHelpSnapshot => 205,
-        Key::CliHelpWarning => 206,
-        Key::CliHelpKeys => 207,
-        Key::ArgIntExpected => 208,
-        Key::ArgMissingValue => 209,
-        Key::ArgLangInvalid => 210,
-        Key::ArgWarnSeparator => 211,
-        Key::StatusAlertsEnabled => 212,
-        Key::StatusAlertsEmpty => 213,
-        Key::StatusAlertsPanel => 214,
-        Key::StatusAlertsMuted => 215,
-        Key::StatusAlertsUnmuted => 216,
-        Key::StatusNothingToExport => 217,
-        Key::StatusNoDoneResults => 218,
-        Key::StatusExported => 219,
-        Key::StatusWriteFailed => 220,
-        Key::StatusExportFailed => 221,
-        Key::LocalIpUnknown => 222,
-        Key::LocalIpUnknownM5 => 223,
-        Key::HelpCliFlags => 224,
+        Key::DetailVendor => 22,
+        Key::DetailHostname => 23,
+        Key::StatusPolicyInvalid => 24,
+        Key::StatusCantSwitchMode => 25,
+        Key::StatusModeSwitched => 26,
+        Key::StatusResized => 27,
+        Key::StatusInputConfirmed => 28,
+        Key::StatusQuitConfirm => 29,
+        Key::StatusAlreadyRunning => 30,
+        Key::StatusNoTask => 31,
+        Key::StatusEditingPrefix => 32,
+        Key::StatusFilterOn => 33,
+        Key::StatusFilterOff => 34,
+        Key::StatusTrendEmpty => 35,
+        Key::StatusFingerprintBusy => 36,
+        Key::StatusFingerprintNoHosts => 37,
+        Key::StatusFingerprintRunning => 38,
+        Key::StatusFingerprintDone => 39,
+        Key::StatusFingerprintThreadFail => 40,
+        Key::FingerprintLinesHeader => 41,
+        Key::FingerprintLinesEmpty => 42,
+        Key::FingerprintNoOpenPorts => 43,
+        Key::TrendHeader => 44,
+        Key::TrendEmpty1 => 45,
+        Key::TrendEmpty2 => 46,
+        Key::TrendColHost => 47,
+        Key::TrendColUptime => 48,
+        Key::TrendColOnlineTotal => 49,
+        Key::TrendColAvgRtt => 50,
+        Key::TrendColWorstRtt => 51,
+        Key::TrendColJitter => 52,
+        Key::TrendLegend => 53,
+        Key::AlertLinesDisabled1 => 54,
+        Key::AlertLinesDisabled2 => 55,
+        Key::AlertStateMuted => 56,
+        Key::AlertStateActive => 57,
+        Key::AlertStatusLine => 58,
+        Key::AlertColTime => 59,
+        Key::AlertColRound => 60,
+        Key::AlertColHost => 61,
+        Key::AlertColKind => 62,
+        Key::AlertLinesEmpty1 => 63,
+        Key::AlertLinesEmpty2 => 64,
+        Key::AlertLinesLatest => 65,
+        Key::AlertNone => 66,
+        Key::AlertNote => 67,
+        Key::AlertNoteMutedSuffix => 68,
+        Key::StatusMonitorOff => 69,
+        Key::StatusMonitorOn => 70,
+        Key::StatusInterval => 71,
+        Key::StatusInvalidInput => 72,
+        Key::StatusScanStarted => 73,
+        Key::StatusStartFailed => 74,
+        Key::StatusCancelRequested => 75,
+        Key::StatusRoundDone => 76,
+        Key::StatusCancelled => 77,
+        Key::ChangeNote => 78,
+        Key::StatusNoResultsEnrich => 79,
+        Key::EnrichTableFailed => 80,
+        Key::EnrichUnknownReason => 81,
+        Key::EnrichNoFill => 82,
+        Key::EnrichFilled => 83,
+        Key::StatusHostnameBusy => 84,
+        Key::StatusHostnameNoRow => 85,
+        Key::StatusHostnameNoResult => 86,
+        Key::StatusHostnameAlready => 87,
+        Key::StatusHostnameLooking => 88,
+        Key::StatusHostnameNotFound => 89,
+        Key::StatusHostnameThreadFail => 90,
+        Key::StatusNoResultsToSave => 91,
+        Key::StatusSnapshotSaved => 92,
+        Key::StatusSnapshotSaveFailed => 93,
+        Key::StatusPendingFound => 94,
+        Key::StatusPendingUnreadable => 95,
+        Key::StatusRestoreUnreadable => 96,
+        Key::StatusRestoreFailed => 97,
+        Key::StatusRestoreBadPrefix => 98,
+        Key::StatusRestoreSpecFailed => 99,
+        Key::StatusRestoreMismatch => 100,
+        Key::StatusRestoreIndexOob => 101,
+        Key::StatusRestored => 102,
+        Key::StatusNoSnapshot => 103,
+        Key::StatusDismissed => 104,
+        Key::RestoreDetected => 105,
+        Key::RestoreUnreadable => 106,
+        Key::RestoreScanTime => 107,
+        Key::RestorePrefix => 108,
+        Key::RestoreRows => 109,
+        Key::RestoreElapsed => 110,
+        Key::RestoreFile => 111,
+        Key::RestoreSayError => 112,
+        Key::RestoreSayOk => 113,
+        Key::ChangesEmpty => 114,
+        Key::ChangeRow => 115,
+        Key::HelpKeysHeading => 116,
+        Key::HelpLineEnter => 117,
+        Key::HelpLineI => 118,
+        Key::HelpLineEsc => 119,
+        Key::HelpLineGt => 120,
+        Key::HelpLineF => 121,
+        Key::HelpLineSS => 122,
+        Key::HelpLineJH => 123,
+        Key::HelpLineScroll => 124,
+        Key::HeadingM13 => 125,
+        Key::HelpM13F => 126,
+        Key::HelpM13NoteA => 127,
+        Key::HelpM13NoteB => 128,
+        Key::HeadingM14 => 129,
+        Key::HelpM14U => 130,
+        Key::HelpM14NoteA => 131,
+        Key::HelpM14NoteB => 132,
+        Key::HelpM14NoteC => 133,
+        Key::HeadingM15 => 134,
+        Key::HelpM15A => 135,
+        Key::HelpM15B => 136,
+        Key::HelpM15Mute => 137,
+        Key::HelpM15MuteB => 138,
+        Key::HelpM15Note => 139,
+        Key::HelpM15NoteB => 140,
+        Key::HeadingM9 => 141,
+        Key::HelpM9Input => 142,
+        Key::HelpM9InputB => 143,
+        Key::HelpM9T => 144,
+        Key::HelpM9P => 145,
+        Key::HeadingM12 => 146,
+        Key::HelpM12Current => 147,
+        Key::HelpM12Options => 148,
+        Key::HelpM12V6 => 149,
+        Key::HelpM12Icmp6 => 150,
+        Key::HelpM12Local => 151,
+        Key::HeadingM8 => 152,
+        Key::HelpM8M => 153,
+        Key::HelpM8Bracket => 154,
+        Key::HelpM8E => 155,
+        Key::HeadingM7 => 156,
+        Key::HelpM7M => 157,
+        Key::HelpM7N => 158,
+        Key::HelpM7Wl => 159,
+        Key::HelpM7Note => 160,
+        Key::HelpM7NoteB => 161,
+        Key::HelpLineHelpHint => 162,
+        Key::HelpLineQuit => 163,
+        Key::HelpLineCtrlC => 164,
+        Key::HelpSymbols => 165,
+        Key::CliHelpTop => 166,
+        Key::CliHelpOptions => 167,
+        Key::CliHelpBackend => 168,
+        Key::CliHelpTargets => 169,
+        Key::CliHelpSnapshot => 170,
+        Key::CliHelpWarning => 171,
+        Key::CliHelpKeys => 172,
+        Key::ArgIntExpected => 173,
+        Key::ArgMissingValue => 174,
+        Key::ArgLangInvalid => 175,
+        Key::ArgWarnSeparator => 176,
+        Key::StatusAlertsEnabled => 177,
+        Key::StatusAlertsEmpty => 178,
+        Key::StatusAlertsPanel => 179,
+        Key::StatusAlertsMuted => 180,
+        Key::StatusAlertsUnmuted => 181,
+        Key::StatusNothingToExport => 182,
+        Key::StatusNoDoneResults => 183,
+        Key::StatusExported => 184,
+        Key::StatusWriteFailed => 185,
+        Key::StatusExportFailed => 186,
+        Key::LocalIpUnknown => 187,
+        Key::LocalIpUnknownM5 => 188,
+        Key::HelpCliFlags => 189,
+        Key::ProfilesTitle => 190,
+        Key::ProfilesHint => 191,
+        Key::ProfilesEmpty => 192,
+        Key::ProfilesNoConfig => 193,
+        Key::ProfilesFilePath => 194,
+        Key::ProfilesCurrentMark => 195,
+        Key::ProfilesCliNote => 196,
+        Key::ProfileNone => 197,
+        Key::ProfileInUse => 198,
+        Key::StatusProfileApplied => 199,
+        Key::StatusProfileBlocked => 200,
+        Key::StatusConfigUnreadable => 201,
+        Key::StatusConfigNotes => 202,
+        Key::PolicyTitle => 203,
+        Key::PolicyHint => 204,
+        Key::PolicyLinesCurrent => 205,
+        Key::PolicyLinesDefaults => 206,
+        Key::PolicyFieldPps => 207,
+        Key::PolicyFieldTargets => 208,
+        Key::PolicyFieldReserved => 209,
+        Key::PolicyFieldLine => 210,
+        Key::PolicyOn => 211,
+        Key::PolicyOff => 212,
+        Key::PolicyWarnReserved => 213,
+        Key::StatusPolicyApplied => 214,
+        Key::HelpM16P => 215,
+        Key::HelpM17G => 216,
     }
 }
 
 /// 字典里的键总数。
-pub const KEY_COUNT: usize = 225;
+pub const KEY_COUNT: usize = 217;
 
 /// 全部条目。顺序必须与 [`ordinal`] 一致（有测试守着）。
 ///
 /// 条目里的 `{}` 是顺序占位符，个数与顺序必须中英一致。不引入具名占位符
 /// 是为了让两种语言的语序可以完全不同（与核心层同一理由）。
 pub static TABLE: &[Entry] = &[
-    // —— 标题与区块 ——
     Entry {
         key: Key::AppTitle,
         zh: " C网群PING工具 · 终端版 ",
@@ -691,7 +588,6 @@ pub static TABLE: &[Entry] = &[
         zh: " 帮助（任意键关闭） ",
         en: " Help (any key closes) ",
     },
-    // —— 状态栏 ——
     Entry {
         key: Key::StateScanning,
         zh: "探测中",
@@ -719,129 +615,14 @@ pub static TABLE: &[Entry] = &[
     },
     Entry {
         key: Key::ShortcutBar,
-        zh: "Enter 开始 · i 编辑 · g/t 视图 · f 过滤 · s/S/j/H 导出 · m 补厂商 · n 查主机名 · F 指纹 · U 趋势 · A 告警 · ! 静音 · w/l 快照 · M 监控 · e 变化 · T/p 方式 · ? 帮助 · q 退出",
-        en: "Enter start · i edit · g/t view · f filter · s/S/j/H export · m vendor · n hostname · F fingerprint · U trend · A alerts · ! mute · w/l snapshot · M monitor · e changes · T/p mode · ? help · q quit",
+        zh: "Enter 开始 · i 编辑 · g/t 视图 · f 过滤 · s/S/j/H 导出 · m 补厂商 · n 查主机名 · F 指纹 · U 趋势 · A 告警 · ! 静音 · w/l 快照 · M 监控 · e 变化 · T/p 方式 · P 模板 · G 策略 · ? 帮助 · q 退出",
+        en: "Enter start · i edit · g/t view · f filter · s/S/j/H export · m vendor · n hostname · F fingerprint · U trend · A alerts · ! mute · w/l snapshot · M monitor · e changes · T/p mode · P profiles · G policy · ? help · q quit",
     },
     Entry {
         key: Key::StatusReady,
         zh: "就绪。按 i 编辑网段，Enter 开始探测，M 开监控，? 查看帮助。",
         en: "Ready. Press i to edit the target, Enter to scan, M to monitor, ? for help.",
     },
-    // —— 结果分类 ——
-    Entry {
-        key: Key::ClassLow,
-        zh: "低延迟",
-        en: "low",
-    },
-    Entry {
-        key: Key::ClassMid,
-        zh: "中延迟",
-        en: "mid",
-    },
-    Entry {
-        key: Key::ClassHigh,
-        zh: "高延迟",
-        en: "high",
-    },
-    Entry {
-        key: Key::ClassOffline,
-        zh: "无回应",
-        en: "no reply",
-    },
-    Entry {
-        key: Key::ClassError,
-        zh: "错误",
-        en: "error",
-    },
-    // —— 探测状态 ——
-    Entry {
-        key: Key::StPending,
-        zh: "等待",
-        en: "waiting",
-    },
-    Entry {
-        key: Key::StOnline,
-        zh: "在线",
-        en: "online",
-    },
-    Entry {
-        key: Key::StTimeout,
-        zh: "超时",
-        en: "timeout",
-    },
-    Entry {
-        key: Key::StUnreachable,
-        zh: "不可达",
-        en: "unreachable",
-    },
-    Entry {
-        key: Key::StPermissionDenied,
-        zh: "权限不足",
-        en: "permission denied",
-    },
-    Entry {
-        key: Key::StUnsupported,
-        zh: "不支持",
-        en: "unsupported",
-    },
-    Entry {
-        key: Key::StError,
-        zh: "错误",
-        en: "error",
-    },
-    Entry {
-        key: Key::StTcpTimeout,
-        zh: "TCP-超时",
-        en: "TCP-timeout",
-    },
-    Entry {
-        key: Key::StTcpClosed,
-        zh: "TCP-关闭",
-        en: "TCP-closed",
-    },
-    // —— 变化类型 ——
-    Entry {
-        key: Key::ChangeAppeared,
-        zh: "上线",
-        en: "came up",
-    },
-    Entry {
-        key: Key::ChangeDisappeared,
-        zh: "离线",
-        en: "went down",
-    },
-    Entry {
-        key: Key::ChangeRttClass,
-        zh: "延迟变化",
-        en: "latency tier",
-    },
-    Entry {
-        key: Key::ChangeStatus,
-        zh: "状态变化",
-        en: "status changed",
-    },
-    // —— 告警类别 ——
-    Entry {
-        key: Key::AlertKindAppeared,
-        zh: "新增主机",
-        en: "new host",
-    },
-    Entry {
-        key: Key::AlertKindDisappeared,
-        zh: "主机离线",
-        en: "host offline",
-    },
-    Entry {
-        key: Key::AlertKindLatency,
-        zh: "延迟超阈",
-        en: "latency over threshold",
-    },
-    Entry {
-        key: Key::AlertKindUptime,
-        zh: "可用率偏低",
-        en: "uptime below threshold",
-    },
-    // —— 表格详情行 ——
     Entry {
         key: Key::DetailVendor,
         zh: "厂商 {}",
@@ -852,7 +633,6 @@ pub static TABLE: &[Entry] = &[
         zh: "主机 {}",
         en: "host {}",
     },
-    // —— 状态栏消息 ——
     Entry {
         key: Key::StatusPolicyInvalid,
         zh: "安全策略无效：{}",
@@ -1258,7 +1038,6 @@ pub static TABLE: &[Entry] = &[
         zh: "已忽略上次的扫描结果",
         en: "previous scan results ignored",
     },
-    // —— 恢复确认框 ——
     Entry {
         key: Key::RestoreDetected,
         zh: "检测到上次未处理完的扫描结果。",
@@ -1304,7 +1083,6 @@ pub static TABLE: &[Entry] = &[
         zh: "  y 恢复结果    n / Esc 不使用（默认不恢复）",
         en: "  y restore     n / Esc discard (default: do not restore)",
     },
-    // —— 变化事件流 ——
     Entry {
         key: Key::ChangesEmpty,
         zh: "还没有变化记录。\n\n用 M 开启持续监控后，每轮扫描都会与上一轮比对：\n · 上线 / 离线\n · 延迟档位变化（<50ms / 50–100ms / >100ms）\n · 非在线状态之间的变化\n\n首轮只建立基线，不产生变化事件。",
@@ -1315,7 +1093,6 @@ pub static TABLE: &[Entry] = &[
         zh: "  第{}轮  {} {} {} → {}",
         en: "  round {}  {} {} {} -> {}",
     },
-    // —— 帮助面板 ——
     Entry {
         key: Key::HelpKeysHeading,
         zh: "快捷键",
@@ -1566,74 +1343,6 @@ pub static TABLE: &[Entry] = &[
         zh: "  符号  {} 低延迟  {} 中延迟  {} 高延迟  {} 无回应  {} 错误  {} 未探测",
         en: "  symbols  {} low  {} mid  {} high  {} no reply  {} error  {} not probed",
     },
-    // —— 目标摘要 ——
-    Entry {
-        key: Key::SpecSummarySingle,
-        zh: "{}（{} 个）",
-        en: "{} ({} targets)",
-    },
-    Entry {
-        key: Key::SpecSummaryMulti,
-        zh: "{} 个网段 / {} 个目标",
-        en: "{} segments / {} targets",
-    },
-    Entry {
-        key: Key::SpecSummaryEmpty,
-        zh: "尚未设置目标",
-        en: "no targets set",
-    },
-    // —— 后端能力 ——
-    Entry {
-        key: Key::BackendPrivilege,
-        zh: "需要权限",
-        en: "needs privilege",
-    },
-    Entry {
-        key: Key::BackendFamiliesBoth,
-        zh: "IPv4 与 IPv6 均可",
-        en: "IPv4 + IPv6",
-    },
-    Entry {
-        key: Key::BackendFamiliesV4,
-        zh: "仅 IPv4",
-        en: "IPv4 only",
-    },
-    Entry {
-        key: Key::BackendFamiliesV6,
-        zh: "仅 IPv6",
-        en: "IPv6 only",
-    },
-    Entry {
-        key: Key::BackendUnavailable,
-        zh: "不可用",
-        en: "unavailable",
-    },
-    Entry {
-        key: Key::BackendSummaryIcmpPrivileged,
-        zh: "ICMP 可用（需要原始套接字权限，仅 IPv4）",
-        en: "ICMP available (needs raw-socket privileges, IPv4 only)",
-    },
-    Entry {
-        key: Key::BackendSummaryIcmp,
-        zh: "ICMP 可用（仅 IPv4）",
-        en: "ICMP available (IPv4 only)",
-    },
-    Entry {
-        key: Key::BackendSummaryIcmpUnavailable,
-        zh: "ICMP 不可用",
-        en: "ICMP unavailable",
-    },
-    Entry {
-        key: Key::BackendSummaryTcp,
-        zh: "TCP 可用（IPv4 + IPv6）",
-        en: "TCP available (IPv4 + IPv6)",
-    },
-    Entry {
-        key: Key::BackendSummaryIcmp6Missing,
-        zh: "ICMPv6 未实装，IPv6 目标请用 TCP",
-        en: "ICMPv6 is not implemented; use TCP for IPv6 targets",
-    },
-    // —— `--help` 文本 ——
     Entry {
         key: Key::CliHelpTop,
         zh: "cping-tui —— C网群PING工具（终端版）\n\n用法:\n  cping-tui [选项]",
@@ -1641,8 +1350,8 @@ pub static TABLE: &[Entry] = &[
     },
     Entry {
         key: Key::CliHelpOptions,
-        zh: "选项:\n  --prefix <前三段>   初始网段前缀，例如 192.168.1\n  --no-color          禁用颜色（无颜色终端下自动降级为符号标识）\n  --hide-offline      启动时即隐藏不在线目标\n  --view <matrix|table>  初始视图\n  --mock              使用模拟探测数据（演示 / UI 调试，不发真实报文）\n  --snapshot-dir <目录>  结果快照的存放目录（默认当前目录）\n  --alert             启动即启用告警（也可在界面里按 A 就地启用）\n  --alert-kinds <列表>  启用哪几类：appeared,disappeared,latency,uptime\n  --alert-latency <ms>  延迟阈值（默认 200；严格大于才报）\n  --alert-uptime <百分比> 可用率阈值（默认 90；严格小于才报）\n  --alert-cooldown <秒> 同一主机同一类告警的冷却窗口（默认 300）\n  --mute-alerts       启动即静音（规则照常求值，只是不通知）\n  --max-pps <n>       全局速率上限（探测包/秒，默认 500；写 0 = 不限速）\n  --max-targets <n>   目标数上限（只能比结构上限 65536 更严）\n  --allow-reserved    放行组播 / 保留段等特殊网段（默认拒绝）\n  --lang <zh|en>      界面语言（默认按环境推断：CPING_LANG → LC_ALL → LC_MESSAGES → LANG）\n  --help              显示本帮助",
-        en: "Options:\n  --prefix <a.b.c>    initial network prefix, e.g. 192.168.1\n  --no-color          disable colour (terminals without colour fall back to symbols)\n  --hide-offline      start with offline targets hidden\n  --view <matrix|table>  initial view\n  --mock              use simulated probe data (demo / UI debugging, sends no packets)\n  --snapshot-dir <dir>    directory for result snapshots (default: current directory)\n  --alert             enable alerts at startup (or press A in the UI)\n  --alert-kinds <list>    which kinds to enable: appeared,disappeared,latency,uptime\n  --alert-latency <ms>    latency threshold (default 200; strictly greater than)\n  --alert-uptime <pct>    uptime threshold (default 90; strictly less than)\n  --alert-cooldown <sec>  per-host, per-kind alert cooldown (default 300)\n  --mute-alerts       start muted (rules still evaluate, notifications stop)\n  --max-pps <n>       global rate limit (probe packets/s, default 500; 0 = unlimited)\n  --max-targets <n>   target limit (can only be tighter than the structural limit 65536)\n  --allow-reserved    allow multicast / reserved ranges (denied by default)\n  --lang <zh|en>      UI language (default: inferred from CPING_LANG -> LC_ALL -> LC_MESSAGES -> LANG)\n  --help              show this help",
+        zh: "选项:\n  --prefix <前三段>   初始网段前缀，例如 192.168.1\n  --no-color          禁用颜色（无颜色终端下自动降级为符号标识）\n  --hide-offline      启动时即隐藏不在线目标\n  --view <matrix|table>  初始视图\n  --mock              使用模拟探测数据（演示 / UI 调试，不发真实报文）\n  --snapshot-dir <目录>  结果快照的存放目录（默认当前目录）\n  --config <文件>     启动时加载的配置文件（默认当前目录的 cping.toml；模板只填空缺）\n  --alert             启动即启用告警（也可在界面里按 A 就地启用）\n  --alert-kinds <列表>  启用哪几类：appeared,disappeared,latency,uptime\n  --alert-latency <ms>  延迟阈值（默认 200；严格大于才报）\n  --alert-uptime <百分比> 可用率阈值（默认 90；严格小于才报）\n  --alert-cooldown <秒> 同一主机同一类告警的冷却窗口（默认 300）\n  --mute-alerts       启动即静音（规则照常求值，只是不通知）\n  --max-pps <n>       全局速率上限（探测包/秒，默认 500；写 0 = 不限速）\n  --max-targets <n>   目标数上限（只能比结构上限 65536 更严）\n  --allow-reserved    放行组播 / 保留段等特殊网段（默认拒绝）\n  --lang <zh|en>      界面语言（默认按环境推断：CPING_LANG → LC_ALL → LC_MESSAGES → LANG）\n  --help              显示本帮助",
+        en: "Options:\n  --prefix <a.b.c>    initial network prefix, e.g. 192.168.1\n  --no-color          disable colour (terminals without colour fall back to symbols)\n  --hide-offline      start with offline targets hidden\n  --view <matrix|table>  initial view\n  --mock              use simulated probe data (demo / UI debugging, sends no packets)\n  --snapshot-dir <dir>    directory for result snapshots (default: current directory)\n  --config <file>     config file loaded at startup (default: cping.toml in the current directory; profiles only fill gaps)\n  --alert             enable alerts at startup (or press A in the UI)\n  --alert-kinds <list>    which kinds to enable: appeared,disappeared,latency,uptime\n  --alert-latency <ms>    latency threshold (default 200; strictly greater than)\n  --alert-uptime <pct>    uptime threshold (default 90; strictly less than)\n  --alert-cooldown <sec>  per-host, per-kind alert cooldown (default 300)\n  --mute-alerts       start muted (rules still evaluate, notifications stop)\n  --max-pps <n>       global rate limit (probe packets/s, default 500; 0 = unlimited)\n  --max-targets <n>   target limit (can only be tighter than the structural limit 65536)\n  --allow-reserved    allow multicast / reserved ranges (denied by default)\n  --lang <zh|en>      UI language (default: inferred from CPING_LANG -> LC_ALL -> LC_MESSAGES -> LANG)\n  --help              show this help",
     },
     Entry {
         key: Key::CliHelpBackend,
@@ -1666,10 +1375,9 @@ pub static TABLE: &[Entry] = &[
     },
     Entry {
         key: Key::CliHelpKeys,
-        zh: "交互快捷键:\n  Enter   开始探测（编辑输入框时表示确认）\n  i       进入/退出前缀编辑\n  Esc     取消当前探测 / 关闭弹窗\n  g       矩阵视图\n  t       表格视图\n  f       过滤不在线目标\n  s       导出 CSV\n  S       导出 TXT\n  j       导出 JSON\n  H       导出 HTML\n  m       读邻居表回填 MAC / 厂商\n  n       反查当前行的主机名\n  F       端口指纹\n  U       可用率趋势\n  A       告警记录（首次按即启用告警）\n  !       告警静音开关\n  w       保存快照\n  l       从快照恢复\n  ↑/↓ PgUp/PgDn  表格滚动\n  ?或F1   帮助\n  q       退出（运行中需再按一次确认）\n  Ctrl+C  退出（退出前恢复终端）",
-        en: "Interaction keys:\n  Enter   start scanning (confirms input while editing)\n  i       enter/leave prefix editing\n  Esc     cancel the current scan / close a popup\n  g       matrix view\n  t       table view\n  f       hide offline targets\n  s       export CSV\n  S       export TXT\n  j       export JSON\n  H       export HTML\n  m       fill MAC / vendor from the neighbor table\n  n       reverse-lookup the hostname of the current row\n  F       port fingerprint\n  U       uptime trend\n  A       alerts (the first press enables them)\n  !       alert mute toggle\n  w       save snapshot\n  l       restore from snapshot\n  ↑/↓ PgUp/PgDn  scroll the table\n  ? or F1 help\n  q       quit (press again to confirm while running)\n  Ctrl+C  quit (restores the terminal first)",
+        zh: "交互快捷键:\n  Enter   开始探测（编辑输入框时表示确认）\n  i       进入/退出前缀编辑\n  Esc     取消当前探测 / 关闭弹窗\n  g       矩阵视图\n  t       表格视图\n  f       过滤不在线目标\n  s       导出 CSV\n  S       导出 TXT\n  j       导出 JSON\n  H       导出 HTML\n  m       读邻居表回填 MAC / 厂商\n  n       反查当前行的主机名\n  F       端口指纹\n  U       可用率趋势\n  A       告警记录（首次按即启用告警）\n  !       告警静音开关\n  P       选择扫描模板（配置里的 [[profiles]]）\n  G       安全策略设置（限速 / 目标数上限 / 保留网段）\n  w       保存快照\n  l       从快照恢复\n  ↑/↓ PgUp/PgDn  表格滚动\n  ?或F1   帮助\n  q       退出（运行中需再按一次确认）\n  Ctrl+C  退出（退出前恢复终端）",
+        en: "Interaction keys:\n  Enter   start scanning (confirms input while editing)\n  i       enter/leave prefix editing\n  Esc     cancel the current scan / close a popup\n  g       matrix view\n  t       table view\n  f       hide offline targets\n  s       export CSV\n  S       export TXT\n  j       export JSON\n  H       export HTML\n  m       fill MAC / vendor from the neighbor table\n  n       reverse-lookup the hostname of the current row\n  F       port fingerprint\n  U       uptime trend\n  A       alerts (the first press enables them)\n  !       alert mute toggle\n  P       pick a scan profile ([[profiles]] in the config)\n  G       safety policy (rate limit / target cap / reserved ranges)\n  w       save snapshot\n  l       restore from snapshot\n  ↑/↓ PgUp/PgDn  scroll the table\n  ? or F1 help\n  q       quit (press again to confirm while running)\n  Ctrl+C  quit (restores the terminal first)",
     },
-    // —— 命令行参数告警 ——
     Entry {
         key: Key::ArgIntExpected,
         zh: "{} 需要一个非负整数，得到 {}",
@@ -1690,7 +1398,6 @@ pub static TABLE: &[Entry] = &[
         zh: "；",
         en: "; ",
     },
-    // —— 告警面板的状态栏提示 ——
     Entry {
         key: Key::StatusAlertsEnabled,
         zh: "告警面板：已启用（默认阈值）。! 切静音，再按 A 关闭面板",
@@ -1716,7 +1423,6 @@ pub static TABLE: &[Entry] = &[
         zh: "告警已解除静音",
         en: "alerts unmuted",
     },
-    // —— 导出与「本机地址」占位文本 ——
     Entry {
         key: Key::StatusNothingToExport,
         zh: "没有可导出的结果",
@@ -1757,6 +1463,141 @@ pub static TABLE: &[Entry] = &[
         zh: "  启动参数    见 cping-tui --help（含 --lang zh|en 指定界面语言）",
         en: "  CLI flags   see cping-tui --help (including --lang zh|en for the UI language)",
     },
+    Entry {
+        key: Key::ProfilesTitle,
+        zh: " 扫描模板 ",
+        en: " Scan profiles ",
+    },
+    Entry {
+        key: Key::ProfilesHint,
+        zh: "↑ ↓ 选择 · Enter 应用 · Esc 取消",
+        en: "up/down select, Enter apply, Esc cancel",
+    },
+    Entry {
+        key: Key::ProfilesEmpty,
+        zh: "这份配置里没有模板。\n可以写 [[profiles]] 段，或先用 cping-cli --dump-config 生成一份。",
+        en: "this config has no profiles.\nadd [[profiles]] sections, or generate one with cping-cli --dump-config.",
+    },
+    Entry {
+        key: Key::ProfilesNoConfig,
+        zh: "未加载配置文件：{}（不存在或读取失败）",
+        en: "no config file loaded: {} (missing or unreadable)",
+    },
+    Entry {
+        key: Key::ProfilesFilePath,
+        zh: "配置文件：{}",
+        en: "config file: {}",
+    },
+    Entry {
+        key: Key::ProfilesCurrentMark,
+        zh: "  ← 当前",
+        en: "  <- current",
+    },
+    Entry {
+        key: Key::ProfilesCliNote,
+        zh: "命令行显式给出的目标与探测方式不会被模板覆盖。",
+        en: "targets and probe mode given on the command line are never overridden by a profile.",
+    },
+    Entry {
+        key: Key::ProfileNone,
+        zh: "未使用模板",
+        en: "no profile",
+    },
+    Entry {
+        key: Key::ProfileInUse,
+        zh: "模板 {}",
+        en: "profile {}",
+    },
+    Entry {
+        key: Key::StatusProfileApplied,
+        zh: "已应用模板 {}：{}",
+        en: "profile {} applied: {}",
+    },
+    Entry {
+        key: Key::StatusProfileBlocked,
+        zh: "探测进行中，无法切换模板（先按 Esc 取消或等本轮结束）",
+        en: "cannot switch profiles while scanning (press Esc to cancel or wait for the round to end)",
+    },
+    Entry {
+        key: Key::StatusConfigUnreadable,
+        zh: "配置文件无法读取：{}",
+        en: "config file is unreadable: {}",
+    },
+    Entry {
+        key: Key::StatusConfigNotes,
+        zh: "配置提示：{}",
+        en: "config note: {}",
+    },
+    Entry {
+        key: Key::PolicyTitle,
+        zh: " 安全策略（M17） ",
+        en: " Safety policy (M17) ",
+    },
+    Entry {
+        key: Key::PolicyHint,
+        zh: "↑ ↓ 选字段 · 数字键 / Backspace 改数值 · + - 微调 · 空格 切换开关 · Enter 应用 · Esc 取消",
+        en: "up/down pick a field, digits/Backspace edit, +/- nudge, space toggles, Enter applies, Esc cancels",
+    },
+    Entry {
+        key: Key::PolicyLinesCurrent,
+        zh: "当前策略：{}",
+        en: "current policy: {}",
+    },
+    Entry {
+        key: Key::PolicyLinesDefaults,
+        zh: "默认：{} pps 限速，目标数上限 {}，默认拒绝组播 / 保留网段。\n上限：速率 ≤ {} pps（0 表示不限速），目标数 ≤ {}。",
+        en: "defaults: {} pps rate limit, {} target cap, reserved ranges denied.\nlimits: rate <= {} pps (0 = unlimited), targets <= {}.",
+    },
+    Entry {
+        key: Key::PolicyFieldPps,
+        zh: "速率上限（pps）",
+        en: "rate limit (pps)",
+    },
+    Entry {
+        key: Key::PolicyFieldTargets,
+        zh: "目标数上限",
+        en: "target cap",
+    },
+    Entry {
+        key: Key::PolicyFieldReserved,
+        zh: "允许保留网段",
+        en: "allow reserved ranges",
+    },
+    Entry {
+        key: Key::PolicyFieldLine,
+        zh: "{} {}：{}",
+        en: "{} {}: {}",
+    },
+    Entry {
+        key: Key::PolicyOn,
+        zh: "开",
+        en: "on",
+    },
+    Entry {
+        key: Key::PolicyOff,
+        zh: "关",
+        en: "off",
+    },
+    Entry {
+        key: Key::PolicyWarnReserved,
+        zh: "! 已放行组播 / 保留网段：程序会去探测通常拒绝的地址（组播、文档网段等），请仅在确知后果时使用。",
+        en: "! reserved/multicast ranges are allowed: the tool will probe addresses it normally refuses (multicast, documentation ranges, ...); enable only when you know the consequences.",
+    },
+    Entry {
+        key: Key::StatusPolicyApplied,
+        zh: "安全策略已应用：{}",
+        en: "scan policy applied: {}",
+    },
+    Entry {
+        key: Key::HelpM16P,
+        zh: "  P            选择扫描模板（配置里的 [[profiles]]），回车应用",
+        en: "  P            pick a scan profile ([[profiles]] in the config), Enter applies",
+    },
+    Entry {
+        key: Key::HelpM17G,
+        zh: "  G            安全策略设置（限速 / 目标数上限 / 保留网段）",
+        en: "  G            safety policy (rate limit / target cap / reserved ranges)",
+    },
 ];
 
 /// 取某个键在指定语言下的模板。
@@ -1792,88 +1633,28 @@ pub fn render(lang: Lang, key: Key, args: &[&str]) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// 核心枚举 → TUI 键
+// 枚举展示名：**一律转发核心层**
 // ---------------------------------------------------------------------------
 //
-// 为什么界面要自己映射这几个封闭枚举（`ResultClass` / `ChangeKind` /
-// `AlertKind` / `ProbeStatus`）：
+// 这里原来有一批「枚举 → TUI 键」的桥接函数（分类名、探测状态名、变化类型名、
+// 告警类别名、后端名与能力摘要）。它们的中文与核心层一字不差，英文则各写各的
+// ——两份翻译迟早漂移，而漂移了没人会发现（两边测试只管自己那半张表）。
 //
-// 核心层只提供 `label_zh()`（没有 `_in` 变体），而本次改动**不允许碰核心层**。
-// 这些枚举是**封闭的**（变体有限、由 `#[derive(Copy)]` 值语义），映射它们
-// 属于「怎么显示」，不是「怎么判定」——判定（分类、告警命中、状态推导）
-// 全部仍由核心完成，界面一个分支都没重写。
+// 核心层如今提供了 `label_in(lang)` / `status_label_in(status, lang)` /
+// `describe_in(lang)` / `summary_in(lang)`，所以 TUI 侧一律直接调用：
 //
-// 代价是「核心加了新变体，这里编译失败」——这恰恰是好事：漏翻译会当场
-// 变成编译错误，而不是界面上冒出一句中文。
-
-/// [`cping_core::ResultClass`] → 键。
-pub fn result_class_key(class: cping_core::ResultClass) -> Key {
-    use cping_core::ResultClass as C;
-    match class {
-        C::Low => Key::ClassLow,
-        C::Mid => Key::ClassMid,
-        C::High => Key::ClassHigh,
-        C::Offline => Key::ClassOffline,
-        C::Error => Key::ClassError,
-    }
-}
-
-/// [`cping_core::ChangeKind`] → 键。
-pub fn change_kind_key(kind: cping_core::ChangeKind) -> Key {
-    use cping_core::ChangeKind as K;
-    match kind {
-        K::Appeared => Key::ChangeAppeared,
-        K::Disappeared => Key::ChangeDisappeared,
-        K::RttClassChanged => Key::ChangeRttClass,
-        K::StatusChanged => Key::ChangeStatus,
-    }
-}
-
-/// [`cping_core::AlertKind`] → 键。
-pub fn alert_kind_key(kind: cping_core::AlertKind) -> Key {
-    use cping_core::AlertKind as K;
-    match kind {
-        K::Appeared => Key::AlertKindAppeared,
-        K::Disappeared => Key::AlertKindDisappeared,
-        K::LatencyAbove => Key::AlertKindLatency,
-        K::UptimeBelow => Key::AlertKindUptime,
-    }
-}
-
-/// `ProbeStatus` → 键；**返回 `None` 表示这一格要用 [`TCP_OPEN`] 常量**。
-///
-/// ICMP 与 TCP 两套名字必须分开：TCP 模式下的「在线」显示成 `TCP-OPEN`，
-/// 否则用户会把 TCP 握手成功误读成 ICMP 可达（这是本项目最容易出错的一处）。
-/// `TCP-OPEN` 本身是协议事实、两种语言下必须一模一样，所以它是常量而不是
-/// 字典条目——放进字典会立刻被 `chinese_entries_are_not_empty_and_not_ascii_only`
-/// 拦下来，那条测试正好说明了「它不是一句可以翻译的话」。
-pub fn probe_status_key(tcp: bool, status: &cping_core::ProbeStatus) -> Option<Key> {
-    use cping_core::ProbeStatus as S;
-    Some(match (tcp, status) {
-        // 「等待」在两种方式下都是「还没探测」，共用一条
-        (_, S::Pending) => Key::StPending,
-        (false, S::Online { .. }) => Key::StOnline,
-        (false, S::Timeout) => Key::StTimeout,
-        (false, S::Unreachable) => Key::StUnreachable,
-        (false, S::PermissionDenied) => Key::StPermissionDenied,
-        (false, S::Unsupported) => Key::StUnsupported,
-        (false, S::Error(_)) => Key::StError,
-        (true, S::Online { .. }) => return None,
-        (true, S::Timeout) => Key::StTcpTimeout,
-        (true, S::Unreachable) => Key::StTcpClosed,
-        (true, S::PermissionDenied) => Key::StPermissionDenied,
-        (true, S::Unsupported) => Key::StUnsupported,
-        (true, S::Error(_)) => Key::StError,
-    })
-}
-
-/// 状态列的展示文本。
-pub fn status_label(lang: Lang, tcp: bool, status: &cping_core::ProbeStatus) -> String {
-    match probe_status_key(tcp, status) {
-        Some(key) => text(lang, key).to_string(),
-        None => TCP_OPEN.to_string(),
-    }
-}
+// - 分类名：`cping_core::ResultClass::label_in`
+// - 探测状态名（含 TCP-OPEN 那套自解释的词）：`cping_core::ProbeMode::status_label_in`
+//   —— **不再有 `TCP_OPEN` 常量**：它现在是核心字典里的 `LabelModeTcpOpen`，
+//   两种语言下都是 `TCP-OPEN`（ASCII 记号，不是可以翻译的句子）。
+// - 变化类型名：`cping_core::ChangeKind::label_in`
+// - 告警类别名：`cping_core::AlertKind::label_in`
+// - 后端名与能力行：`BackendId::label_in` / `BackendCaps::describe_in` /
+//   `BackendRegistry::summary_in`
+// - 目标摘要：`TargetSpec::summary_in`
+//
+// 好处不只是少了两份翻译：核心加了新枚举变体时，界面**编译期**就会缺分支，
+// 而不是在界面上悄悄冒出一句没翻的话。
 
 #[cfg(test)]
 mod tests {
@@ -1917,6 +1698,22 @@ mod tests {
             assert!(seen.insert(o), "{:?} 的序号 {o} 与其它键重复", e.key);
         }
         assert_eq!(seen.len(), KEY_COUNT, "有键没有出现在 TABLE 里");
+    }
+
+    #[test]
+    fn table_order_matches_ordinal() {
+        // `text()` 是按下标取 `TABLE[ordinal(key)]` 的：序号与顺序一旦错位，
+        // 界面会**静默**显示成邻居那条消息（不 panic、不报错），是这里最难查的
+        // 一类坏法。所以顺序必须逐条钉死，而不是只验「双射」。
+        for (i, e) in TABLE.iter().enumerate() {
+            assert_eq!(
+                ordinal(e.key),
+                i,
+                "TABLE 第 {i} 条是 {:?}，但它的序号是 {}——顺序与 ordinal 不一致",
+                e.key,
+                ordinal(e.key)
+            );
+        }
     }
 
     #[test]
@@ -1965,18 +1762,23 @@ mod tests {
     fn render_keeps_placeholder_when_args_run_short() {
         // 少给参数：`{}` 必须**留在原地**，而不是变成空串——
         // 界面上看见一个 `{}` 比看见一句少了关键数字的通顺话更容易定位问题。
-        let s = render(Lang::Zh, Key::StTcpClosed, &[]);
-        assert_eq!(s, "TCP-关闭");
-        let s = render(Lang::Zh, Key::SpecSummarySingle, &["192.168.1"]);
-        assert_eq!(s, "192.168.1（{} 个）");
-        let s = render(Lang::En, Key::SpecSummarySingle, &["192.168.1"]);
-        assert_eq!(s, "192.168.1 ({} targets)");
-        // 多给参数则忽略，不 panic。
-        let s = render(Lang::Zh, Key::StTcpClosed, &["多余"]);
-        assert_eq!(s, "TCP-关闭");
+        let s = render(Lang::Zh, Key::ProfilesNoConfig, &[]);
+        assert_eq!(s, "未加载配置文件：{}（不存在或读取失败）");
+        let s = render(Lang::Zh, Key::StatusProfileApplied, &["lan"]);
+        assert_eq!(s, "已应用模板 lan：{}");
+        let s = render(Lang::En, Key::StatusProfileApplied, &["lan"]);
+        assert_eq!(s, "profile lan applied: {}");
+        // 多给参数则忽略，不 panic。注意要比槽位**多**给：这条模板只有 1 个
+        // `{}`，所以这里给 2 个，才能验证「多出来的被丢掉」。
+        let s = render(Lang::Zh, Key::ProfilesNoConfig, &["第一个", "第二个"]);
+        assert_eq!(s, "未加载配置文件：第一个（不存在或读取失败）");
         // 正常替换仍按顺序进行。
-        let s = render(Lang::Zh, Key::SpecSummaryMulti, &["2", "510"]);
-        assert_eq!(s, "2 个网段 / 510 个目标");
+        let s = render(
+            Lang::Zh,
+            Key::PolicyFieldLine,
+            &[">", "速率上限（pps）", "200"],
+        );
+        assert_eq!(s, "> 速率上限（pps）：200");
     }
 
     #[test]

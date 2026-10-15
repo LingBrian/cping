@@ -72,8 +72,8 @@ pub use export::{
 };
 pub use fingerprint::{
     fingerprint_host, fingerprint_hosts, grab_banner, infer_device, port_service_name, probe_port,
-    sanitize_banner, scan_ports, vendor_is_network_equipment, Confidence, DeviceGuess,
-    HostFingerprint, PortFinding, PortScanConfig, PortScanReport, BANNER_MAX_BYTES,
+    sanitize_banner, scan_ports, vendor_is_network_equipment, BasisSignal, Confidence, DeviceGuess,
+    DeviceKind, HostFingerprint, PortFinding, PortScanConfig, PortScanReport, BANNER_MAX_BYTES,
     DEFAULT_FINGERPRINT_PORTS, MAX_PORTS_PER_HOST,
 };
 pub use history::{HistoryBuffer, HostSample, RoundRecord, Uptime, DEFAULT_ROUND_CAPACITY};
@@ -81,7 +81,10 @@ pub use hostname::{
     normalize_ptr_name, reverse_lookup, reverse_lookup_default, DEFAULT_TIMEOUT as HOSTNAME_TIMEOUT,
 };
 pub use html::render_report as render_html_report;
-pub use i18n::{render as i18n_render, text as i18n_text, Key as I18nKey, Lang};
+pub use i18n::{
+    render as i18n_render, render_template as i18n_render_template, text as i18n_text,
+    Key as I18nKey, Lang, ASCII_TOKEN_KEYS,
+};
 pub use json::{escape as json_escape, is_balanced as json_is_balanced, Json};
 pub use local_ip::{LocalAddress, LocalAddressProvider};
 pub use monitor::{
@@ -97,14 +100,14 @@ pub use native::PosixIcmpBackend;
 #[cfg(windows)]
 pub use native::WindowsIcmpBackend;
 pub use native::{
-    backend_for_mode, build_echo_request, icmp_checksum, native_icmp_hint, parse_echo_reply,
-    parse_unreachable, platform_default_mode, platform_icmp_backend, verify_checksum,
-    TcpConnectBackend, DEFAULT_PAYLOAD_LEN, ICMP_HEADER_LEN,
+    backend_for_mode, build_echo_request, icmp_checksum, native_icmp_hint, native_icmp_hint_in,
+    parse_echo_reply, parse_unreachable, platform_default_mode, platform_icmp_backend,
+    verify_checksum, TcpConnectBackend, DEFAULT_PAYLOAD_LEN, ICMP_HEADER_LEN,
 };
 pub use neighbor::{mac_for, neighbor_table, parse_proc_net_arp, NeighborEntry};
 pub use notify::{
-    deliver, events_to_json, expand_template, notifications_available, AlertSink, ChannelConfig,
-    DeliveryOutcome, NotifyConfig, SmtpAccount, SINK_QUEUE_CAPACITY,
+    deliver, events_to_json, expand_template, notifications_available, notifications_available_in,
+    AlertSink, ChannelConfig, DeliveryOutcome, NotifyConfig, SmtpAccount, SINK_QUEUE_CAPACITY,
 };
 pub use oui::{entry_counts, mac_to_string, parse_mac, vendor_of, DATA_SOURCE};
 pub use policy::{
@@ -121,7 +124,7 @@ pub use profile::{
 };
 pub use registry::{
     backend_for, backend_for_run, resolve_for_run, BackendCaps, BackendId, BackendRegistry,
-    MOCK_BASE_RTT_MS, MOCK_ONLINE_PERCENT, MOCK_SPAN_MS,
+    CapsNote, MOCK_BASE_RTT_MS, MOCK_ONLINE_PERCENT, MOCK_SPAN_MS,
 };
 pub use result::{ProbeEvent, ProbeResult, ProbeStatus, ScanStats, TaskId};
 pub use scheduler::{

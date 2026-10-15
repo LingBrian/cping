@@ -15,6 +15,7 @@
 //! 指纹规则表是纯数据（常量数组），匹配是纯函数，全部可离线单测。
 
 use crate::i18n::{self, Key, Lang};
+use std::fmt;
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
@@ -135,6 +136,14 @@ impl PortScanConfig {
 
     /// 从「22,80,443-445,8080」这类文本解析；支持单个与闭区间。
     pub fn parse_ports(text: &str) -> Result<Vec<u16>, String> {
+        Self::parse_ports_in(text, Lang::Zh)
+    }
+
+    /// 按语言产出错误文本的 [`Self::parse_ports`]。
+    ///
+    /// 解析口径一字不改——只有错误句子跟着语言走。**参数用 `{:?}` 渲染**
+    /// （带引号），这样用户贴进来的字符串里有没有隐藏空格一眼就能看出来。
+    pub fn parse_ports_in(text: &str, lang: Lang) -> Result<Vec<u16>, String> {
         let mut out: Vec<u16> = Vec::new();
         for part in text.split(',') {
             let part = part.trim();
@@ -142,37 +151,43 @@ impl PortScanConfig {
                 continue;
             }
             if let Some((lo, hi)) = part.split_once('-') {
-                let lo: u64 = lo
-                    .trim()
-                    .parse()
-                    .map_err(|_| format!("端口区间起点 {lo:?} 不是数字"))?;
-                let hi: u64 = hi
-                    .trim()
-                    .parse()
-                    .map_err(|_| format!("端口区间终点 {hi:?} 不是数字"))?;
+                let lo: u64 = lo.trim().parse().map_err(|_| {
+                    i18n::render(lang, Key::ErrPortRangeStartNotNumber, &[&format!("{lo:?}")])
+                })?;
+                let hi: u64 = hi.trim().parse().map_err(|_| {
+                    i18n::render(lang, Key::ErrPortRangeEndNotNumber, &[&format!("{hi:?}")])
+                })?;
                 if lo == 0 || hi == 0 || lo > hi || hi > u16::MAX as u64 {
-                    return Err(format!(
-                        "端口区间 {part:?} 无效（需 1-65535 且起点 ≤ 终点）"
+                    return Err(i18n::render(
+                        lang,
+                        Key::ErrPortRangeInvalid,
+                        &[&format!("{part:?}")],
                     ));
                 }
                 if hi - lo > MAX_PORTS_PER_HOST as u64 {
-                    return Err(format!(
-                        "端口区间 {part:?} 跨度超过上限 {MAX_PORTS_PER_HOST}"
+                    return Err(i18n::render(
+                        lang,
+                        Key::ErrPortRangeTooWide,
+                        &[&format!("{part:?}"), &MAX_PORTS_PER_HOST.to_string()],
                     ));
                 }
                 out.extend((lo..=hi).map(|p| p as u16));
             } else {
-                let p: u64 = part
-                    .parse()
-                    .map_err(|_| format!("端口 {part:?} 不是数字"))?;
+                let p: u64 = part.parse().map_err(|_| {
+                    i18n::render(lang, Key::ErrPortNotNumber, &[&format!("{part:?}")])
+                })?;
                 if p == 0 || p > u16::MAX as u64 {
-                    return Err(format!("端口 {part:?} 超出 1-65535"));
+                    return Err(i18n::render(
+                        lang,
+                        Key::ErrPortOutOfRange,
+                        &[&format!("{part:?}")],
+                    ));
                 }
                 out.push(p as u16);
             }
         }
         if out.is_empty() {
-            return Err("端口列表为空".into());
+            return Err(i18n::text(lang, Key::ErrPortListEmpty).to_string());
         }
         Ok(out)
     }
@@ -380,22 +395,134 @@ impl Confidence {
 /// 设备类型**推断**结论。名字里带 Guess：界面必须标注「推断」而非事实。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceGuess {
-    /// 设备/角色类型（中文短语，如「Windows 主机」「网络设备」）。
-    pub kind: &'static str,
+    /// 设备/角色类型。**是枚举不是字符串**：中文短语以前直接写在这里，
+    /// 英文界面下就只能露出中文；改成枚举后漏翻是编译期问题。
+    pub kind: DeviceKind,
     pub confidence: Confidence,
-    /// 推断依据（人可读，逐条列出信号）。
-    pub basis: Vec<String>,
+    /// 推断依据。**是信号不是句子**——信号是数据，渲染成哪种语言是界面的事。
+    ///
+    /// 以前这里是 `Vec<String>` 的中文句子，于是同一个依据在
+    /// 导出、GUI、TUI 三处各被复制了一遍，且都没法翻。
+    pub basis: Vec<BasisSignal>,
+}
+
+/// 设备/角色类型（推断结论的名字）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceKind {
+    WindowsHost,
+    NetworkGear,
+    Samba,
+    UnixHost,
+    Printer,
+    RemoteDesktop,
+    Database,
+    Web,
+}
+
+impl DeviceKind {
+    /// 对应的字典键。
+    pub const fn key(self) -> Key {
+        match self {
+            DeviceKind::WindowsHost => Key::LabelDeviceWindowsHost,
+            DeviceKind::NetworkGear => Key::LabelDeviceNetworkGear,
+            DeviceKind::Samba => Key::LabelDeviceSamba,
+            DeviceKind::UnixHost => Key::LabelDeviceUnixHost,
+            DeviceKind::Printer => Key::LabelDevicePrinter,
+            DeviceKind::RemoteDesktop => Key::LabelDeviceRemoteDesktop,
+            DeviceKind::Database => Key::LabelDeviceDatabase,
+            DeviceKind::Web => Key::LabelDeviceWeb,
+        }
+    }
+
+    pub fn label_in(self, lang: Lang) -> &'static str {
+        i18n::text(lang, self.key())
+    }
+
+    /// 中文（等价于 `label_in(Lang::Zh)`）。
+    pub fn label_zh(self) -> &'static str {
+        self.label_in(Lang::Zh)
+    }
+
+    /// 全部变体，供测试与界面枚举。
+    pub const ALL: [DeviceKind; 8] = [
+        DeviceKind::WindowsHost,
+        DeviceKind::NetworkGear,
+        DeviceKind::Samba,
+        DeviceKind::UnixHost,
+        DeviceKind::Printer,
+        DeviceKind::RemoteDesktop,
+        DeviceKind::Database,
+        DeviceKind::Web,
+    ];
+}
+
+impl fmt::Display for DeviceKind {
+    /// `Display` 就是中文渲染，与 [`DeviceKind::label_zh`] 共用一处实现。
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label_in(Lang::Zh))
+    }
+}
+
+/// 一条推断依据的**结构化信号**。
+///
+/// 分类而不是存句子，是为了让「依据」这件事可以被翻译、被导出、
+/// 被界面重排，而不用把中文句子从字符串里再抠出来。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BasisSignal {
+    /// 厂商名（来自 OUI 库，**不翻译**）。
+    Vendor(String),
+    /// 一批开放端口。
+    Ports(Vec<u16>),
+}
+
+impl BasisSignal {
+    /// 渲染成一句该语言下的依据。
+    pub fn render_in(&self, lang: Lang) -> String {
+        match self {
+            BasisSignal::Vendor(v) => i18n::render(lang, Key::BasisVendor, &[v]),
+            BasisSignal::Ports(ports) => ports
+                .iter()
+                .map(|p| match port_service_name(*p) {
+                    Some(name) => i18n::render(lang, Key::BasisPortOpen, &[&p.to_string(), name]),
+                    None => i18n::render(lang, Key::BasisPortOpenNoService, &[&p.to_string()]),
+                })
+                .collect::<Vec<_>>()
+                .join(i18n::text(lang, Key::ListSeparator)),
+        }
+    }
+
+    /// 中文渲染。
+    pub fn render_zh(&self) -> String {
+        self.render_in(Lang::Zh)
+    }
 }
 
 impl DeviceGuess {
     /// 单行展示：「Windows 主机（推断，置信中；依据：TCP 3389 开放）」。
     pub fn summary(&self) -> String {
-        format!(
-            "{}（推断，置信{}；依据：{}）",
-            self.kind,
-            self.confidence.label_zh(),
-            self.basis.join("、")
+        self.summary_in(Lang::Zh)
+    }
+
+    /// 按语言渲染的单行展示。
+    pub fn summary_in(&self, lang: Lang) -> String {
+        i18n::render(
+            lang,
+            Key::DeviceGuessSummary,
+            &[
+                self.kind.label_in(lang),
+                self.confidence.label_in(lang),
+                &self.basis_text_in(lang),
+            ],
         )
+    }
+
+    /// 全部依据拼成一行（按语言选分隔符）。
+    pub fn basis_text_in(&self, lang: Lang) -> String {
+        self.basis
+            .iter()
+            .map(|b| b.render_in(lang))
+            .collect::<Vec<_>>()
+            .join(i18n::text(lang, Key::ListSeparator))
     }
 }
 
@@ -441,31 +568,30 @@ pub fn infer_device(vendor: Option<&str>, open_ports: &[u16]) -> Option<DeviceGu
     let has = |p: u16| open_ports.contains(&p);
     let net_vendor = vendor_is_network_equipment(vendor);
 
-    let basis_ports = |ports: &[u16]| -> Vec<String> {
-        ports
-            .iter()
-            .map(|p| match port_service_name(*p) {
-                Some(name) => format!("TCP {p}({name}) 开放"),
-                None => format!("TCP {p} 开放"),
-            })
-            .collect()
-    };
-
-    let mut basis: Vec<String> = Vec::new();
+    // 依据收集时只压结构化信号，不拼句子——拼句子的事留给
+    // `BasisSignal::render_in`，否则中文会在这里被写死一次。
+    let mut basis: Vec<BasisSignal> = Vec::new();
     if let Some(v) = vendor {
-        basis.push(format!("厂商 {v}"));
+        basis.push(BasisSignal::Vendor(v.to_string()));
     }
+    // 只收实际开放的端口，保持升序（`has` 是按具体端口问的，
+    // 所以这里自己排一遍，免得依据里出现「445 开放」在「3389 开放」前面）。
+    let ports_signal = |ports: &[u16]| -> BasisSignal {
+        let mut p: Vec<u16> = ports.to_vec();
+        p.sort_unstable();
+        BasisSignal::Ports(p)
+    };
 
     // 规则 1：RDP + （SMB 或厂商含 Windows 系线索）→ Windows 主机
     if has(3389) {
-        basis.extend(basis_ports(&[3389]));
+        basis.push(ports_signal(&[3389]));
         let windows_hint = has(445) || has(135) || has(139);
         if windows_hint {
             let extra: Vec<u16> = [445u16, 135, 139].into_iter().filter(|p| has(*p)).collect();
-            basis.extend(basis_ports(&extra));
+            basis.push(ports_signal(&extra));
         }
         return Some(DeviceGuess {
-            kind: "Windows 主机",
+            kind: DeviceKind::WindowsHost,
             confidence: if windows_hint {
                 Confidence::Medium
             } else {
@@ -482,9 +608,9 @@ pub fn infer_device(vendor: Option<&str>, open_ports: &[u16]) -> Option<DeviceGu
             .copied()
             .filter(|p| has(*p))
             .collect();
-        basis.extend(basis_ports(&mgmt));
+        basis.push(ports_signal(&mgmt));
         return Some(DeviceGuess {
-            kind: "网络设备（路由器/交换机）",
+            kind: DeviceKind::NetworkGear,
             confidence: Confidence::Medium,
             basis,
         });
@@ -492,9 +618,9 @@ pub fn infer_device(vendor: Option<&str>, open_ports: &[u16]) -> Option<DeviceGu
 
     // 规则 3：SMB → Windows/Samba 文件服务
     if has(445) {
-        basis.extend(basis_ports(&[445]));
+        basis.push(ports_signal(&[445]));
         return Some(DeviceGuess {
-            kind: "Windows/Samba 文件服务",
+            kind: DeviceKind::Samba,
             confidence: Confidence::Low,
             basis,
         });
@@ -502,9 +628,9 @@ pub fn infer_device(vendor: Option<&str>, open_ports: &[u16]) -> Option<DeviceGu
 
     // 规则 4：SSH → Linux/Unix 主机
     if has(22) {
-        basis.extend(basis_ports(&[22]));
+        basis.push(ports_signal(&[22]));
         return Some(DeviceGuess {
-            kind: "Linux/Unix 主机",
+            kind: DeviceKind::UnixHost,
             confidence: Confidence::Low,
             basis,
         });
@@ -513,9 +639,9 @@ pub fn infer_device(vendor: Option<&str>, open_ports: &[u16]) -> Option<DeviceGu
     // 规则 5：打印端口 → 打印机
     if has(9100) || has(631) {
         let ps: Vec<u16> = [9100, 631].iter().copied().filter(|p| has(*p)).collect();
-        basis.extend(basis_ports(&ps));
+        basis.push(ports_signal(&ps));
         return Some(DeviceGuess {
-            kind: "打印机",
+            kind: DeviceKind::Printer,
             confidence: if has(9100) && has(631) {
                 Confidence::Medium
             } else {
@@ -527,9 +653,9 @@ pub fn infer_device(vendor: Option<&str>, open_ports: &[u16]) -> Option<DeviceGu
 
     // 规则 6：VNC → 远程桌面/带外管理
     if has(5900) {
-        basis.extend(basis_ports(&[5900]));
+        basis.push(ports_signal(&[5900]));
         return Some(DeviceGuess {
-            kind: "远程桌面/VNC 端点",
+            kind: DeviceKind::RemoteDesktop,
             confidence: Confidence::Low,
             basis,
         });
@@ -542,9 +668,9 @@ pub fn infer_device(vendor: Option<&str>, open_ports: &[u16]) -> Option<DeviceGu
             .copied()
             .filter(|p| has(*p))
             .collect();
-        basis.extend(basis_ports(&dbs));
+        basis.push(ports_signal(&dbs));
         return Some(DeviceGuess {
-            kind: "数据库服务器",
+            kind: DeviceKind::Database,
             confidence: Confidence::Low,
             basis,
         });
@@ -557,9 +683,9 @@ pub fn infer_device(vendor: Option<&str>, open_ports: &[u16]) -> Option<DeviceGu
             .copied()
             .filter(|p| has(*p))
             .collect();
-        basis.extend(basis_ports(&webs));
+        basis.push(ports_signal(&webs));
         return Some(DeviceGuess {
-            kind: "Web 服务",
+            kind: DeviceKind::Web,
             confidence: Confidence::Low,
             basis,
         });
@@ -603,9 +729,14 @@ impl HostFingerprint {
 
     /// 设备推断摘要；无结论时为空串（**不是**「未知」）。
     pub fn device_summary(&self) -> String {
+        self.device_summary_in(Lang::Zh)
+    }
+
+    /// 按语言渲染的设备推断摘要；无结论时为空串。
+    pub fn device_summary_in(&self, lang: Lang) -> String {
         self.device
             .as_ref()
-            .map(|d| d.summary())
+            .map(|d| d.summary_in(lang))
             .unwrap_or_default()
     }
 
@@ -859,7 +990,7 @@ mod tests {
     #[test]
     fn rdp_wins_and_windows_hints_raise_confidence() {
         let g = infer_device(None, &[3389]).unwrap();
-        assert_eq!(g.kind, "Windows 主机");
+        assert_eq!(g.kind, DeviceKind::WindowsHost);
         assert_eq!(g.confidence, Confidence::Low);
         let g2 = infer_device(None, &[3389, 445]).unwrap();
         assert_eq!(g2.confidence, Confidence::Medium);
@@ -870,11 +1001,11 @@ mod tests {
     #[test]
     fn network_vendor_plus_mgmt_port_means_network_device() {
         let g = infer_device(Some("TP-Link Technologies"), &[80]).unwrap();
-        assert_eq!(g.kind, "网络设备（路由器/交换机）");
+        assert_eq!(g.kind, DeviceKind::NetworkGear);
         assert_eq!(g.confidence, Confidence::Medium);
         // 同样端口但没有网络设备厂商 → 落到 Web 服务
         let g2 = infer_device(Some("Dell Inc."), &[80]).unwrap();
-        assert_eq!(g2.kind, "Web 服务");
+        assert_eq!(g2.kind, DeviceKind::Web);
         assert_eq!(g2.confidence, Confidence::Low);
         // 厂商大小写无关
         assert!(vendor_is_network_equipment(Some("ASUSTek COMPUTER INC.")));
@@ -885,15 +1016,24 @@ mod tests {
 
     #[test]
     fn printer_db_vnc_and_web_fallback_rules() {
-        assert_eq!(infer_device(None, &[9100]).unwrap().kind, "打印机");
-        assert_eq!(infer_device(None, &[631]).unwrap().kind, "打印机");
-        assert_eq!(infer_device(None, &[3306]).unwrap().kind, "数据库服务器");
+        assert_eq!(
+            infer_device(None, &[9100]).unwrap().kind,
+            DeviceKind::Printer
+        );
+        assert_eq!(
+            infer_device(None, &[631]).unwrap().kind,
+            DeviceKind::Printer
+        );
+        assert_eq!(
+            infer_device(None, &[3306]).unwrap().kind,
+            DeviceKind::Database
+        );
         assert_eq!(
             infer_device(None, &[5900]).unwrap().kind,
-            "远程桌面/VNC 端点"
+            DeviceKind::RemoteDesktop
         );
-        assert_eq!(infer_device(None, &[443]).unwrap().kind, "Web 服务");
-        assert_eq!(infer_device(None, &[8080]).unwrap().kind, "Web 服务");
+        assert_eq!(infer_device(None, &[443]).unwrap().kind, DeviceKind::Web);
+        assert_eq!(infer_device(None, &[8080]).unwrap().kind, DeviceKind::Web);
     }
 
     #[test]

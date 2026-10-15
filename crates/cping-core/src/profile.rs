@@ -28,6 +28,7 @@
 
 use crate::config::AppConfig;
 use crate::error::{CoreError, CoreResult};
+use crate::i18n::{self, Key, Lang};
 use crate::spec::{parse_spec, ProbeMode};
 use crate::target::TargetRange;
 
@@ -169,23 +170,39 @@ impl ScanProfile {
 
     /// 一行摘要，供 `--list-profiles` 与界面展示。
     pub fn describe(&self) -> String {
+        self.describe_in(Lang::Zh)
+    }
+
+    /// 按语言渲染的一行摘要。
+    ///
+    /// 列宽（`{:<14}` / `{:<24}`）与 `·` 分隔符在两种语言下共用——
+    /// 中英混排时对齐本来就做不到完美，为英文单独设计一套列宽只会让
+    /// 「同一份配置在两台机器上输出不同」变成常态。这里只翻**词**。
+    pub fn describe_in(&self, lang: Lang) -> String {
         let note = if self.note.trim().is_empty() {
             String::new()
         } else {
             format!("  —— {}", self.note.trim())
         };
         let count = match self.target_count() {
-            Some(n) => format!("{n} 个目标"),
-            None => "目标规格无法解析".to_string(),
+            Some(n) => i18n::render(lang, Key::ProfileTargetCount, &[&n.to_string()]),
+            None => i18n::text(lang, Key::ProfileSpecUnparsable).to_string(),
         };
         format!(
-            "{:<14} {:<24} {} · {} · {} ms · 并发 {} · {}{}",
+            "{:<14} {:<24} {} · {} · {} ms · {} · {}{}",
             self.name,
             self.spec,
             count,
+            // 这里刻意用**机器标识**（`standard` / `full` / `hosts_only`）
+            // 而不是展示标签：它是 `--list-profiles` 的输出，
+            // 稳定、可 grep、跨语言一致比「好看」更重要。
             self.range.key(),
             self.timeout_ms,
-            self.concurrency,
+            i18n::render(
+                lang,
+                Key::ProfileConcurrency,
+                &[&self.concurrency.to_string()]
+            ),
             self.mode.describe(),
             note
         )

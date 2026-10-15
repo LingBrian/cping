@@ -21,6 +21,7 @@
 //!    界面必须退化为列表/表格（见 `MATRIX_VIEW_MAX` 的说明）。
 
 use crate::error::{CoreError, CoreResult};
+use crate::i18n::{self, Key, Lang};
 use crate::target::{build_targets, parse_prefix, Ipv4Prefix, TargetRange, MAX_TARGETS};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -95,25 +96,50 @@ impl ProbeMode {
     /// TCP 模式换成一套**自解释**的名字，让「TCP 握手成功」永远不可能被当成
     /// 「ICMP 可达」读。
     pub fn status_label(self, status: &crate::result::ProbeStatus) -> String {
+        self.status_label_in(status, Lang::Zh)
+    }
+
+    /// 按语言渲染该模式下的状态文本。
+    ///
+    /// ICMP 模式直接转发 [`crate::result::ProbeStatus::label_in`]；
+    /// TCP 模式用一套**独立**的词（`TCP-OPEN` / `TCP-超时` / `TCP-关闭`），
+    /// 不复用 ICMP 的「在线 / 超时 / 不可达」——两套词长得像，用户就会
+    /// 把 TCP 握手成功当成 ICMP 可达。`TCP-OPEN` 两种语言下都一样，
+    /// 它在 [`i18n::ASCII_TOKEN_KEYS`] 里，那是因为它是记号不是句子。
+    pub fn status_label_in(self, status: &crate::result::ProbeStatus, lang: Lang) -> String {
         use crate::result::ProbeStatus as S;
         match self {
-            ProbeMode::Icmp => status.label_zh().to_string(),
-            ProbeMode::Tcp { .. } => match status {
-                S::Pending => "等待".into(),
-                S::Online { .. } => "TCP-OPEN".into(),
-                S::Timeout => "TCP-超时".into(),
-                S::Unreachable => "TCP-关闭".into(),
-                S::PermissionDenied => "权限不足".into(),
-                S::Unsupported => "不支持".into(),
-                S::Error(_) => "错误".into(),
-            },
+            ProbeMode::Icmp => status.label_in(lang).to_string(),
+            ProbeMode::Tcp { .. } => {
+                let key = match status {
+                    S::Pending => Key::LabelModeTcpPending,
+                    S::Online { .. } => Key::LabelModeTcpOpen,
+                    S::Timeout => Key::LabelModeTcpTimeout,
+                    S::Unreachable => Key::LabelModeTcpClosed,
+                    // 这三种失败原因与探测方式无关，沿用通用标签，
+                    // 免得同一件事在两种模式下叫两个名字。
+                    S::PermissionDenied => Key::LabelStatusPermissionDenied,
+                    S::Unsupported => Key::LabelStatusUnsupported,
+                    S::Error(_) => Key::LabelStatusError,
+                };
+                i18n::text(lang, key).to_string()
+            }
         }
     }
 
     pub fn validate(self) -> CoreResult<()> {
+        self.validate_in(Lang::Zh)
+    }
+
+    /// 校验探测方式自身是否自洽，错误文本按语言产出。
+    pub fn validate_in(self, lang: Lang) -> CoreResult<()> {
         if let ProbeMode::Tcp { port } = self {
             if port == 0 {
-                return Err(CoreError::InvalidConfig("TCP 端口不能为 0".into()));
+                return Err(CoreError::InvalidConfig(i18n::render(
+                    lang,
+                    Key::ErrTcpPortZero,
+                    &[],
+                )));
             }
         }
         Ok(())
@@ -151,7 +177,16 @@ impl Segment {
 
     /// `192.168.1（255 个）`
     pub fn describe(&self) -> String {
-        format!("{}（{} 个）", self.label, self.count)
+        self.describe_in(Lang::Zh)
+    }
+
+    /// 按语言渲染 `192.168.1（255 个）` / `192.168.1 (255 targets)`。
+    pub fn describe_in(&self, lang: Lang) -> String {
+        i18n::render(
+            lang,
+            Key::SegmentDescribe,
+            &[&self.label, &self.count.to_string()],
+        )
     }
 }
 
@@ -205,16 +240,24 @@ impl TargetSpec {
 
     /// 供界面标题使用的一行摘要。
     pub fn summary(&self) -> String {
+        self.summary_in(Lang::Zh)
+    }
+
+    /// 按语言渲染标题摘要。
+    pub fn summary_in(&self, lang: Lang) -> String {
         if self.targets.is_empty() {
-            return "尚未设置目标".to_string();
+            return i18n::text(lang, Key::SpecNoTargets).to_string();
         }
         if self.segments.len() == 1 {
-            return self.segments[0].describe();
+            return self.segments[0].describe_in(lang);
         }
-        format!(
-            "{} 个网段 / {} 个目标",
-            self.segments.len(),
-            self.targets.len()
+        i18n::render(
+            lang,
+            Key::SpecSegmentsAndTargets,
+            &[
+                &self.segments.len().to_string(),
+                &self.targets.len().to_string(),
+            ],
         )
     }
 

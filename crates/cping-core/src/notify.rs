@@ -30,6 +30,7 @@
 //! 「有多少条没发出去」——这比无限堆积或静默丢弃都好。
 
 use crate::alerts::AlertEvent;
+use crate::i18n::{self, Key, Lang};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -174,50 +175,35 @@ impl DeliveryOutcome {
 ///
 /// 返回 `(通道键, 是否可用, 说明)`。
 pub fn notifications_available() -> Vec<(&'static str, bool, String)> {
-    let mut out = vec![(
-        "console",
-        true,
-        "打印到标准输出，任何平台都可用".to_string(),
-    )];
+    notifications_available_in(Lang::Zh)
+}
+
+/// 按语言渲染的各通道可用性自述。
+///
+/// 第一个元素（通道键）**永远不翻译**：它是机器字段，界面的本地化靠它查表。
+/// 只翻第三个元素（说明文本）。
+pub fn notifications_available_in(lang: Lang) -> Vec<(&'static str, bool, String)> {
+    let t = |k: Key| i18n::text(lang, k).to_string();
+    let mut out = vec![("console", true, t(Key::NotifyConsoleAvailable))];
     if cfg!(windows) {
-        out.push((
-            "system",
-            true,
-            "通过 PowerShell 发 Windows Toast（需要 Windows 10 1607+）".into(),
-        ));
+        out.push(("system", true, t(Key::NotifySystemWindows)));
     } else if cfg!(target_os = "linux") {
         let has = which("notify-send").is_some();
         out.push((
             "system",
             has,
             if has {
-                "调用 notify-send".into()
+                t(Key::NotifySystemLinuxFound)
             } else {
-                "未找到 notify-send（gnome/libnotify 未安装）".to_string()
+                t(Key::NotifySystemLinuxMissing)
             },
         ));
     } else {
-        out.push((
-            "system",
-            false,
-            "本平台没有内置的系统通知通道（Android/iOS 请用界面内提示或 command 通道）".into(),
-        ));
+        out.push(("system", false, t(Key::NotifySystemNone)));
     }
-    out.push((
-        "webhook",
-        true,
-        "HTTP POST JSON；**仅 http://**，核心不含 TLS，https 会被明确拒绝".into(),
-    ));
-    out.push((
-        "command",
-        true,
-        "执行外部命令并把事件 JSON 从 stdin 喂入——接 curl / msmtp 等自带 TLS 的工具".into(),
-    ));
-    out.push((
-        "smtp",
-        true,
-        "**明文** SMTP，不支持 TLS 与认证；仅适用于内网中继".into(),
-    ));
+    out.push(("webhook", true, t(Key::NotifyWebhookAvailable)));
+    out.push(("command", true, t(Key::NotifyCommandAvailable)));
+    out.push(("smtp", true, t(Key::NotifySmtpAvailable)));
     out
 }
 

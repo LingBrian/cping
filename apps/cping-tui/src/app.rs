@@ -7,7 +7,9 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cping_core::classify::{classify_status, ResultClass, Thresholds};
-use cping_core::config::{ColorConfig, ProbeConfig, ViewMode};
+use cping_core::config::{
+    ColorConfig, ProbeConfig, ViewMode, DEFAULT_CONCURRENCY, DEFAULT_TIMEOUT_MS,
+};
 use cping_core::enrich::{enrich_with_mac_and_vendor, EnrichReport};
 use cping_core::export::{export_to_path, ExportMeta};
 use cping_core::i18n::Lang;
@@ -16,7 +18,7 @@ use cping_core::scheduler::{ProbeScheduler, SchedulerHandle};
 use cping_core::snapshot::{load_from_path, save_to_path, Snapshot};
 use cping_core::spec::{parse_spec, spec_from_prefix, ProbeMode, TargetSpec};
 use cping_core::target::{matrix_slots, parse_prefix, TargetRange, MATRIX_CELLS};
-use cping_core::{ProbeEvent, ProbeResult, ScanStats};
+use cping_core::{ConfigDocument, ProbeEvent, ProbeResult, ScanStats};
 
 use ratatui::backend::Backend;
 use ratatui::crossterm::event::KeyEvent;
@@ -31,6 +33,12 @@ use crate::ui;
 pub const AUTOSAVE_FILE: &str = "cping-autosave.snap";
 /// 「已处理过」的指纹文件名。同一份结果只问一次。
 pub const HANDLED_FILE: &str = "cping-autosave.handled";
+/// M16：不给 `--config` 时到当前工作目录找的配置文件。
+///
+/// 与 CLI 的口径一致（CLI 的 `--config` 是显式路径、没有默认值），但 TUI 是
+/// 交互式程序：要求用户先写一个路径才能用模板，等于把模板藏起来。所以这里
+/// 给一个**固定文件名**，存在就加载、不存在就照常跑（不需要模板的用户零打扰）。
+pub const DEFAULT_CONFIG_FILE: &str = "cping.toml";
 
 /// M17：首次运行向用户告知「仅用于获授权网络」。
 ///
@@ -84,6 +92,15 @@ pub struct Options {
     pub arg_warnings: Vec<String>,
     /// M18：界面语言。`--lang` 显式给定时用它，否则用 [`Lang::from_env`]。
     pub lang: Lang,
+    /// M16：配置文件路径（`--config`）。`None` = 用 [`DEFAULT_CONFIG_FILE`]。
+    pub config_path: Option<PathBuf>,
+    /// M16：用户在命令行**显式给过**目标（`--prefix` / `--target`）。
+    ///
+    /// 三层合并（命令行 → 模板 → `[probe]`）里，这是「命令行这一层有没有话要说」
+    /// 的开关。模板只填空缺，绝不覆盖它——与 CLI 的 `seen_target` 同一口径。
+    pub seen_target: bool,
+    /// M16：用户在命令行**显式给过**探测方式（`--mode` / `--port`）。
+    pub seen_mode: bool,
 }
 
 impl Default for Options {
@@ -105,6 +122,9 @@ impl Default for Options {
             // 测试与 `Options::default()` 走中文；命令行路径会在 `from_args`
             // 里把它换成 `Lang::from_env()`（见那里的注释）。
             lang: Lang::default(),
+            config_path: None,
+            seen_target: false,
+            seen_mode: false,
         }
     }
 }
@@ -137,6 +157,8 @@ impl Options {
                 "--prefix" | "--target" => {
                     if let Some(v) = it.next() {
                         opts.prefix = v;
+                        // M16：记下「用户显式给过目标」——模板只填空缺，不许覆盖它
+                        opts.seen_target = true;
                     }
                 }
                 "--mode" => {
@@ -148,6 +170,7 @@ impl Options {
                         } else {
                             ProbeMode::Icmp
                         };
+                        opts.seen_mode = true;
                     }
                 }
                 "--port" => {
@@ -155,10 +178,16 @@ impl Options {
                         if let Ok(port) = v.parse::<u16>() {
                             if port > 0 {
                                 opts.mode = ProbeMode::Tcp { port };
+                                opts.seen_mode = true;
                             }
                         }
                     }
                 }
+                // M16：配置文件路径。取值不合法（缺值）同样要报出来，理由同下面的策略参数。
+                "--config" => match it.next() {
+                    Some(v) => opts.config_path = Some(PathBuf::from(v)),
+                    None => warnings.push((Key::ArgMissingValue, vec!["--config".into()])),
+                },
                 "--watch" => {
                     if let Some(v) = it.next() {
                         if let Ok(secs) = v.parse::<u64>() {
@@ -451,6 +480,39 @@ pub struct App {
     /// 限速 / 目标上限 / 保留网段守卫。挂在 App 上而不是调度器上，
     /// 因为切换探测方式时会重建调度器，策略得跟着一起装上。
     policy: cping_core::ScanPolicy,
+    /// M17：策略面板是否打开。
+    pub show_policy: bool,
+    /// M17：面板内正在编辑的字段（0 = pps，1 = 目标上限，2 = 保留网段开关）。
+    policy_field: usize,
+    /// M17：面板内的**草稿**策略。只有按 Enter 校验通过后才写回 [`App::policy`]——
+    /// 这样「改了但没生效」与「改坏了」在界面上是两件看得见的事。
+    policy_draft: cping_core::ScanPolicy,
+    /// M17：两个数值字段的**输入文本**（`None` = 还没键入，显示草稿值）。
+    /// 存文本而不是数值，是为了让「空串 / 越界」这类非法输入能被如实呈现与拒绝，
+    /// 而不是提前夹取成合法值。
+    policy_input: [Option<String>; 2],
+
+    // ---- M16 配置与模板 ----
+    /// 加载到的配置文档；`None` = 没有配置文件或读取失败。
+    config: Option<ConfigDocument>,
+    /// 本次使用的配置文件路径（不存在时也会显示它，好让用户知道程序找的是哪个）。
+    config_path: PathBuf,
+    /// 启动阶段的配置说明（迁移提示 / 读取失败 / 选了哪份模板）。
+    /// 与 `Options::arg_warnings` 一样，是**已按当前语言渲染好**的句子。
+    config_notes: Vec<String>,
+    /// 当前生效的模板名；`None` = 未使用模板。
+    pub profile_name: Option<String>,
+    /// 模板面板是否打开。
+    pub show_profiles: bool,
+    /// 模板面板的光标。
+    profile_cursor: usize,
+    /// M16：命令行是否显式给过目标 / 探测方式（模板不得覆盖）。
+    seen_target: bool,
+    seen_mode: bool,
+    /// M16：模板与配置 `[probe]` 可能改动的探测参数（原先被硬编码在 `start_scan`）。
+    probe_range: TargetRange,
+    probe_timeout_ms: u64,
+    probe_concurrency: usize,
 }
 
 impl App {
@@ -468,18 +530,99 @@ impl App {
         // M18：语言在字段被搬走之前取出。`status` / `local_ip` 的初始文案
         // 也用它——否则第一帧会是中文，下一帧才变成目标语言。
         let lang = options.lang;
-        let spec = parse_spec(&options.prefix, TargetRange::Standard)
-            .unwrap_or_else(|_| TargetSpec::default());
+
+        // ---- M16：加载配置 + 三层合并（命令行 → 模板 → [probe]） ----
+        //
+        // 读配置**不得**让界面起不来：文件坏了就把问题摆进状态栏，照常启动。
+        // 加载失败时我们完全退回「没有模板」的行为，绝不猜一个模板来用。
+        let config_path = options
+            .config_path
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_FILE));
+        let mut config_notes: Vec<String> = Vec::new();
+        let mut config: Option<ConfigDocument> = None;
+        if config_path.exists() {
+            match ConfigDocument::load_from_path(&config_path.to_string_lossy()) {
+                Ok((doc, notes)) => {
+                    // 迁移说明由核心层产出（`migrate()` 里是中文自由文本，没有 `_in`
+                    // 变体），这里只套一层 TUI 自己的框——与告警正文同一处理。
+                    for n in notes {
+                        config_notes.push(i18n::render(lang, Key::StatusConfigNotes, &[&n]));
+                    }
+                    config = Some(doc);
+                }
+                Err(e) => config_notes.push(i18n::render(
+                    lang,
+                    Key::StatusConfigUnreadable,
+                    &[&e.localized(lang)],
+                )),
+            }
+        }
+        // 选模板：TUI 没有 `--profile`，所以永远走 `default_profile`。
+        // 选不出来（比如 default_profile 指向不存在的模板）同样只报告、不猜。
+        let selected: Option<cping_core::ScanProfile> = match config.as_ref() {
+            Some(doc) => match doc.select_profile(None) {
+                Ok(p) => p.cloned(),
+                Err(e) => {
+                    config_notes.push(i18n::render(
+                        lang,
+                        Key::StatusConfigUnreadable,
+                        &[&e.localized(lang)],
+                    ));
+                    None
+                }
+            },
+            None => None,
+        };
+        let app_probe = config.as_ref().map(|d| d.app.probe.clone());
+        // 目标：命令行显式给过就用命令行的，否则模板，否则 `[probe].prefix`，最后才兜底默认值。
+        let prefix = if options.seen_target {
+            options.prefix.clone()
+        } else if let Some(p) = &selected {
+            p.spec.clone()
+        } else {
+            app_probe
+                .as_ref()
+                .and_then(|ap| ap.prefix.map(|p| p.to_string()))
+                .unwrap_or_else(|| options.prefix.clone())
+        };
+        // 探测方式：同上。模板能改「怎么扫」，但改不了用户在命令行上写死的那一下。
+        let mode = if options.seen_mode {
+            options.mode
+        } else if let Some(p) = &selected {
+            p.mode
+        } else {
+            app_probe.as_ref().map(|ap| ap.mode).unwrap_or(options.mode)
+        };
+        // 范围 / 超时 / 并发：TUI 没有对应的命令行参数，所以模板恒可填空缺。
+        let probe_range = selected
+            .as_ref()
+            .map(|p| p.range)
+            .or_else(|| app_probe.as_ref().map(|ap| ap.range))
+            .unwrap_or(TargetRange::Standard);
+        let probe_timeout_ms = selected
+            .as_ref()
+            .map(|p| p.timeout_ms)
+            .or_else(|| app_probe.as_ref().map(|ap| ap.timeout_ms))
+            .unwrap_or(DEFAULT_TIMEOUT_MS);
+        let probe_concurrency = selected
+            .as_ref()
+            .map(|p| p.concurrency)
+            .or_else(|| app_probe.as_ref().map(|ap| ap.concurrency))
+            .unwrap_or(DEFAULT_CONCURRENCY);
+        let profile_name = selected.as_ref().map(|p| p.name.clone());
+
+        let spec = parse_spec(&prefix, probe_range).unwrap_or_else(|_| TargetSpec::default());
         let monitor = MonitorState::new(MonitorConfig {
             enabled: options.watch_seconds.is_some(),
             ..MonitorConfig::default()
         })
         .expect("默认监控配置必然合法");
-        let mode = options.mode;
-        // M12：后端**与它的标识**由核心一次给出，界面不再自己按 mock/方式推一遍
+        // M12：后端**与它的标识**由核心一次给出，界面不再自己按 mock/方式推一遍。
+        // 注意 `mode` 是**合并之后**的方式（可能来自模板），不是 `options.mode`。
         let (backend_id, backend) = cping_core::resolve_for_run(mode, options.mock);
         let mut app = Self {
-            prefix: options.prefix,
+            prefix,
             editing: false,
             view: options.view,
             hide_offline: options.hide_offline,
@@ -529,15 +672,32 @@ impl App {
             // M12：后端选择（含 mock 分支）统一走核心注册表，三端共用一处。
             scheduler: ProbeScheduler::new(backend),
             policy,
+            show_policy: false,
+            policy_field: 0,
+            policy_draft: policy,
+            policy_input: [None, None],
+            config,
+            config_path,
+            config_notes,
+            profile_name,
+            show_profiles: false,
+            profile_cursor: 0,
+            seen_target: options.seen_target,
+            seen_mode: options.seen_mode,
+            probe_range,
+            probe_timeout_ms,
+            probe_concurrency,
         };
         // M17：把安全策略装上调度器。策略来自命令行，不合法时写进状态栏——
         // 界面上看得见，而不是静默按默认值跑。
         app.apply_policy();
-        if !arg_warnings.is_empty() {
-            // 多条告警用「；」拼起来；这个分隔符也随语言变化（英文里用全角分号
-            // 会显得像乱码），所以它同样从字典取。
+        // 配置说明与参数告警都摆到状态栏；多条用「；」拼起来。这个分隔符也随语言
+        // 变化（英文里用全角分号会显得像乱码），所以它同样从字典取。
+        let mut notes = app.config_notes.clone();
+        notes.extend(arg_warnings);
+        if !notes.is_empty() {
             let sep = i18n::text(lang, Key::ArgWarnSeparator);
-            app.status = arg_warnings.join(sep);
+            app.status = notes.join(sep);
         }
         app.check_pending_snapshot();
         app
@@ -577,81 +737,28 @@ impl App {
 
     /// 本平台的后端能力摘要（M12）。
     ///
-    /// M18：核心只提供 `summary_zh()`（它没有 `_in` 变体，而本次改动不允许动
-    /// 核心层），所以这里按 `BackendCaps` 的**公开字段**自己拼一份可本地化的
-    /// 摘要。拼的是"怎么显示"，不是"怎么判定"——可用性、权限、地址族全部
-    /// 仍来自核心注册表，TUI 一个判断都不做。
+    /// 直接转发核心的 `BackendRegistry::summary_in(lang)`：这段文字（含中英标点
+    /// 与分隔符）只有一份实现，界面不再自己拼——曾经 TUI 自己也拼过一份，
+    /// 结果英文措辞与核心悄悄不一致。
     pub fn backend_summary(&self) -> String {
-        let reg = cping_core::BackendRegistry::new();
-        let mut parts: Vec<String> = Vec::new();
-        let icmp = reg.caps_of(cping_core::BackendId::Icmp4);
-        if icmp.available {
-            let key = if icmp.needs_privilege {
-                Key::BackendSummaryIcmpPrivileged
-            } else {
-                Key::BackendSummaryIcmp
-            };
-            parts.push(self.t(key).to_string());
-        } else {
-            parts.push(self.t(Key::BackendSummaryIcmpUnavailable).to_string());
-        }
-        let tcp = reg.caps_of(cping_core::BackendId::Tcp);
-        if tcp.available && tcp.ipv6 {
-            parts.push(self.t(Key::BackendSummaryTcp).to_string());
-        }
-        if !reg.caps_of(cping_core::BackendId::Icmp6).available {
-            parts.push(self.t(Key::BackendSummaryIcmp6Missing).to_string());
-        }
-        parts.join(self.t(Key::ArgWarnSeparator))
+        cping_core::BackendRegistry::new().summary_in(self.lang)
     }
 
     /// 当前后端能力的一行描述，供帮助面板使用。
     ///
-    /// 同上：核心的 `BackendCaps::describe()` 只会吐中文，这里按公开字段自己拼。
-    /// 后端标识用 `BackendId::key()`（`icmp4` / `tcp` / `mock`）而不是中文标签——
-    /// 这是稳定的机器标识，两种语言下都不该变。
+    /// 同样转发核心的 `BackendCaps::describe_in(lang)`（形如
+    /// `原生 ICMP（IPv4）· 需要权限 · 仅 IPv4`）。可选集合、地址族、权限与
+    /// 「为什么不可用」全部来自核心注册表，TUI 一个判断都不做。
     pub fn backend_caps_line(&self) -> String {
-        let caps = self.backend_caps();
-        let mut parts: Vec<String> = vec![caps.id.key().to_string()];
-        if caps.needs_privilege {
-            parts.push(self.t(Key::BackendPrivilege).to_string());
-        }
-        match (caps.ipv4, caps.ipv6) {
-            (true, true) => parts.push(self.t(Key::BackendFamiliesBoth).to_string()),
-            (true, false) => parts.push(self.t(Key::BackendFamiliesV4).to_string()),
-            (false, true) => parts.push(self.t(Key::BackendFamiliesV6).to_string()),
-            (false, false) => {}
-        }
-        if !caps.available {
-            parts.push(self.t(Key::BackendUnavailable).to_string());
-        }
-        parts.join(" · ")
+        self.backend_caps().describe_in(self.lang)
     }
 
     /// 目标规格的一行摘要，供状态栏使用。
     ///
-    /// 核心的 `TargetSpec::summary()` 只会吐中文（没有 `_in` 变体），这里按
-    /// **核心已经解析好的** `TargetSpec` 公开字段重新拼一份可本地化的文本。
-    /// 段数、目标数、段标签全部来自核心，TUI 不做任何解析或判定。
+    /// 转发核心的 `TargetSpec::summary_in(lang)`：段数、目标数、段标签与
+    /// 措辞全部来自核心，TUI 不做任何解析或判定。
     pub fn spec_summary(&self) -> String {
-        let spec = &self.spec;
-        if spec.targets.is_empty() {
-            return self.t(Key::SpecSummaryEmpty).to_string();
-        }
-        if spec.segments.len() == 1 {
-            let seg = &spec.segments[0];
-            return self.r(
-                Key::SpecSummarySingle,
-                &[&seg.label, &seg.count.to_string()],
-            );
-        }
-        self.r(
-            Key::SpecSummaryMulti,
-            &[
-                &spec.segments.len().to_string(),
-                &spec.targets.len().to_string(),
-            ],
-        )
+        self.spec.summary_in(self.lang)
     }
 
     /// 当前探测方式。
@@ -688,13 +795,7 @@ impl App {
             self.status = self.t(Key::StatusCantSwitchMode).into();
             return;
         }
-        self.backend_mode = mode;
-        // 沿用启动时的 mock 选择：演示途中切换方式不该把模拟换成真实探测
-        let (backend_id, backend) = cping_core::resolve_for_run(mode, self.use_mock);
-        self.backend_id = backend_id;
-        self.scheduler = ProbeScheduler::new(backend);
-        // 换方式后旧结果不再可比，重置变化基线
-        self.monitor.reset_baseline();
+        self.rebuild_backend(mode);
         // `mode.describe()` 是 `ICMP` / `TCP:80` 这类协议标识，两种语言下一致，
         // 不进字典（它就是"参数名不翻译"的同类）。
         let desc = mode.describe();
@@ -703,6 +804,20 @@ impl App {
         // 保留网段守卫就被悄悄丢掉了。放在最后，好让装配失败的信息
         // 盖过上面那句成功提示。
         self.apply_policy();
+    }
+
+    /// 按新的探测方式重建后端与调度器（**不含**状态栏文案与策略装配）。
+    ///
+    /// 抽出来是为了让「切方式」与「应用模板」（模板也带 `mode`）走同一条路：
+    /// 两处各写一遍的结果必然是一处忘了 `reset_baseline`、另一处忘了换后端。
+    fn rebuild_backend(&mut self, mode: ProbeMode) {
+        self.backend_mode = mode;
+        // 沿用启动时的 mock 选择：演示途中切换方式不该把模拟换成真实探测
+        let (backend_id, backend) = cping_core::resolve_for_run(mode, self.use_mock);
+        self.backend_id = backend_id;
+        self.scheduler = ProbeScheduler::new(backend);
+        // 换方式后旧结果不再可比，重置变化基线
+        self.monitor.reset_baseline();
     }
 
     pub fn run<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> io::Result<()> {
@@ -790,6 +905,19 @@ impl App {
             return;
         }
 
+        // M16 模板面板 / M17 策略面板：面板打开时按键归面板。
+        // 与上面那几个「任意键关闭」的面板不同，这两个面板里**只有 Esc 或
+        // 再按一次面板键才关闭**——面板内本来就要用方向键与数字键，误触关掉
+        // 会把用户刚挑好的模板/刚敲的数字丢掉。
+        if self.show_profiles {
+            self.handle_profiles_key(action);
+            return;
+        }
+        if self.show_policy {
+            self.handle_policy_key(action);
+            return;
+        }
+
         if self.editing {
             match action {
                 Action::Char(c) => {
@@ -867,6 +995,8 @@ impl App {
             }
             Action::ShowAlerts => self.toggle_alerts_panel(),
             Action::ToggleAlertMute => self.toggle_alert_mute(),
+            Action::ShowProfiles => self.toggle_profiles_panel(),
+            Action::ShowPolicy => self.toggle_policy_panel(),
             Action::LookupHostname => self.lookup_selected_hostname(),
             Action::SaveSnapshot => self.save_snapshot(),
             Action::LoadSnapshot => self.load_snapshot_from_disk(),
@@ -983,9 +1113,8 @@ impl App {
 
     /// 指纹面板的展示文本（供测试断言使用，与界面同源）。
     ///
-    /// `device_summary()` 原样透传：设备类型与推断依据由**核心**给出
-    /// （`DeviceGuess` 的 `kind` / `basis` 都是中文短语），界面重写它等于
-    /// 复刻核心的推断逻辑——那是明令禁止的。它保持中文，是本次改动的已知边界。
+    /// `device_summary_in(lang)`：设备类型与推断依据由**核心**按当前语言产出。
+    /// 界面**不重写**它——重写等于复刻核心的推断逻辑与措辞，两者迟早漂移。
     pub fn fingerprint_lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
         lines.push(self.t(Key::FingerprintLinesHeader).to_string());
@@ -1004,8 +1133,9 @@ impl App {
                     lines.push(format!("    :{} {banner}", f.port));
                 }
             }
-            if !fp.device_summary().is_empty() {
-                lines.push(format!("    {}", fp.device_summary()));
+            let guess = fp.device_summary_in(self.lang);
+            if !guess.is_empty() {
+                lines.push(format!("    {guess}"));
             }
         }
         lines
@@ -1148,13 +1278,18 @@ impl App {
         // 上一轮基线由引擎自己维护（`seen`），这里传空切片即可——
         // 引擎内部对「没见过的地址」有明确语义，不需要界面再存一份。
         let at = self.round_at_ms.unwrap_or_else(now_ms);
-        engine.evaluate(
+        // 正文按当前界面语言产出。告警**状态文件里不存 message**
+        // （只存 kind / ip / 时间戳），所以跟着语言走不会改变落盘内容。
+        // 先把 lang 取出来：下面 `engine` 借走了 `self.alerts`。
+        let lang = self.lang;
+        engine.evaluate_in(
             at,
             self.monitor.round(),
             &[],
             &done,
             &self.thresholds,
             &uptime,
+            lang,
         );
     }
 
@@ -1170,12 +1305,14 @@ impl App {
         };
         let mut lines = Vec::new();
         let cfg = engine.config();
-        // 规则名走 TUI 字典（核心只给 `label_zh()`，见 `i18n::alert_kind_key`）。
+        // 规则名直接转发核心的 `AlertKind::label_in`——两份翻译的旧写法
+        // 会让英文措辞与核心悄悄不一致（核心是 "latency above threshold"，
+        // TUI 曾是 "latency over threshold"）。
         let enabled: Vec<&str> = cfg
             .rules
             .iter()
             .filter(|r| r.enabled)
-            .map(|r| self.t(i18n::alert_kind_key(r.kind)))
+            .map(|r| r.kind.label_in(self.lang))
             .collect();
         lines.push(self.r(
             Key::AlertStatusLine,
@@ -1207,7 +1344,7 @@ impl App {
                     cping_core::format_unix_local(e.at_ms / 1000),
                     e.round,
                     e.ip.to_string(),
-                    self.t(i18n::alert_kind_key(e.kind))
+                    e.kind.label_in(self.lang)
                 )
             })
             .take(200)
@@ -1220,9 +1357,8 @@ impl App {
             lines.extend(recent);
         }
         lines.push(String::new());
-        // `e.message` 由核心生成（`cping_core::alerts` 里只有中文），界面
-        // 不能重写它——那等于复刻核心的告警文案。它保持原样，是本次改动的
-        // 已知边界（外面那层「最近一条：」是翻了的）。
+        // `e.message` 由核心层按当前语言产出（`AlertEngine::evaluate_in`），
+        // 界面**不重写**它——重写等于复刻核心的告警文案，两份措辞迟早漂移。
         lines.push(
             self.r(
                 Key::AlertLinesLatest,
@@ -1254,6 +1390,309 @@ impl App {
             ""
         };
         self.r(Key::AlertNote, &[&total.to_string(), suffix])
+    }
+
+    // ------------------------------------------------------------------
+    // M16：配置与扫描模板
+    // ------------------------------------------------------------------
+
+    /// 模板名列表（按配置文件里的出现顺序）。
+    pub fn profile_names(&self) -> Vec<String> {
+        self.config
+            .as_ref()
+            .map(|d| {
+                d.profile_names()
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// 本次使用的配置文件路径（供界面显示，存在与否都显示）。
+    pub fn config_path_label(&self) -> String {
+        self.config_path.display().to_string()
+    }
+
+    /// 打开 / 关闭模板面板。打开时把光标落在**当前模板**上。
+    pub fn toggle_profiles_panel(&mut self) {
+        self.show_profiles = !self.show_profiles;
+        if !self.show_profiles {
+            return;
+        }
+        self.profile_cursor = self
+            .profile_name
+            .as_ref()
+            .and_then(|cur| self.profile_names().iter().position(|n| n == cur))
+            .unwrap_or(0);
+        if self.config.is_none() {
+            let path = self.config_path_label();
+            self.status = self.r(Key::ProfilesNoConfig, &[&path]);
+        }
+    }
+
+    /// 模板面板的按键。**只有 Esc 或再按一次 `P` 才关闭**：面板里要用方向键与
+    /// 回车，误触关闭会把刚挑好的模板丢掉。
+    fn handle_profiles_key(&mut self, action: Action) {
+        // 先取一份名字，避免「借用 self 再改 self」
+        let names = self.profile_names();
+        match action {
+            Action::ScrollUp => self.profile_cursor = self.profile_cursor.saturating_sub(1),
+            Action::ScrollDown => {
+                if !names.is_empty() {
+                    self.profile_cursor = (self.profile_cursor + 1).min(names.len() - 1);
+                }
+            }
+            Action::Start => {
+                if let Some(name) = names.get(self.profile_cursor).cloned() {
+                    self.apply_profile(name);
+                }
+            }
+            Action::Cancel | Action::ShowProfiles => self.show_profiles = false,
+            Action::ForceQuit | Action::Quit => self.quit_requested = true,
+            _ => {}
+        }
+    }
+
+    /// 应用一份模板。合并优先级与 CLI 一致：**命令行显式给过的字段绝不被覆盖**。
+    ///
+    /// 与 CLI 的差别只有一处、且是刻意的：TUI 是交互程序，探测途中改「怎么扫」
+    /// 既危险（后端与调度器要重建）又容易让人以为结果换了，所以运行中直接拒绝，
+    /// 而不是排队等这一轮结束。
+    pub fn apply_profile(&mut self, name: String) {
+        if self.running {
+            self.status = self.t(Key::StatusProfileBlocked).into();
+            return;
+        }
+        let Some(profile) = self.config.as_ref().and_then(|d| d.profile(&name)).cloned() else {
+            let path = self.config_path_label();
+            self.status = self.r(Key::ProfilesNoConfig, &[&path]);
+            return;
+        };
+        // 模板只填空缺：命令行显式给过的目标与探测方式一律保留。
+        if !self.seen_target {
+            self.prefix = profile.spec.clone();
+        }
+        self.probe_range = profile.range;
+        self.probe_timeout_ms = profile.timeout_ms;
+        self.probe_concurrency = profile.concurrency;
+        if !self.seen_mode {
+            self.rebuild_backend(profile.mode);
+        }
+        // 目标展示（矩阵/表格用）随之刷新；解析不出来就留空，由下一次 Enter 报错。
+        if let Ok(s) = parse_spec(&self.prefix, self.probe_range) {
+            self.spec = s;
+        }
+        self.profile_name = Some(profile.name.clone());
+        self.status = self.r(
+            Key::StatusProfileApplied,
+            &[&profile.name, &profile.describe_in(self.lang)],
+        );
+        // 重建过后端就要重新装配策略（否则切模板会把限速丢掉）；
+        // 放在最后，好让装配失败的信息盖过上面那句成功提示。
+        self.apply_policy();
+    }
+
+    /// 模板面板的展示文本（供测试断言，与界面同源）。
+    pub fn profile_lines(&self) -> Vec<String> {
+        let mut lines = vec![self.t(Key::ProfilesHint).to_string()];
+        match &self.config {
+            None => {
+                let path = self.config_path_label();
+                lines.push(self.r(Key::ProfilesNoConfig, &[&path]));
+            }
+            Some(doc) => {
+                let path = self.config_path_label();
+                lines.push(self.r(Key::ProfilesFilePath, &[&path]));
+                if doc.profiles.is_empty() {
+                    lines.push(self.t(Key::ProfilesEmpty).to_string());
+                } else {
+                    for (i, p) in doc.profiles.iter().enumerate() {
+                        // 光标与「当前模板」是两个不同的记号：前者是选择，后者是
+                        // 已经生效。两者都显示，免得用户以为「选到 = 已应用」。
+                        let marker = if i == self.profile_cursor { ">" } else { " " };
+                        let current = if self.profile_name.as_deref() == Some(p.name.as_str()) {
+                            self.t(Key::ProfilesCurrentMark)
+                        } else {
+                            ""
+                        };
+                        lines.push(format!("{marker} {}{current}", p.describe_in(self.lang)));
+                    }
+                }
+                lines.push(self.t(Key::ProfilesCliNote).to_string());
+            }
+        }
+        lines
+    }
+
+    // ------------------------------------------------------------------
+    // M17：安全策略面板
+    // ------------------------------------------------------------------
+
+    /// 打开 / 关闭策略面板。打开时用当前策略做草稿、两个输入框置空
+    /// （空 = 显示草稿值，用户一敲数字就变成「正在输入」）。
+    pub fn toggle_policy_panel(&mut self) {
+        self.show_policy = !self.show_policy;
+        if self.show_policy {
+            self.policy_draft = self.policy;
+            self.policy_field = 0;
+            self.policy_input = [None, None];
+        }
+    }
+
+    /// 策略面板的按键。数字键只接受数字（避免把 `q` 之类当输入），
+    /// 合法性一律留到 Enter 时交给核心判定。
+    fn handle_policy_key(&mut self, action: Action) {
+        match action {
+            Action::ScrollUp => self.policy_field = self.policy_field.saturating_sub(1),
+            Action::ScrollDown => self.policy_field = (self.policy_field + 1).min(2),
+            Action::Char('+') => self.nudge_policy_field(1),
+            Action::Char('-') => self.nudge_policy_field(-1),
+            Action::Char(c) if c.is_ascii_digit() && self.policy_field < 2 => {
+                let slot = &mut self.policy_input[self.policy_field];
+                let mut text = slot.take().unwrap_or_default();
+                // 上限 9 位：再多的位数一定越界，留着只会让人误读。
+                if text.len() < 9 {
+                    text.push(c);
+                }
+                *slot = Some(text);
+            }
+            Action::Backspace => {
+                if self.policy_field < 2 {
+                    if let Some(text) = self.policy_input[self.policy_field].as_mut() {
+                        text.pop();
+                    }
+                }
+            }
+            Action::Char(' ') => {
+                if self.policy_field == 2 {
+                    self.policy_draft.allow_reserved = !self.policy_draft.allow_reserved;
+                }
+            }
+            Action::Start => self.commit_policy(),
+            Action::Cancel | Action::ShowPolicy => self.show_policy = false,
+            Action::ForceQuit | Action::Quit => self.quit_requested = true,
+            _ => {}
+        }
+    }
+
+    /// 数值字段的「微调」：±50 pps / ±64 个目标。只是替用户少敲几个键，
+    /// **不做夹取**——越过上限照样等到 Enter 时被核心拒绝。
+    fn nudge_policy_field(&mut self, dir: i64) {
+        if self.policy_field >= 2 {
+            return;
+        }
+        let step = if self.policy_field == 0 { 50 } else { 64 };
+        let current = if let Some(text) = &self.policy_input[self.policy_field] {
+            match text.parse::<i64>() {
+                Ok(v) => v,
+                // 敲进去的还不是个合法数字（比如空串）：不猜，原地不动。
+                Err(_) => return,
+            }
+        } else if self.policy_field == 0 {
+            self.policy_draft.max_pps as i64
+        } else {
+            self.policy_draft.max_targets as i64
+        };
+        let next = (current + dir * step).max(0);
+        self.policy_input[self.policy_field] = Some(next.to_string());
+    }
+
+    /// 某个数值字段当前要用的文本：有输入就用输入，否则用草稿值。
+    fn policy_field_text(&self, i: usize) -> String {
+        match &self.policy_input[i] {
+            Some(t) => t.clone(),
+            None if i == 0 => self.policy_draft.max_pps.to_string(),
+            None => self.policy_draft.max_targets.to_string(),
+        }
+    }
+
+    fn policy_field_label(&self, i: usize) -> &'static str {
+        match i {
+            0 => self.t(Key::PolicyFieldPps),
+            _ => self.t(Key::PolicyFieldTargets),
+        }
+    }
+
+    /// 校验并应用草稿策略。
+    ///
+    /// 不合法**必须可见且不生效**：写状态栏、保留草稿（用户能接着改），
+    /// 而不是夹取成合法值或静默忽略——「我明明设了 1000 怎么还是 500」
+    /// 是本项目最不能接受的那类问题。
+    fn commit_policy(&mut self) {
+        let mut draft = self.policy_draft;
+        for (i, field) in [0usize, 1].iter().enumerate() {
+            let text = self.policy_field_text(*field);
+            let parsed = text.parse::<u64>();
+            match parsed {
+                Ok(v) => {
+                    if i == 0 {
+                        draft.max_pps = u32::try_from(v).unwrap_or(u32::MAX);
+                    } else {
+                        draft.max_targets = usize::try_from(v).unwrap_or(usize::MAX);
+                    }
+                }
+                Err(_) => {
+                    let label = self.policy_field_label(*field);
+                    let shown = format!("{text:?}");
+                    // 复用既有的「整数解析失败」文案（参数名不翻译，作为参数传入）。
+                    self.status = self.r(Key::ArgIntExpected, &[label, &shown]);
+                    return;
+                }
+            }
+        }
+        // 交给核心校验：越界**一律报错、绝不夹取**。
+        if let Err(e) = draft.validate_in(self.lang) {
+            let msg = e.localized(self.lang);
+            self.status = self.r(Key::StatusPolicyInvalid, &[&msg]);
+            return;
+        }
+        self.policy = draft;
+        self.policy_draft = draft;
+        self.policy_input = [None, None];
+        self.apply_policy();
+        // 成功也用状态栏说一声；`apply_policy` 失败时它会把上面这句盖掉。
+        if !self.status.starts_with(self.t(Key::StatusPolicyInvalid)) {
+            self.status = self.r(Key::StatusPolicyApplied, &[&draft.describe_in(self.lang)]);
+        }
+    }
+
+    /// 策略面板的展示文本（供测试断言，与界面同源）。
+    pub fn policy_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        // 「当前生效」与「面板里正在编辑」分开显示：前者是事实，后者是草稿。
+        lines.push(self.r(
+            Key::PolicyLinesCurrent,
+            &[&self.policy.describe_in(self.lang)],
+        ));
+        lines.push(self.r(
+            Key::PolicyLinesDefaults,
+            &[
+                &cping_core::DEFAULT_MAX_PPS.to_string(),
+                &cping_core::MAX_TARGETS.to_string(),
+                &cping_core::MAX_PPS_LIMIT.to_string(),
+                &cping_core::MAX_TARGETS.to_string(),
+            ],
+        ));
+        lines.push(self.t(Key::PolicyHint).to_string());
+        for i in 0..3 {
+            let marker = if i == self.policy_field { ">" } else { " " };
+            let (label, value) = if i < 2 {
+                (self.policy_field_label(i), self.policy_field_text(i))
+            } else {
+                let v = if self.policy_draft.allow_reserved {
+                    self.t(Key::PolicyOn)
+                } else {
+                    self.t(Key::PolicyOff)
+                };
+                (self.t(Key::PolicyFieldReserved), v.to_string())
+            };
+            lines.push(self.r(Key::PolicyFieldLine, &[marker, label, &value]));
+        }
+        if self.policy_draft.allow_reserved {
+            lines.push(self.t(Key::PolicyWarnReserved).to_string());
+        }
+        lines
     }
 
     // ------------------------------------------------------------------
@@ -1379,7 +1818,8 @@ impl App {
     // ------------------------------------------------------------------
 
     pub fn start_scan(&mut self) {
-        let spec = match parse_spec(&self.prefix, TargetRange::Standard) {
+        // M16：范围 / 超时 / 并发不再硬编码——它们可能来自模板或配置 `[probe]`。
+        let spec = match parse_spec(&self.prefix, self.probe_range) {
             Ok(s) => s,
             Err(e) => {
                 // M18：核心错误按当前语言渲染（`localized`），界面只挑语言。
@@ -1392,9 +1832,9 @@ impl App {
         let targets = spec.targets.clone();
         let config = ProbeConfig {
             prefix: parse_prefix(&self.prefix).ok(),
-            range: TargetRange::Standard,
-            timeout_ms: 1000,
-            concurrency: 32,
+            range: self.probe_range,
+            timeout_ms: self.probe_timeout_ms,
+            concurrency: self.probe_concurrency,
             thresholds: self.thresholds,
             mode: self.backend_mode,
         };
@@ -1799,9 +2239,10 @@ impl App {
                 return;
             }
         };
-        // 用规格解析器重建目标：它与 `start_scan` 走的是同一条路径，
-        // 因此「快照声明的目标数」与「今天算出来的目标数」可直接比较。
-        let targets = match spec_from_prefix(&parsed, TargetRange::Standard) {
+        // 用规格解析器重建目标：它与 `start_scan` 走的是同一条路径（**同一个
+        // 范围规则**，默认 Standard），因此「快照声明的目标数」与「今天算出来的
+        // 目标数」可直接比较。范围也可能来自模板，所以这里不能写死 Standard。
+        let targets = match spec_from_prefix(&parsed, self.probe_range) {
             Ok(spec) => spec.targets,
             Err(e) => {
                 let msg = e.localized(self.lang);
@@ -2085,6 +2526,10 @@ mod tests {
             no_color: true,
             mock: true,
             snapshot_dir: Some(unique_tmp_dir()),
+            // M16：测试不该依赖「当前工作目录里恰好有没有 cping.toml」。显式指向一个
+            // 不存在的路径，让配置加载在测试里恒为「没有配置」——否则仓库里多出一个
+            // 文件就会悄悄改变断言结果，而这种失败最难查。需要配置的测试自己指定路径。
+            config_path: Some(unique_tmp_dir().join("no-such-config.toml")),
             ..Options::default()
         }
     }
@@ -2961,8 +3406,288 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // M18：中 / 英双语
+    // M16：配置与扫描模板（界面入口 + 三层合并）
     // ------------------------------------------------------------------
+
+    /// 把一段 TOML 写进一个**专属临时目录**里的 `cping.toml`，返回路径。
+    /// 每个测试一个目录，避免并行执行时互相覆盖。
+    fn write_config(body: &str) -> PathBuf {
+        let dir = unique_tmp_dir();
+        let path = dir.join("cping.toml");
+        std::fs::write(&path, body).expect("写测试配置");
+        path
+    }
+
+    /// 一份能用的最小配置：一个走 TCP:445 的模板 `lan`，并被设为 `default_profile`。
+    fn sample_config() -> PathBuf {
+        write_config(
+            "schema_version = 2\n\
+             default_profile = \"lan\"\n\
+             \n\
+             [[profiles]]\n\
+             name = \"lan\"\n\
+             spec = \"10.9.8.0/24\"\n\
+             range = \"hosts_only\"\n\
+             timeout_ms = 1500\n\
+             concurrency = 24\n\
+             mode = \"tcp\"\n\
+             tcp_port = 445\n",
+        )
+    }
+
+    #[test]
+    fn m16_config_file_is_loaded_and_the_default_profile_is_applied() {
+        let app = App::new(Options {
+            config_path: Some(sample_config()),
+            ..opts()
+        });
+        // 界面要能看出「用的是哪份模板」——不是 None。
+        assert_eq!(app.profile_name.as_deref(), Some("lan"));
+        // 模板只填空缺：命令行没给目标，于是目标取自模板。
+        assert_eq!(app.prefix, "10.9.8.0/24");
+        assert_eq!(app.probe_range, TargetRange::HostsOnly);
+        assert_eq!(app.probe_timeout_ms, 1500);
+        assert_eq!(app.probe_concurrency, 24);
+        // 探测方式同样来自模板。
+        assert_eq!(app.backend_mode, ProbeMode::Tcp { port: 445 });
+        // 输入区把当前模板摆出来，用户一眼能看见。
+        let out = render(&app, 100, 32);
+        assert!(out.contains("模板lan"), "输入区应标出当前模板：{out}");
+    }
+
+    #[test]
+    fn m16_explicit_cli_target_and_mode_win_over_the_profile() {
+        // 命令行显式给的目标 / 方式，模板**不得**覆盖——与 CLI 是同一套优先级。
+        let app = App::new(Options {
+            config_path: Some(sample_config()),
+            prefix: "172.16.0.0/30".to_string(),
+            seen_target: true,
+            mode: ProbeMode::Icmp,
+            seen_mode: true,
+            ..opts()
+        });
+        assert_eq!(app.prefix, "172.16.0.0/30", "命令行目标优先于模板");
+        assert_eq!(app.backend_mode, ProbeMode::Icmp, "命令行方式优先于模板");
+        // 模板里**没冲突**的字段照常生效——所以它仍然是「正在用的模板」，
+        // 只是被命令行压住了两处。刻意仍然记录模板名，免得用户以为模板没生效。
+        assert_eq!(app.profile_name.as_deref(), Some("lan"));
+        assert_eq!(app.probe_timeout_ms, 1500, "模板的非冲突字段照样生效");
+        assert_eq!(app.probe_concurrency, 24);
+    }
+
+    #[test]
+    fn m16_broken_config_is_reported_but_does_not_prevent_startup() {
+        // 比本程序更新的 schema 会被核心**拒绝读取**：坏配置不得让界面起不来，
+        // 也绝不能猜一份模板来用——退回「没有模板」的行为，把问题摆到状态栏。
+        let path = write_config("schema_version = 999\ndefault_profile = \"lan\"\n");
+        let app = App::new(Options {
+            config_path: Some(path),
+            ..opts()
+        });
+        assert!(app.profile_name.is_none(), "读不出来就当作没有模板");
+        assert!(
+            app.status.contains("配置文件无法读取"),
+            "坏配置必须在状态栏看得见：{:?}",
+            app.status
+        );
+        // 而且照常可用：目标回落到默认值，没 panic。
+        assert!(!app.prefix.is_empty());
+    }
+
+    #[test]
+    fn m16_missing_config_file_is_not_an_error() {
+        // 没有配置文件是**正常**的：不需要模板的用户零打扰，不作任何告警。
+        let app = App::new(opts());
+        assert!(app.profile_name.is_none());
+        assert!(
+            !app.status.contains("配置文件无法读取"),
+            "缺文件不该报错：{:?}",
+            app.status
+        );
+        // 看不出来也得说出来：输入区写「未使用模板」。
+        let out = render(&app, 100, 32);
+        assert!(out.contains("未使用模板"), "没有模板也要照实写：{out}");
+        // 打开模板面板时说明「没加载到配置」，而不是一片空白。
+        let mut app = app;
+        app.toggle_profiles_panel();
+        let lines = app.profile_lines();
+        assert!(
+            lines.iter().any(|l| l.contains("未加载配置文件")),
+            "面板应说明没配置：{lines:?}"
+        );
+    }
+
+    #[test]
+    fn m16_profiles_panel_lists_names_and_marks_the_current_one() {
+        let mut app = App::new(Options {
+            config_path: Some(sample_config()),
+            ..opts()
+        });
+        assert_eq!(app.profile_names(), vec!["lan".to_string()]);
+        app.toggle_profiles_panel();
+        assert!(app.show_profiles);
+        // 光标默认落在「当前模板」上，直接按 Enter 就是重新应用它。
+        assert_eq!(app.profile_cursor, 0);
+        let lines = app.profile_lines();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("lan") && l.contains("当前")),
+            "面板要标出当前模板：{lines:?}"
+        );
+    }
+
+    #[test]
+    fn m16_applying_a_profile_while_running_is_refused_not_queued() {
+        // 运行中改「怎么扫」既危险又容易误导，TUI 是交互程序，直接拒绝。
+        let mut app = App::new(Options {
+            config_path: Some(sample_config()),
+            ..opts()
+        });
+        app.running = true;
+        app.apply_profile("lan".to_string());
+        assert!(
+            app.status.contains("探测进行中"),
+            "运行中切换必须被拒绝：{:?}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn m16_profile_panel_keys_do_not_close_on_arrow_keys() {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+        let mut app = App::new(Options {
+            config_path: Some(sample_config()),
+            ..opts()
+        });
+        app.on_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE));
+        assert!(app.show_profiles, "P 应打开模板面板");
+        // 方向键只在面板内移动光标，**不得**像旧面板那样「任意键关闭」。
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert!(app.show_profiles, "方向键不该关掉模板面板");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.show_profiles, "应用后面板仍开着，可继续挑");
+        // 再按一次 P 才关闭。
+        app.on_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE));
+        assert!(!app.show_profiles, "再按 P 应关闭面板");
+    }
+
+    // ------------------------------------------------------------------
+    // M17：安全策略面板（可见、不夹取、不静默）
+    // ------------------------------------------------------------------
+
+    /// 打开面板、清掉两个数值框的输入并键入一串数字（走真实按键路径）。
+    fn type_policy_number(app: &mut App, text: &str) {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+        app.toggle_policy_panel();
+        assert!(app.show_policy);
+        for c in text.chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+    }
+
+    #[test]
+    fn m17_policy_panel_applies_a_valid_value_to_the_scheduler() {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+        let mut app = App::new(opts());
+        type_policy_number(&mut app, "321");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.policy.max_pps, 321, "合法值应写回策略");
+        // 关键：必须**作用到调度器**，下一次扫描才真的按它跑。
+        assert_eq!(app.scheduler.policy().max_pps, 321);
+        assert!(
+            app.status.contains("安全策略已应用"),
+            "成功也要看得见：{:?}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn m17_policy_panel_out_of_range_value_is_visible_and_not_applied() {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+        let mut app = App::new(opts());
+        let before = app.scheduler.policy().max_pps;
+        // 100_000 是硬上限，多一位就必然越界。
+        type_policy_number(&mut app, "999999");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            app.status.contains("安全策略无效"),
+            "越界必须显式提示：{:?}",
+            app.status
+        );
+        // 不夹取：策略与调度器都**原封不动**（不是被悄悄改成 100000）。
+        assert_eq!(app.policy.max_pps, before);
+        assert_eq!(app.scheduler.policy().max_pps, before);
+        // 草稿留着，用户能接着改——而不是被清空后不知道刚才敲了什么。
+        assert_eq!(app.policy_input[0].as_deref(), Some("999999"));
+        assert!(app.show_policy, "失败也留在面板里，方便改完重试");
+    }
+
+    #[test]
+    fn m17_policy_panel_editing_one_field_does_not_touch_the_other() {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+        let mut app = App::new(opts());
+        let targets = app.policy.max_targets;
+        type_policy_number(&mut app, "123");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.policy.max_pps, 123);
+        // 只改了 pps，目标上限保持不动（没输入 = 用草稿值）。
+        assert_eq!(app.policy.max_targets, targets);
+    }
+
+    #[test]
+    fn m17_reserved_switch_shows_an_explicit_warning() {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+        let mut app = App::new(opts());
+        app.toggle_policy_panel();
+        // 光标移到「允许保留网段」那一行（0=pps, 1=目标数, 2=保留网段）。
+        let mut lines = app.policy_lines();
+        assert!(
+            !lines.iter().any(|l| l.contains("已放行")),
+            "默认不可见警示（关着时）：{lines:?}"
+        );
+        app.policy_field = 2;
+        app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(app.policy_draft.allow_reserved, "空格应打开开关");
+        lines = app.policy_lines();
+        assert!(
+            lines.iter().any(|l| l.contains("已放行组播 / 保留网段")),
+            "打开开关必须给出显式警示：{lines:?}"
+        );
+    }
+
+    #[test]
+    fn m17_reserved_switch_affects_the_next_scan_policy() {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+        let mut app = App::new(opts());
+        app.toggle_policy_panel();
+        app.policy_field = 2;
+        app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.policy.allow_reserved);
+        assert!(
+            app.scheduler.policy().allow_reserved,
+            "开关必须作用到调度器"
+        );
+    }
+
+    #[test]
+    fn m17_policy_panel_shows_describe_line_and_defaults() {
+        let mut app = App::new(opts());
+        app.toggle_policy_panel();
+        let lines = app.policy_lines();
+        let joined = lines.join("\n");
+        // 面板必须展示核心的 `describe_in(lang)`，并明写默认限速与默认拒绝保留网段。
+        assert!(
+            joined.contains(&app.policy.describe_in(app.lang)),
+            "面板应展示核心策略描述：{joined}"
+        );
+        assert!(joined.contains("默认拒绝组播 / 保留网段"), "{joined}");
+        assert!(
+            joined.contains(&cping_core::DEFAULT_MAX_PPS.to_string()),
+            "要写出默认限速值：{joined}"
+        );
+    }
 
     /// 与 `crate::i18n::tests::has_cjk` 同源（那边是私有的，这里再来一份小的）。
     fn has_cjk(s: &str) -> bool {

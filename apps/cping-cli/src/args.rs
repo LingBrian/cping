@@ -285,7 +285,10 @@ impl Args {
                 }
                 "--fp-ports" => {
                     let v = take_value("--fp-ports")?;
-                    let ports = cping_core::PortScanConfig::parse_ports(&v)
+                    // 用 `_in(lang)`：端口列表的解析错误也是给人看的一句话，
+                    // 英文界面下不该冒出中文。外层的「--fp-ports is invalid: 」
+                    // 是 CLI 自己的框（`Key::ErrFpPorts`），内层由核心按语言给。
+                    let ports = cping_core::PortScanConfig::parse_ports_in(&v, lang)
                         .map_err(|e| i18n::render(lang, Key::ErrFpPorts, &[&e]))?;
                     args.fp_ports = ports;
                 }
@@ -1278,7 +1281,9 @@ mod tests {
 
     #[test]
     fn target_file_is_read_and_comments_are_skipped() {
-        let dir = std::env::temp_dir().join("cping_cli_args_test");
+        // 目录带进程号：固定名会让并行跑的两份测试共用同一目录，
+        // 一方删文件、另一方正好在读时就会随机失败（见 `policy.rs` 同名说明）。
+        let dir = std::env::temp_dir().join(format!("cping_cli_args_test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("targets.txt");
         std::fs::write(&path, "# 注释\n10.0.0.1\n\n10.0.0.2\n").unwrap();
@@ -1528,9 +1533,10 @@ mod tests {
     /// 写一份临时配置，返回路径。
     ///
     /// 文件名由调用方指定（不用随机数、不引依赖），每个用例一个名字，
-    /// 这样并行跑测试时不会互相踩同一个文件。
+    /// 这样并行跑测试时不会互相踩同一个文件；目录本身再带上进程号，
+    /// 让「同机并行跑两份测试」也互不干扰（见 `policy.rs` 同名说明）。
     fn write_config(name: &str, text: &str) -> String {
-        let dir = std::env::temp_dir().join("cping_cli_m16_test");
+        let dir = std::env::temp_dir().join(format!("cping_cli_m16_test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(name);
         std::fs::write(&path, text).unwrap();
