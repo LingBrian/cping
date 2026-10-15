@@ -440,6 +440,22 @@ pub enum Key {
     AlertLatencyAbove,
     /// 参数：`地址`、`实测`、`阈值`
     AlertUptimeBelow,
+
+    // ---- M18 第三步：无障碍 ----
+    LabelThemeDefault,
+    LabelThemeHighContrast,
+    LabelThemeColorBlind,
+    LabelFontScaleNormal,
+    LabelFontScaleLarge,
+    LabelFontScaleHuge,
+    LabelVisionNormal,
+    LabelVisionProtanopia,
+    LabelVisionDeuteranopia,
+    LabelVisionTritanopia,
+    /// 参数：`类别`、`实测对比度`、`要求对比度`
+    A11yLowContrast,
+    /// 参数：`甲类别`、`乙类别`、`视觉类型`、`实测距离`
+    A11yIndistinguishable,
 }
 
 /// 中英**本来就该一模一样**的技术记号。
@@ -621,11 +637,25 @@ const fn ordinal(key: Key) -> usize {
         Key::AlertDisappearedWithNote => 146,
         Key::AlertLatencyAbove => 147,
         Key::AlertUptimeBelow => 148,
+
+        // ---- M18 第三步：无障碍（序号续在末尾，TABLE 顺序必须与此一致）----
+        Key::LabelThemeDefault => 151,
+        Key::LabelThemeHighContrast => 152,
+        Key::LabelThemeColorBlind => 153,
+        Key::LabelFontScaleNormal => 154,
+        Key::LabelFontScaleLarge => 155,
+        Key::LabelFontScaleHuge => 156,
+        Key::LabelVisionNormal => 157,
+        Key::LabelVisionProtanopia => 158,
+        Key::LabelVisionDeuteranopia => 159,
+        Key::LabelVisionTritanopia => 160,
+        Key::A11yLowContrast => 161,
+        Key::A11yIndistinguishable => 162,
     }
 }
 
 /// 字典里的键总数。
-pub const KEY_COUNT: usize = 151;
+pub const KEY_COUNT: usize = 163;
 
 /// 全部条目。
 ///
@@ -1403,6 +1433,67 @@ pub static TABLE: &[Entry] = &[
         key: Key::DiffSummary,
         zh: "新上线 {} · 已离线 {} · 延迟变化 {} · 状态变化 {}（另：仅旧 {} / 仅新 {}）",
         en: "appeared {} · disappeared {} · latency changed {} · status changed {} (plus: base only {} / next only {})",
+    },
+    // ---- M18 第三步：无障碍 ----
+    Entry {
+        key: Key::LabelThemeDefault,
+        zh: "默认主题",
+        en: "default theme",
+    },
+    Entry {
+        key: Key::LabelThemeHighContrast,
+        zh: "高对比主题",
+        en: "high-contrast theme",
+    },
+    Entry {
+        key: Key::LabelThemeColorBlind,
+        zh: "色盲友好主题",
+        en: "color-blind-friendly theme",
+    },
+    Entry {
+        key: Key::LabelFontScaleNormal,
+        zh: "标准字号",
+        en: "normal size",
+    },
+    Entry {
+        key: Key::LabelFontScaleLarge,
+        zh: "大字号（150%）",
+        en: "large (150%)",
+    },
+    Entry {
+        key: Key::LabelFontScaleHuge,
+        zh: "特大字号（200%）",
+        en: "extra large (200%)",
+    },
+    Entry {
+        key: Key::LabelVisionNormal,
+        zh: "正常色觉",
+        en: "normal color vision",
+    },
+    Entry {
+        key: Key::LabelVisionProtanopia,
+        zh: "红色盲",
+        en: "protanopia (red-blind)",
+    },
+    Entry {
+        key: Key::LabelVisionDeuteranopia,
+        zh: "绿色盲",
+        en: "deuteranopia (green-blind)",
+    },
+    Entry {
+        key: Key::LabelVisionTritanopia,
+        zh: "蓝色盲",
+        en: "tritanopia (blue-blind)",
+    },
+    Entry {
+        key: Key::A11yLowContrast,
+        zh: "{} 与其背景的对比度只有 {}，低于要求的 {}",
+        en: "{} has a contrast ratio of only {} against its background; {} is required",
+    },
+    Entry {
+        key: Key::A11yIndistinguishable,
+        zh: "{} 与 {} 在{}下几乎同色（距离 {}）",
+        en: "{} and {} look nearly identical under {} (distance {})",
     },
 ];
 

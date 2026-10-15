@@ -38,11 +38,14 @@ const store = usePingStore()
         <span v-if="row.result.mac" class="cping-mono">{{ row.result.mac }}</span>
         <span v-if="row.result.vendor" :title="row.result.vendor">{{ row.result.vendor }}</span>
         <span v-if="row.result.hostname" class="cping-mono">{{ row.result.hostname }}</span>
-        <!-- 反查是阻塞操作，所以只对单行按需发起 -->
+        <!-- 反查是阻塞操作，所以只对单行按需发起。
+             `aria-label` 带上 IP：列表里每行都有一个同名按钮，读屏器一路念下来
+             只会听到一长串「反查」，根本分不清点的是哪一台。 -->
         <button
           v-if="!row.result.hostname"
           type="button"
           class="mobile-list__lookup"
+          :aria-label="t('aria.lookup', row.ip)"
           :disabled="store.hostnameBusy !== null"
           @click="store.lookupHostname(row.index)"
         >

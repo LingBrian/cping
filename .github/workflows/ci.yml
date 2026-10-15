@@ -30,8 +30,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       - name: 检查构建文件里没有本机专属配置
         run: bash scripts/check-portability.sh
+
+      # 符号是「不依赖颜色」的那条信息通道，此前有三份拷贝。
+      # 这份检查把它们对起来：核心是唯一来源，报表的中点是登记例外。
+      - name: 检查结果状态符号只有一个来源
+        run: node scripts/check-symbols.mjs
 
   # ---------------------------------------------------------------------------
   # 核心：格式 / 静态检查 / 全量测试（Linux，跑得最全）

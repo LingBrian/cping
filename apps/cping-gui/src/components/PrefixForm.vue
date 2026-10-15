@@ -37,7 +37,9 @@ async function validate(): Promise<boolean> {
   specError.value = null
   const ok = await store.validateSpec(localSpec.value)
   if (ok) {
-    store.prefix = localSpec.value
+    // M16：走 `setTargetSpec` 而不是直接赋值——它顺带记账「这是用户亲手填的」，
+    // 模板从此不会覆盖它（「只填空缺」）。直接赋值会让模板把用户的输入顶掉。
+    store.setTargetSpec(localSpec.value)
   } else {
     specError.value = store.specError || t('status.specUnparsable')
   }
@@ -149,11 +151,25 @@ const canStop = computed(() => store.running)
     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px">
       <div>
         <label class="cping-label">{{ t('label.timeout') }}</label>
-        <NInputNumber v-model:value="store.timeoutMs" :min="50" :max="60000" size="small" />
+        <!-- 用 setter 而不是 v-model：这两项是「模板只填空缺」的判据之一，
+             用户手改过就要记账（模板不能再覆盖）。 -->
+        <NInputNumber
+          :value="store.timeoutMs"
+          :min="50"
+          :max="60000"
+          size="small"
+          @update:value="(v: number | null) => v && store.setTimeoutMs(v)"
+        />
       </div>
       <div>
         <label class="cping-label">{{ t('label.concurrency') }}</label>
-        <NInputNumber v-model:value="store.concurrency" :min="1" :max="256" size="small" />
+        <NInputNumber
+          :value="store.concurrency"
+          :min="1"
+          :max="256"
+          size="small"
+          @update:value="(v: number | null) => v && store.setConcurrency(v)"
+        />
       </div>
     </div>
   </div>

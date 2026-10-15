@@ -8,6 +8,7 @@
 //! - 矩阵用 `<div>` + `background` 画，不用 canvas；
 //! - 不做任何交互（没有 hover 提示以外的行为），禁 JS 的环境也能看。
 
+use crate::a11y::{ensure_contrast, Rgb, CONTRAST_AA, WHITE};
 use crate::classify::{classify_status, ResultClass};
 use crate::config::ColorConfig;
 use crate::export::ScanReport;
@@ -46,6 +47,9 @@ pub fn render_report(report: &ScanReport, palette: &ColorConfig) -> String {
         escape(&meta.scan_time)
     ));
     html.push_str(STYLE);
+    // 类别色的 CSS 变量（浅底/深底各一套）——必须在样式表之后，
+    // 因为它要在 `:root` 上覆盖默认值。
+    html.push_str(&class_css_vars(palette));
     html.push_str("</head>\n<body>\n");
 
     // 标题区
@@ -79,21 +83,22 @@ pub fn render_report(report: &ScanReport, palette: &ColorConfig) -> String {
     html.push_str("</dl>\n</section>\n");
 
     // 统计卡片
+    //
+    // 第三项是**类别键**（对应 `.cls-*` 变量），不是色值：
+    // 卡片底色是纯白，直接写 `color:#00FF00` 会让「在线」那个数字看不见。
     html.push_str("<section class=\"cards\">\n");
     let cards: [(&str, usize, &str); 6] = [
-        ("目标总数", stats.total, palette.offline.as_str()),
-        ("在线", stats.online, palette.low.as_str()),
-        ("超时", stats.timeout, palette.offline.as_str()),
-        ("不可达", stats.unreachable, palette.offline.as_str()),
-        ("权限不足", stats.permission_denied, palette.error.as_str()),
-        ("错误", stats.error, palette.error.as_str()),
+        ("目标总数", stats.total, "offline"),
+        ("在线", stats.online, "low"),
+        ("超时", stats.timeout, "offline"),
+        ("不可达", stats.unreachable, "offline"),
+        ("权限不足", stats.permission_denied, "error"),
+        ("错误", stats.error, "error"),
     ];
-    for (label, value, color) in cards {
+    for (label, value, cls) in cards {
         html.push_str(&format!(
-            "<div class=\"card\"><span class=\"v\" style=\"color:{}\">{}</span>\
+            "<div class=\"card\"><span class=\"v cls-{cls}\">{value}</span>\
              <span class=\"k\">{}</span></div>\n",
-            escape(color),
-            value,
             escape(label)
         ));
     }
@@ -218,11 +223,16 @@ pub fn render_report(report: &ScanReport, palette: &ColorConfig) -> String {
             "<td>{}</td>",
             r.status.rtt_ms().map(|v| v.to_string()).unwrap_or_default()
         ));
-        html.push_str(&format!(
-            "<td style=\"color:{}\">{}</td>",
-            escape(&class_color(class, palette)),
-            escape(class.map(|c| c.label_zh()).unwrap_or("-"))
-        ));
+        // 类别列用 CSS 变量上色（浅底/深底两套），并**同时给出文字**：
+        // 颜色是增强，不是唯一载体。
+        match class {
+            Some(c) => html.push_str(&format!(
+                "<td class=\"cls-{}\">{}</td>",
+                c.color_key(),
+                escape(c.label_zh())
+            )),
+            None => html.push_str("<td class=\"muted\">-</td>"),
+        }
         html.push_str(&format!("<td>{}</td>", escape(r.mac_or_empty())));
         html.push_str(&format!("<td>{}</td>", escape(r.vendor_or_empty())));
         html.push_str(&format!("<td>{}</td>", escape(r.hostname_or_empty())));
@@ -275,6 +285,61 @@ fn class_symbol(class: Option<ResultClass>) -> &'static str {
     }
 }
 
+/// 报表纸面底色。**必须与 [`STYLE`] 里 `body` 的背景一致**——
+/// 有测试（`report_ground_colors_match_the_stylesheet`）守着这条，
+/// 免得改了 CSS 忘了改这里，可读性修复就悄悄失效了。
+const REPORT_BG_LIGHT: Rgb = Rgb::new(0xF6, 0xF7, 0xF9);
+const REPORT_BG_DARK: Rgb = Rgb::new(0x16, 0x18, 0x1C);
+
+/// 导出时给对比度留的余量。
+///
+/// [`ensure_contrast`] 返回的是「第一个达标的点」，所以直接拿 AA 阈值
+/// （4.5）当目标，结果会**贴着阈值过线**——实测浅色纸面上得到
+/// 4.54 / 4.56 / 4.57。贴着阈值虽然合法，但四舍五入、不同渲染引擎的
+/// 取整、乃至将来调整纸面底色，都可能把它推到阈值之下，
+/// 而那时候没人会想到「报表的颜色怎么又看不清了」。
+/// 留 8% 余量，让结果落在 4.9 附近。
+const EXPORT_CONTRAST_TARGET: f64 = CONTRAST_AA * 1.08;
+
+/// 类别色的 CSS 变量，**浅底与深底各一套**。
+///
+/// 存在的理由是一个真实缺陷：类别色此前被直接当作**文字颜色**写进
+/// `style="color:…"`，而报表是白底（卡片是纯白、纸面 `#f6f7f9`）。
+/// `#00FF00` 在白底上的对比度只有 1.37、`#FFFF00` 只有 1.07——
+/// 也就是说「在线」的绿色数字和「中延迟」的黄色标签**等于看不见**。
+///
+/// 为什么不能只挑一个更暗的色值了事：报表同时支持
+/// `prefers-color-scheme: dark`，而**没有任何单一色值能在两种底色上都达标**。
+/// 所以这里按纸面底色各自校正一次（色相保持不变，见
+/// [`ensure_contrast`]），用户自定义的类别色仍然生效——它作为基准色相。
+fn class_css_vars(palette: &ColorConfig) -> String {
+    let mut light = String::new();
+    let mut dark = String::new();
+    for class in [
+        ResultClass::Low,
+        ResultClass::Mid,
+        ResultClass::High,
+        ResultClass::Offline,
+        ResultClass::Error,
+    ] {
+        let key = class.color_key();
+        // 配置里的色值已经过 `ColorConfig::validate`；这里再解析失败就退回白色，
+        // 绝不 panic——一份读不了的报表比一个配色不对的报表糟得多。
+        let raw = palette.get(key).and_then(Rgb::parse).unwrap_or(WHITE);
+        light.push_str(&format!(
+            "--cls-{key}:{};",
+            ensure_contrast(raw, REPORT_BG_LIGHT, EXPORT_CONTRAST_TARGET).to_hex()
+        ));
+        dark.push_str(&format!(
+            "--cls-{key}:{};",
+            ensure_contrast(raw, REPORT_BG_DARK, EXPORT_CONTRAST_TARGET).to_hex()
+        ));
+    }
+    format!(
+        "<style>\n:root{{{light}}}\n@media (prefers-color-scheme:dark){{:root{{{dark}}}}}\n</style>\n"
+    )
+}
+
 const STYLE: &str = r#"<style>
 :root{color-scheme:light dark}
 body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;margin:0;padding:24px;
@@ -306,6 +371,13 @@ th{position:sticky;top:0;background:#fafbfc}
 .muted{color:#9ca3af}
 .sub-tag{font-weight:400;font-size:12px;color:#6b7280;margin-left:8px}
 footer{color:#9ca3af;font-size:12px;text-align:center}
+/* 类别文字色走 CSS 变量（浅底/深底两套，见 class_css_vars）。
+   别改回内联 style：那正是「白底上绿色与黄色看不见」的成因。 */
+.cls-low{color:var(--cls-low)}
+.cls-mid{color:var(--cls-mid)}
+.cls-high{color:var(--cls-high)}
+.cls-offline{color:var(--cls-offline)}
+.cls-error{color:var(--cls-error)}
 @media (prefers-color-scheme:dark){
  body{background:#16181c;color:#e8eaed}
  section{background:#1e2126;border-color:#2c3138}
@@ -325,11 +397,87 @@ footer{color:#9ca3af;font-size:12px;text-align:center}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::a11y::contrast_ratio;
     use crate::classify::Thresholds;
     use crate::export::{ExportMeta, ScanReport};
     use crate::result::{ProbeResult, ProbeStatus};
     use crate::spec::ProbeMode;
     use std::net::IpAddr;
+
+    /// 五个类别，供配色测试遍历。
+    const ALL_CLASSES: [ResultClass; 5] = [
+        ResultClass::Low,
+        ResultClass::Mid,
+        ResultClass::High,
+        ResultClass::Offline,
+        ResultClass::Error,
+    ];
+
+    #[test]
+    fn report_ground_colors_match_the_stylesheet() {
+        // 常量与 CSS 是两处写死的同一个颜色，必须一起改。
+        // 只改一处的话，可读性校正会按错的底色算，而且**不会报错**。
+        assert_eq!(REPORT_BG_LIGHT.to_hex(), "#F6F7F9");
+        assert_eq!(REPORT_BG_DARK.to_hex(), "#16181C");
+        assert!(
+            STYLE.contains("background:#f6f7f9"),
+            "样式表里的浅色纸面改了，常量没跟着改"
+        );
+        assert!(
+            STYLE.contains("background:#16181c"),
+            "样式表里的深色纸面改了，常量没跟着改"
+        );
+    }
+
+    #[test]
+    fn class_text_colors_reach_aa_on_both_grounds() {
+        // 这是「白底上黄色文字看不见」那个缺陷的回归测试。
+        // 用**默认配色**跑：默认值是最容易出问题的一组（纯绿、纯黄）。
+        let palette = ColorConfig::default();
+        let vars = class_css_vars(&palette);
+        for class in ALL_CLASSES {
+            let key = class.color_key();
+            let raw = Rgb::parse(palette.get(key).expect("默认配色有这一项")).expect("合法色值");
+            let light = ensure_contrast(raw, REPORT_BG_LIGHT, EXPORT_CONTRAST_TARGET);
+            let dark = ensure_contrast(raw, REPORT_BG_DARK, EXPORT_CONTRAST_TARGET);
+            // 断言按 **AA 阈值**（真正的验收线），但生成时用的是带余量的目标。
+            assert!(
+                contrast_ratio(light, REPORT_BG_LIGHT) + f64::EPSILON >= CONTRAST_AA,
+                "{key} 在浅色纸面上只有 {:.2}",
+                contrast_ratio(light, REPORT_BG_LIGHT)
+            );
+            assert!(
+                contrast_ratio(dark, REPORT_BG_DARK) + f64::EPSILON >= CONTRAST_AA,
+                "{key} 在深色纸面上只有 {:.2}",
+                contrast_ratio(dark, REPORT_BG_DARK)
+            );
+            // 两套值要真的都写进了 HTML
+            assert!(
+                vars.contains(&format!("--cls-{key}:{}", light.to_hex())),
+                "{key} 缺浅底变量"
+            );
+            assert!(
+                vars.contains(&format!("--cls-{key}:{}", dark.to_hex())),
+                "{key} 缺深底变量"
+            );
+        }
+        // 浅底与深底**不可能是同一组值**（否则说明有一侧没做校正）
+        assert!(vars.contains("@media (prefers-color-scheme:dark)"));
+    }
+
+    #[test]
+    fn class_text_is_never_written_as_an_inline_style_again() {
+        // 修法本身要被守住：一旦有人再写 `style="color:#00FF00"`，
+        // 那个「白底上看不见」的缺陷就回来了，而且截图才看得出来。
+        let report = render_report(&sample_report(), &ColorConfig::default());
+        assert!(
+            !report.contains("style=\"color:"),
+            "报表里又出现了内联文字色——类别色必须走 .cls-* 变量"
+        );
+        assert!(report.contains("cls-"), "报表里没有用类别类名");
+        // 颜色之外仍有文字：类别列必须写出标签
+        assert!(report.contains("低延迟") || report.contains("中延迟"));
+    }
 
     fn sample_report() -> ScanReport {
         let results = vec![

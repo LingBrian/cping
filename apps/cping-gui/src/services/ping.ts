@@ -17,9 +17,13 @@ import type {
   PendingSnapshotDto,
   ProbeEventDto,
   ProbeModeKey,
+  ProfileApplyDto,
+  ProfileListDto,
+  ScanPolicyDto,
   SnapshotDto,
   SnapshotSavedDto,
   SpecDto,
+  ThemeDto,
   TrendDto,
 } from '../shared/types'
 
@@ -286,4 +290,94 @@ export async function clearAlerts(): Promise<AlertDto> {
 /** 订阅告警事件：一轮扫描里触发的告警会打包成一批推过来。 */
 export function onAlertEvent(cb: (events: AlertEventDto[]) => void): Promise<UnlistenFn> {
   return listen<AlertEventDto[]>('alert-event', (ev) => cb(ev.payload))
+}
+
+// ---------------------------------------------------------------------------
+// M16 / M17：扫描模板与安全策略
+// ---------------------------------------------------------------------------
+
+/**
+ * 模板「已填好的值」：`null` = 空缺，模板可以填。
+ *
+ * 与 CLI 的 `seen_*`、TUI 的 `seen_target` / `seen_mode` 是同一个东西——
+ * 把「用户显式给过的值」当作**数据**传给后端，于是「模板只填空缺」这条规则
+ * 由 Rust 一处判定，而不是在界面里再猜一遍。
+ */
+export interface ProfileGaps {
+  target?: string | null
+  timeoutMs?: number | null
+  concurrency?: number | null
+  mode?: ProbeModeKey | null
+  tcpPort?: number | null
+}
+
+/**
+ * 列出配置文件里的扫描模板。
+ *
+ * **读不到配置文件不算失败**：后端返回空列表 + 一句说明（文件在哪、为什么读不到），
+ * 所以这里只有真正的传输错误才会抛。
+ */
+export async function listProfiles(): Promise<ProfileListDto> {
+  return invokeT<ProfileListDto>('list_profiles')
+}
+
+/**
+ * 应用一份模板——**只填空缺**，界面上已填好的值一概不动。
+ *
+ * 点名不存在的模板时后端返回错误（不会悄悄退回默认模板），
+ * 所以调用方必须处理失败分支。
+ */
+export async function applyProfile(name: string, current: ProfileGaps): Promise<ProfileApplyDto> {
+  return invokeT<ProfileApplyDto>('apply_profile', {
+    name,
+    current: {
+      target: current.target ?? null,
+      timeoutMs: current.timeoutMs ?? null,
+      concurrency: current.concurrency ?? null,
+      mode: current.mode ?? null,
+      tcpPort: current.tcpPort ?? null,
+    },
+  })
+}
+
+/** 读出当前生效的安全策略（含默认值与上限）。 */
+export async function scanPolicy(): Promise<ScanPolicyDto> {
+  return invokeT<ScanPolicyDto>('scan_policy')
+}
+
+/**
+ * 改安全策略。越界的值后端会**拒绝并给出原因**（不静默夹取），
+ * 所以调用方拿到的是可直接展示的错误文本。
+ */
+export async function setScanPolicy(
+  maxPps: number,
+  maxTargets: number,
+  allowReserved: boolean,
+): Promise<ScanPolicyDto> {
+  return invokeT<ScanPolicyDto>('set_scan_policy', { maxPps, maxTargets, allowReserved })
+}
+
+// ---------------------------------------------------------------------------
+// M18：无障碍（主题 / 字号）
+// ---------------------------------------------------------------------------
+
+/**
+ * 取一套界面配色。`theme` 为 `null` 时用**环境默认主题**（`CPING_THEME`）。
+ *
+ * 传了名字却认不出来时后端**抛错**（不静默回落成默认主题），
+ * 所以调用方必须处理失败分支——「以为开了无障碍、其实没开」是本轮要防的事故。
+ */
+export async function a11yTheme(theme: string | null = null): Promise<ThemeDto> {
+  return invokeT<ThemeDto>('a11y_theme', { theme })
+}
+
+/**
+ * 设置界面缩放（100% / 150% / 200%），返回生效的百分比。
+ *
+ * 缩放作用于**整个 webview**（连控件一起放大，不是只放大文字）。
+ * 平台不支持时（Android 明确不支持）后端抛错，界面必须把原因显示出来——
+ * 绝不静默什么都不做。
+ */
+export async function setFontScale(scale: string): Promise<number> {
+  return invokeT<number>('set_font_scale', { scale })
 }

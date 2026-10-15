@@ -268,6 +268,12 @@ pub enum Key {
     // —— 新增面板的帮助行 ——
     HelpM16P,
     HelpM17G,
+
+    // ---- M18 第三步：无障碍参数 ----
+    /// 参数：`实际值`
+    WarnBadTheme,
+    /// 参数：`实际值`
+    WarnBadFontScale,
 }
 
 /// 字典条目。
@@ -502,11 +508,13 @@ pub const fn ordinal(key: Key) -> usize {
         Key::StatusPolicyApplied => 214,
         Key::HelpM16P => 215,
         Key::HelpM17G => 216,
+        Key::WarnBadTheme => 217,
+        Key::WarnBadFontScale => 218,
     }
 }
 
 /// 字典里的键总数。
-pub const KEY_COUNT: usize = 217;
+pub const KEY_COUNT: usize = 219;
 
 /// 全部条目。顺序必须与 [`ordinal`] 一致（有测试守着）。
 ///
@@ -1350,8 +1358,8 @@ pub static TABLE: &[Entry] = &[
     },
     Entry {
         key: Key::CliHelpOptions,
-        zh: "选项:\n  --prefix <前三段>   初始网段前缀，例如 192.168.1\n  --no-color          禁用颜色（无颜色终端下自动降级为符号标识）\n  --hide-offline      启动时即隐藏不在线目标\n  --view <matrix|table>  初始视图\n  --mock              使用模拟探测数据（演示 / UI 调试，不发真实报文）\n  --snapshot-dir <目录>  结果快照的存放目录（默认当前目录）\n  --config <文件>     启动时加载的配置文件（默认当前目录的 cping.toml；模板只填空缺）\n  --alert             启动即启用告警（也可在界面里按 A 就地启用）\n  --alert-kinds <列表>  启用哪几类：appeared,disappeared,latency,uptime\n  --alert-latency <ms>  延迟阈值（默认 200；严格大于才报）\n  --alert-uptime <百分比> 可用率阈值（默认 90；严格小于才报）\n  --alert-cooldown <秒> 同一主机同一类告警的冷却窗口（默认 300）\n  --mute-alerts       启动即静音（规则照常求值，只是不通知）\n  --max-pps <n>       全局速率上限（探测包/秒，默认 500；写 0 = 不限速）\n  --max-targets <n>   目标数上限（只能比结构上限 65536 更严）\n  --allow-reserved    放行组播 / 保留段等特殊网段（默认拒绝）\n  --lang <zh|en>      界面语言（默认按环境推断：CPING_LANG → LC_ALL → LC_MESSAGES → LANG）\n  --help              显示本帮助",
-        en: "Options:\n  --prefix <a.b.c>    initial network prefix, e.g. 192.168.1\n  --no-color          disable colour (terminals without colour fall back to symbols)\n  --hide-offline      start with offline targets hidden\n  --view <matrix|table>  initial view\n  --mock              use simulated probe data (demo / UI debugging, sends no packets)\n  --snapshot-dir <dir>    directory for result snapshots (default: current directory)\n  --config <file>     config file loaded at startup (default: cping.toml in the current directory; profiles only fill gaps)\n  --alert             enable alerts at startup (or press A in the UI)\n  --alert-kinds <list>    which kinds to enable: appeared,disappeared,latency,uptime\n  --alert-latency <ms>    latency threshold (default 200; strictly greater than)\n  --alert-uptime <pct>    uptime threshold (default 90; strictly less than)\n  --alert-cooldown <sec>  per-host, per-kind alert cooldown (default 300)\n  --mute-alerts       start muted (rules still evaluate, notifications stop)\n  --max-pps <n>       global rate limit (probe packets/s, default 500; 0 = unlimited)\n  --max-targets <n>   target limit (can only be tighter than the structural limit 65536)\n  --allow-reserved    allow multicast / reserved ranges (denied by default)\n  --lang <zh|en>      UI language (default: inferred from CPING_LANG -> LC_ALL -> LC_MESSAGES -> LANG)\n  --help              show this help",
+        zh: "选项:\n  --prefix <前三段>   初始网段前缀，例如 192.168.1\n  --no-color          禁用颜色（无颜色终端下自动降级为符号标识）\n  --hide-offline      启动时即隐藏不在线目标\n  --view <matrix|table>  初始视图\n  --mock              使用模拟探测数据（演示 / UI 调试，不发真实报文）\n  --snapshot-dir <目录>  结果快照的存放目录（默认当前目录）\n  --config <文件>     启动时加载的配置文件（默认当前目录的 cping.toml；模板只填空缺）\n  --alert             启动即启用告警（也可在界面里按 A 就地启用）\n  --alert-kinds <列表>  启用哪几类：appeared,disappeared,latency,uptime\n  --alert-latency <ms>  延迟阈值（默认 200；严格大于才报）\n  --alert-uptime <百分比> 可用率阈值（默认 90；严格小于才报）\n  --alert-cooldown <秒> 同一主机同一类告警的冷却窗口（默认 300）\n  --mute-alerts       启动即静音（规则照常求值，只是不通知）\n  --max-pps <n>       全局速率上限（探测包/秒，默认 500；写 0 = 不限速）\n  --max-targets <n>   目标数上限（只能比结构上限 65536 更严）\n  --allow-reserved    放行组播 / 保留段等特殊网段（默认拒绝）\n  --theme <名称>      界面主题：default | high-contrast | color-blind（默认 default）\n  --font-scale <档位>  字号档：normal | large | huge 或 100 | 150 | 200（只放宽「窗口太小」的判定）\n  --lang <zh|en>      界面语言（默认按环境推断：CPING_LANG → LC_ALL → LC_MESSAGES → LANG）\n  --help              显示本帮助",
+        en: "Options:\n  --prefix <a.b.c>    initial network prefix, e.g. 192.168.1\n  --no-color          disable colour (terminals without colour fall back to symbols)\n  --hide-offline      start with offline targets hidden\n  --view <matrix|table>  initial view\n  --mock              use simulated probe data (demo / UI debugging, sends no packets)\n  --snapshot-dir <dir>    directory for result snapshots (default: current directory)\n  --config <file>     config file loaded at startup (default: cping.toml in the current directory; profiles only fill gaps)\n  --alert             enable alerts at startup (or press A in the UI)\n  --alert-kinds <list>    which kinds to enable: appeared,disappeared,latency,uptime\n  --alert-latency <ms>    latency threshold (default 200; strictly greater than)\n  --alert-uptime <pct>    uptime threshold (default 90; strictly less than)\n  --alert-cooldown <sec>  per-host, per-kind alert cooldown (default 300)\n  --mute-alerts       start muted (rules still evaluate, notifications stop)\n  --max-pps <n>       global rate limit (probe packets/s, default 500; 0 = unlimited)\n  --max-targets <n>   target limit (can only be tighter than the structural limit 65536)\n  --allow-reserved    allow multicast / reserved ranges (denied by default)\n    --theme <name>      interface theme: default | high-contrast | color-blind (default: default)\n  --font-scale <n>    text size: normal | large | huge or 100 | 150 | 200 (only widens the \"window too small\" check)\n--lang <zh|en>      UI language (default: inferred from CPING_LANG -> LC_ALL -> LC_MESSAGES -> LANG)\n  --help              show this help",
     },
     Entry {
         key: Key::CliHelpBackend,
@@ -1597,6 +1605,17 @@ pub static TABLE: &[Entry] = &[
         key: Key::HelpM17G,
         zh: "  G            安全策略设置（限速 / 目标数上限 / 保留网段）",
         en: "  G            safety policy (rate limit / target cap / reserved ranges)",
+    },
+    // ---- M18 第三步：无障碍参数 ----
+    Entry {
+        key: Key::WarnBadTheme,
+        zh: "无法识别的主题 {}；可选 default / high-contrast / color-blind",
+        en: "unrecognized theme {}; expected default, high-contrast or color-blind",
+    },
+    Entry {
+        key: Key::WarnBadFontScale,
+        zh: "无法识别的字号档 {}；可选 normal / large / huge（也可写 100 / 150 / 200）",
+        en: "unrecognized text size {}; expected normal, large or huge (or 100 / 150 / 200)",
     },
 ];
 

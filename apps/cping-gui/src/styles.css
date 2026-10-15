@@ -1,8 +1,30 @@
+/* ---------------------------------------------------------------------------
+   主题令牌（M18）
+
+   这里的值是**默认主题（浅色）**，也就是改动前的既有外观——它们必须保持
+   原样：新增的高对比 / 色盲友好主题是**增量**，不是换配色。
+   `stores/ping.ts` 的 `applyTheme` 会把这些同名变量写到 <html> 的
+   inline style 上（内联值优先于这里），所以「没加载过主题」时看到的就是
+   下面这一组，与从前逐像素一致。
+
+   高对比 / 色盲友好的取值全部来自 `cping_core::a11y`，前端不抄一份。
+   --------------------------------------------------------------------------- */
 :root {
   --cping-border: #d9d9d9;
   --cping-muted: #6b7280;
   --cping-bg: #f5f6f8;
   --cping-panel: #ffffff;
+  /* 正文色。原来是直接写在 html/body 上的 #111827，提成令牌后值不变。 */
+  --cping-fg: #111827;
+  /* 界面强调色（键盘焦点环等）。既有界面的主色本就是近黑。 */
+  --cping-accent: #111827;
+  /* 次要底色（表头等）。
+     边界：**局部徽章与状态色不算「主要语义色」**，仍保留各自的字面值——
+     变化类型的标签底色（.change-kind--*）、.badge--change、pending 矩阵格
+     （.grid-matrix__cell--pending 的 #ededed，它靠比面板更灰来表意「未探测」）
+     以及 .mobile-list__lookup 的 #f3f4f6。把它们也塞进一个通用令牌会让
+     pending 格与面板同色、失去区分度，属于视觉倒退，所以刻意不动。 */
+  --cping-subtle: #f8fafc;
   font-family: system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
 }
 
@@ -17,7 +39,7 @@ body,
   padding: 0;
   height: 100%;
   background: var(--cping-bg);
-  color: #111827;
+  color: var(--cping-fg);
   /* 移动端安全区与字体缩放友好 */
   -webkit-text-size-adjust: 100%;
 }
@@ -30,6 +52,47 @@ body,
 
 button {
   font: inherit;
+}
+
+/* ---------- M18：键盘焦点可见 ---------- */
+
+/* 键盘焦点必须**看得见**。
+   这里刻意不写 `outline: none`（很多项目为了「好看」会那么干）——那是
+   无障碍里最常见的倒退：鼠标用户看不出差别，键盘用户从此完全不知焦点在哪。
+   `:focus-visible` 只在键盘/读屏导航时出现，鼠标点击不会冒出一个环，
+   所以它既保证了可达性，又不动鼠标用户的观感。
+
+   `button` 与 `[tabindex]` 单独列出：naive-ui 的部分控件会自己设 outline，
+   而这两类元素是最常被「顺手清掉」焦点环的，显式写出来免得日后被覆盖。 */
+:focus-visible,
+button:focus-visible,
+[tabindex]:focus-visible,
+.mobile__tab:focus-visible,
+.mobile-list__lookup:focus-visible {
+  outline: 3px solid var(--cping-accent);
+  outline-offset: 2px;
+}
+
+/* ---------- M18：减少动效 ---------- */
+
+/* 系统偏好：跟随操作系统的「减少动态效果」设置。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+
+/* 界面开关：`stores/ping.ts` 在 reduceMotion 为真时给 <html> 打上
+   data-reduce-motion。与上面那条媒体查询是**同一个效果的两条触发路径**
+   ——系统设了、或者用户在设置里手动打开，都能关掉过渡与闪烁。 */
+html[data-reduce-motion] *,
+html[data-reduce-motion] *::before,
+html[data-reduce-motion] *::after {
+  transition: none !important;
+  animation: none !important;
 }
 
 .cping-panel {
@@ -147,7 +210,7 @@ button {
 }
 
 .grid-matrix__cell:hover {
-  outline: 2px solid #111827;
+  outline: 2px solid var(--cping-accent);
   outline-offset: -2px;
 }
 
@@ -207,7 +270,7 @@ button {
 .result-table thead th {
   position: sticky;
   top: 0;
-  background: #f8fafc;
+  background: var(--cping-subtle);
   z-index: 1;
   font-weight: 600;
 }
@@ -313,17 +376,19 @@ button {
 
 .mobile__tab {
   border: 1px solid var(--cping-border);
-  background: #fff;
+  background: var(--cping-panel);
   border-radius: 999px;
   padding: 6px 14px;
   font-size: 13px;
   min-height: 36px;
 }
 
+/* 选中态用强调色 + 面板色作字色：默认主题下就是原来的 #111827 / #fff，
+   深色主题下则变成「亮底 + 近黑字」，仍然一眼看得出选中的是哪一个。 */
 .mobile__tab--active {
-  background: #111827;
-  color: #fff;
-  border-color: #111827;
+  background: var(--cping-accent);
+  color: var(--cping-panel);
+  border-color: var(--cping-accent);
 }
 
 .mobile-list {
@@ -337,7 +402,7 @@ button {
   grid-template-columns: 1fr auto auto;
   align-items: center;
   gap: 8px;
-  background: #fff;
+  background: var(--cping-panel);
   border: 1px solid var(--cping-border);
   border-radius: 8px;
   padding: 10px 12px;

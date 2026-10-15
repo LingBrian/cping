@@ -129,6 +129,26 @@ pub enum Key {
     SnapshotTargetMismatch,
     /// 参数：`下标`、`目标总数`
     SnapshotIndexOutOfRange,
+
+    // —— M16：扫描模板（配置文件里的 `[[profiles]]`）——
+    /// 参数：`配置文件路径`
+    ProfilesNoFile,
+    /// 参数：`配置文件路径`、`原因`
+    ProfilesReadFailed,
+    /// 参数：`配置文件路径`
+    ProfilesEmpty,
+    /// 参数：`模板名`、`原因`
+    ProfileApplyFailed,
+    /// 参数：`range 机器标识`
+    ProfileRangeUnapplied,
+
+    // —— M18：无障碍（主题 / 字号）——
+    /// 参数：`主题名`
+    A11yUnsupportedTheme,
+    /// 参数：`字号档位`
+    A11yUnsupportedFontScale,
+    /// 参数：`原因`
+    A11yZoomFailed,
 }
 
 /// 键 → 稳定序号。
@@ -174,11 +194,19 @@ pub const fn ordinal(key: Key) -> usize {
         Key::SnapshotBadPrefix => 34,
         Key::SnapshotTargetMismatch => 35,
         Key::SnapshotIndexOutOfRange => 36,
+        Key::ProfilesNoFile => 37,
+        Key::ProfilesReadFailed => 38,
+        Key::ProfilesEmpty => 39,
+        Key::ProfileApplyFailed => 40,
+        Key::ProfileRangeUnapplied => 41,
+        Key::A11yUnsupportedTheme => 42,
+        Key::A11yUnsupportedFontScale => 43,
+        Key::A11yZoomFailed => 44,
     }
 }
 
 /// 字典里的键总数。
-pub const KEY_COUNT: usize = 37;
+pub const KEY_COUNT: usize = 45;
 
 /// 键的**稳定机器码**（小写下划线）。
 ///
@@ -224,6 +252,15 @@ const fn code_of(key: Key) -> &'static str {
         Key::SnapshotBadPrefix => "snapshot_bad_prefix",
         Key::SnapshotTargetMismatch => "snapshot_target_mismatch",
         Key::SnapshotIndexOutOfRange => "snapshot_index_out_of_range",
+        Key::ProfilesNoFile => "profiles_no_file",
+        Key::ProfilesReadFailed => "profiles_read_failed",
+        Key::ProfilesEmpty => "profiles_empty",
+        Key::ProfileApplyFailed => "profile_apply_failed",
+        Key::ProfileRangeUnapplied => "profile_range_unapplied",
+        // 机器码只允许小写字母与下划线（测试守着）——`a11y` 里的数字进不来
+        Key::A11yUnsupportedTheme => "theme_unsupported",
+        Key::A11yUnsupportedFontScale => "font_scale_unsupported",
+        Key::A11yZoomFailed => "zoom_unsupported",
     }
 }
 
@@ -437,6 +474,48 @@ pub static TABLE: &[Entry] = &[
         key: Key::SnapshotIndexOutOfRange,
         zh: "快照中的下标 {} 超出目标范围（0..{}）",
         en: "index {} in the snapshot is out of the target range (0..{})",
+    },
+    // —— M16：扫描模板 ——
+    Entry {
+        key: Key::ProfilesNoFile,
+        zh: "未找到配置文件 {}：模板列表为空（可用环境变量 CPING_CONFIG 指定路径）",
+        en: "no config file at {}: the profile list is empty (point the CPING_CONFIG environment variable at one)",
+    },
+    Entry {
+        key: Key::ProfilesReadFailed,
+        zh: "配置文件 {} 无法读取：{}",
+        en: "cannot read the config file {}: {}",
+    },
+    Entry {
+        key: Key::ProfilesEmpty,
+        zh: "配置文件 {} 里没有 [[profiles]] 模板",
+        en: "the config file {} has no [[profiles]] entries",
+    },
+    Entry {
+        key: Key::ProfileApplyFailed,
+        zh: "模板 {} 无法应用：{}",
+        en: "cannot apply profile {}: {}",
+    },
+    Entry {
+        key: Key::ProfileRangeUnapplied,
+        zh: "模板的 range = {} 本界面未采用：目标固定按 standard（.1-.255）展开",
+        en: "the profile sets range = {}, which this UI does not use: targets are always expanded as standard (.1-.255)",
+    },
+    // —— M18：无障碍（主题 / 字号）——
+    Entry {
+        key: Key::A11yUnsupportedTheme,
+        zh: "不认识的主题 {}：可用 default / high-contrast / color-blind",
+        en: "unknown theme {}: use default / high-contrast / color-blind",
+    },
+    Entry {
+        key: Key::A11yUnsupportedFontScale,
+        zh: "不认识的字号 {}：可用 normal / large / huge，或 100% / 150% / 200%",
+        en: "unknown text size {}: use normal / large / huge, or 100% / 150% / 200%",
+    },
+    Entry {
+        key: Key::A11yZoomFailed,
+        zh: "无法设置界面缩放（该平台可能不支持）：{}",
+        en: "cannot set the UI zoom (the platform may not support it): {}",
     },
 ];
 

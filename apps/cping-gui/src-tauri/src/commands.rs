@@ -11,12 +11,15 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use cping_core::a11y::{A11ySettings, FontScale, Rgb, Theme};
 use cping_core::classify::{classify_status, Thresholds};
 use cping_core::config::{AppConfig, ColorConfig, ProbeConfig, ViewMode};
 use cping_core::diff::{diff_reports, ScanDiff};
 use cping_core::enrich::{enrich_with_mac_and_vendor, lookup_hostname, EnrichReport};
 use cping_core::export::{ExportFormat, ExportMeta, ScanReport};
 use cping_core::monitor::{Change, MonitorConfig, MonitorState};
+use cping_core::policy::ScanPolicy;
+use cping_core::profile::{ConfigDocument, ScanProfile};
 use cping_core::registry::BackendRegistry;
 use cping_core::result::{ProbeResult, ScanStats};
 use cping_core::scheduler::{CancelToken, ProbeScheduler, SchedulerHandle};
@@ -664,6 +667,17 @@ struct Shared {
     alerts: cping_core::AlertEngine,
     /// M15：告警是否启用。默认**关闭**——不问就发通知比不装告警还糟。
     alerts_enabled: bool,
+    /// M17 / M18：本机当前生效的安全策略（限速 / 目标数上限 / 保留网段守卫）。
+    ///
+    /// **刻意存在这里而不是挂在调度器上**：GUI 每次扫描都按当前探测方式重建调度器
+    /// （一次任务只有一种方式，见 `start_scan`），策略若由调度器持有，第一次重建
+    /// 就会把用户的设置悄悄丢掉。存在 `AppState` 里就有了唯一来源，
+    /// 建调度器时由 `scheduler_with_policy` 重新装上。
+    ///
+    /// 初值恒为 [`ScanPolicy::default`]（限速 500 包/秒 + 拒绝保留网段）：
+    /// 桌面端用户最不可能去读文档，所以「默认安全」必须是无条件的默认值，
+    /// 而不是一个需要用户去找开关的选项。可调，但绝不因此变得不安全。
+    policy: ScanPolicy,
 }
 
 pub struct AppState {
@@ -711,6 +725,7 @@ impl AppState {
                 round_at_ms: 0,
                 alerts: cping_core::AlertEngine::new(cping_core::AlertConfig::default()),
                 alerts_enabled: false,
+                policy: ScanPolicy::default(),
             })),
         }
     }
@@ -1046,11 +1061,14 @@ pub fn start_scan(
     // 每次扫描按当前方式新建调度器：一次任务只有一种方式，
     // 这样「ICMP 在线」与「TCP 开放」永远不可能混在同一次统计里。
     //
-    // M17：这里**刻意**不调用 `set_policy`，用的是 `ScanPolicy::default()`
-    // ——桌面端的用户最不可能去读文档，所以「默认限速 + 拒绝保留网段」
-    // 必须是无条件的默认值，而不是一个需要用户去找开关的选项。
-    // 界面里可调的策略（限速值等）随 M18 的界面工作一起接入。
-    let scheduler = ProbeScheduler::new(select_backend(mode));
+    // M18：策略**不能**跟着调度器一起新建——那样每扫一次就把用户的设置
+    // （限速、目标上限、是否放行保留网段）冲回默认值。策略从 `AppState`
+    // 取（唯一来源），由 `scheduler_with_policy` 在重建时重新装上。
+    let policy = {
+        let sh = state.shared.lock().expect("state poisoned");
+        sh.policy
+    };
+    let scheduler = scheduler_with_policy(mode, policy, lang)?;
     let handle: SchedulerHandle = scheduler
         .start(&config, targets.clone())
         .map_err(|e| e.localized(lang))?;
@@ -2276,6 +2294,665 @@ pub fn restore_snapshot(
 }
 
 // ---------------------------------------------------------------------------
+// M16：配置文件与扫描模板
+// ---------------------------------------------------------------------------
+
+/// 配置文件的默认名。
+///
+/// 与 TUI 的 `DEFAULT_CONFIG_FILE` 一致（`apps/cping-tui/src/app.rs`）：
+/// 双方都指「当前工作目录下的这一份」。CLI 没有默认值，必须显式 `--config`。
+const DEFAULT_CONFIG_FILE: &str = "cping.toml";
+
+/// 当前要读的配置文件路径：环境变量 `CPING_CONFIG` 优先，否则用默认名。
+///
+/// 环境变量那一条是为了脚本/CI：GUI 通常在别的工作目录里启动，没有它就只能靠
+/// 「把文件放到进程的当前目录」这种碰运气的办法。
+///
+/// 拆出 `_from` 变体是为了可测：`std::env::set_var` 在多线程测试里是竞态源，
+/// 这里改成把「环境变量的值」当参数传进来，测试就不必改进程级环境。
+fn config_file_path() -> PathBuf {
+    config_file_path_from(std::env::var_os("CPING_CONFIG"))
+}
+
+fn config_file_path_from(env_value: Option<std::ffi::OsString>) -> PathBuf {
+    match env_value {
+        Some(v) if !v.is_empty() => PathBuf::from(v),
+        _ => PathBuf::from(DEFAULT_CONFIG_FILE),
+    }
+}
+
+/// 一份命名扫描模板的对外形态。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileDto {
+    pub name: String,
+    /// 一行摘要（`describe_in(lang)` 的成品：规格 · 目标数 · range · 超时 · 并发 · 方式 · 说明）。
+    /// **成品文本**：前端只展示，不再自己拼一句话（两份措辞必然漂移）。
+    pub describe: String,
+    /// 展开后的目标数；规格解析不出来时是 `null`（不猜、不填 0）。
+    pub targets: Option<usize>,
+    /// 模板自带的一句话说明。它是**用户写在配置文件里的文本**，
+    /// 原样透传——不是我们写的句子，翻不了也不该翻。
+    pub note: String,
+    /// 是否是 `default_profile` 指向的那一份（界面据此打标）。
+    pub is_default: bool,
+}
+
+/// 模板列表 + 「为什么它是空的」。
+///
+/// 为什么不是一个裸 `Vec`：需求要求「读不到文件返回空列表 + 一条说明」。
+/// 一个裸列表装不下那条说明，而空列表恰恰是最需要解释的状态
+/// （文件不在？读不动？文件里没有 `[[profiles]]`？三种情况的处理方式完全不同）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileListDto {
+    /// 实际读取的路径。**读不到也给出**：用户最需要知道的就是该把文件放到哪。
+    pub path: String,
+    /// 说明（文件不存在 / 读不动 / 没有模板 / 迁移提示）。空列表时至少有一条。
+    pub notes: Vec<String>,
+    pub profiles: Vec<ProfileDto>,
+}
+
+/// 界面上**已经填好**的那几项。`None` = 空缺，模板可以填。
+///
+/// 与 CLI 的 `seen_*`、TUI 的 `seen_target` / `seen_mode` 是同一个东西：
+/// 「用户显式给过的值」。`None` 让「只填空缺」这条规则变成**数据**而不是猜测。
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileGapsDto {
+    pub target: Option<String>,
+    pub timeout_ms: Option<u64>,
+    pub concurrency: Option<usize>,
+    /// `icmp` / `tcp`（模块机器标识）。
+    pub mode: Option<String>,
+    pub tcp_port: Option<u16>,
+}
+
+/// 一条「这个字段的值是哪来的」的说明。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileFieldDto {
+    /// 稳定机器码：`target` / `timeout_ms` / `concurrency` / `mode`。
+    /// 前端拿它查自己的字典取标签——**标签不进这里**，因为同一段文本
+    /// 在两种语言下不同，而这个结构是 Rust 侧拼的。
+    pub field: String,
+    /// 值（展示用文本；`mode` 给的是 `ICMP` / `TCP:443` 这类技术记号）。
+    pub value: String,
+}
+
+/// 应用一份模板的结果。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileApplyDto {
+    pub name: String,
+    pub describe: String,
+    pub targets: Option<usize>,
+    /// 以下五项为 `None` = 「模板没有填这一项」（用户已填过，保留原值）。
+    pub target: Option<String>,
+    pub timeout_ms: Option<u64>,
+    pub concurrency: Option<usize>,
+    pub mode: Option<String>,
+    pub tcp_port: Option<u16>,
+    /// 本次**由模板填上**的字段——它们的来源是模板。
+    pub filled: Vec<ProfileFieldDto>,
+    /// 用户已填、模板**没有**覆盖的字段；`value` 是模板里本来可以填的值。
+    /// 界面必须把这一串显示出来：「模板里有个别的值，但我没动你的输入」。
+    pub skipped: Vec<ProfileFieldDto>,
+    /// 模板声明的 `range` 机器标识。
+    pub range: String,
+    /// 模板的 `range` 在本界面用不上（界面固定按 `standard` 展开目标）。
+    /// 说出来，而不是默默按 standard 跑。
+    pub range_unapplied: bool,
+}
+
+/// 读一份配置文件。**读不到不是错误**：返回 `None` + 说明。
+///
+/// 把「文件不在」「文件坏了」升成 `Err` 会让整个模板面板失效，而用户此刻
+/// 最需要的恰恰是那句「文件在哪、为什么读不到」。
+fn load_document(path: &FsPath, lang: Lang) -> (Option<ConfigDocument>, Vec<String>) {
+    let label = path.display().to_string();
+    if !path.exists() {
+        return (
+            None,
+            vec![i18n::render(lang, Key::ProfilesNoFile, &[&label])],
+        );
+    }
+    match ConfigDocument::load_from_path(&label) {
+        // 迁移说明由核心产出（自由文本，没有 `_in` 变体），原样带回界面——
+        // 「迁移结果要回报」是配置模块的硬约束，不能在这一层被吃掉。
+        Ok((doc, notes)) => (Some(doc), notes),
+        Err(e) => (
+            None,
+            vec![i18n::render(
+                lang,
+                Key::ProfilesReadFailed,
+                &[&label, &e.localized(lang)],
+            )],
+        ),
+    }
+}
+
+/// 按名取模板。
+///
+/// **点名不存在的模板一律 `Err`**：走的是核心的
+/// [`ConfigDocument::select_profile`]，它不会悄悄退回 `default_profile`
+/// ——「我明明选了 prod 怎么扫的是开发网段」比直接报错危险得多。
+/// 这里只负责把核心那句话套进本地化的外框。
+fn pick_profile<'a>(
+    doc: &'a ConfigDocument,
+    name: &str,
+    lang: Lang,
+) -> Result<&'a ScanProfile, String> {
+    // 名字是**数据**（来自用户选中的那一项），用 `{:?}` 原样展示，不加引号化的翻译
+    let quoted = format!("{name:?}");
+    match doc.select_profile(Some(name)) {
+        Ok(Some(p)) => Ok(p),
+        // 传了 `Some(name)` 时 `select_profile` 不会返回 `Ok(None)`；
+        // 真走到这里说明核心改了语义——此时**报错**，绝不编一份模板出来。
+        Ok(None) => Err(i18n::render(
+            lang,
+            Key::ProfileApplyFailed,
+            &[&quoted, i18n::text(lang, Key::ProfilesEmpty)],
+        )),
+        Err(e) => Err(i18n::render(
+            lang,
+            Key::ProfileApplyFailed,
+            &[&quoted, &e.localized(lang)],
+        )),
+    }
+}
+
+/// 模板与界面现状的合并（**只填空缺**）。
+///
+/// 优先级与 CLI / TUI 完全一致：**界面上已经填好的值永远赢**，模板只填空缺。
+/// 模板盖掉用户亲手填的值是这类功能里最难查的一类问题，所以这里不采用
+/// 「模板优先」，而是把每次决策都记下来：
+///
+/// - `filled`：值现在来自模板（来源要在界面上说清楚）；
+/// - `skipped`：用户已填、模板没覆盖，附带模板里本来能填的值。
+///
+/// 值相同则**两条都不记**：同一件事说两遍会把真正重要的说明淹掉
+/// （CLI 的 `apply_config` 用的是同一条判据）。
+fn merge_profile(profile: &ScanProfile, current: &ProfileGapsDto, lang: Lang) -> ProfileApplyDto {
+    let mut filled: Vec<ProfileFieldDto> = Vec::new();
+    let mut skipped: Vec<ProfileFieldDto> = Vec::new();
+
+    // ---- 目标规格 ----
+    let target = match current.target.as_deref().map(str::trim) {
+        Some(cur) if !cur.is_empty() => {
+            if cur != profile.spec.trim() {
+                skipped.push(ProfileFieldDto {
+                    field: "target".into(),
+                    value: profile.spec.clone(),
+                });
+            }
+            None
+        }
+        _ => {
+            filled.push(ProfileFieldDto {
+                field: "target".into(),
+                value: profile.spec.clone(),
+            });
+            Some(profile.spec.clone())
+        }
+    };
+
+    // ---- 超时 ----
+    let timeout_ms = match current.timeout_ms {
+        Some(cur) => {
+            if cur != profile.timeout_ms {
+                skipped.push(ProfileFieldDto {
+                    field: "timeout_ms".into(),
+                    value: profile.timeout_ms.to_string(),
+                });
+            }
+            None
+        }
+        None => {
+            filled.push(ProfileFieldDto {
+                field: "timeout_ms".into(),
+                value: profile.timeout_ms.to_string(),
+            });
+            Some(profile.timeout_ms)
+        }
+    };
+
+    // ---- 并发 ----
+    let concurrency = match current.concurrency {
+        Some(cur) => {
+            if cur != profile.concurrency {
+                skipped.push(ProfileFieldDto {
+                    field: "concurrency".into(),
+                    value: profile.concurrency.to_string(),
+                });
+            }
+            None
+        }
+        None => {
+            filled.push(ProfileFieldDto {
+                field: "concurrency".into(),
+                value: profile.concurrency.to_string(),
+            });
+            Some(profile.concurrency)
+        }
+    };
+
+    // ---- 探测方式 ----
+    // 比的是「方式 + 端口」而不是裸的方式键：TCP 下端口不同就是不同的探测目标，
+    // 只比 `tcp` 会让 `TCP:80` 悄悄顶掉用户填的 `TCP:443`。
+    let (mode, tcp_port) = match current.mode.as_deref().filter(|m| !m.is_empty()) {
+        Some(key) => {
+            let cur = if key == "tcp" {
+                format!("TCP:{}", current.tcp_port.unwrap_or(80))
+            } else {
+                "ICMP".to_string()
+            };
+            let want = profile.mode.describe();
+            if cur != want {
+                skipped.push(ProfileFieldDto {
+                    field: "mode".into(),
+                    value: want,
+                });
+            }
+            (None, None)
+        }
+        None => {
+            filled.push(ProfileFieldDto {
+                field: "mode".into(),
+                value: profile.mode.describe(),
+            });
+            (Some(profile.mode.key().to_string()), profile.mode.tcp_port())
+        }
+    };
+
+    ProfileApplyDto {
+        name: profile.name.clone(),
+        describe: profile.describe_in(lang),
+        targets: profile.target_count(),
+        target,
+        timeout_ms,
+        concurrency,
+        mode,
+        tcp_port,
+        filled,
+        skipped,
+        range: profile.range.key().to_string(),
+        // 界面（`start_scan`）固定按 Standard（`.1-.255`）展开目标。模板若写了
+        // 别的 range，这里如实标出来——按 standard 静默跑等于换掉了用户选的规格。
+        range_unapplied: profile.range != TargetRange::Standard,
+    }
+}
+
+/// M16：列出配置文件里的扫描模板。
+///
+/// **读不到配置文件不是错误**：返回空列表 + 说明，界面照常可用（只是没有模板可选）。
+#[tauri::command]
+pub fn list_profiles(lang: Option<String>) -> Result<ProfileListDto, String> {
+    Ok(list_profiles_at(&config_file_path(), parse_lang(lang)))
+}
+
+fn list_profiles_at(path: &FsPath, lang: Lang) -> ProfileListDto {
+    let (doc, mut notes) = load_document(path, lang);
+    let default_name = doc.as_ref().and_then(|d| d.default_profile.clone());
+    let profiles: Vec<ProfileDto> = doc
+        .as_ref()
+        .map(|d| {
+            d.profiles
+                .iter()
+                .map(|p| ProfileDto {
+                    name: p.name.clone(),
+                    describe: p.describe_in(lang),
+                    targets: p.target_count(),
+                    note: p.note.clone(),
+                    is_default: default_name
+                        .as_deref()
+                        .map(|n| n.eq_ignore_ascii_case(&p.name))
+                        .unwrap_or(false),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // 空列表必须带一句说明：三种「空」的原因完全不同，让用户自己猜是哪一种
+    // 是最没必要的往返。已有说明（文件读不动 / 迁移提示）时不叠第二条。
+    if profiles.is_empty() && notes.is_empty() {
+        let label = path.display().to_string();
+        notes.push(i18n::render(lang, Key::ProfilesEmpty, &[&label]));
+    }
+
+    ProfileListDto {
+        path: path.display().to_string(),
+        notes,
+        profiles,
+    }
+}
+
+/// M16：应用一份模板——**只填空缺**，界面上已填好的值一概不动。
+///
+/// `current` 里为 `Some` 的项就是「用户已经填好的」，`None` 才是空缺。
+#[tauri::command]
+pub fn apply_profile(
+    name: String,
+    current: ProfileGapsDto,
+    lang: Option<String>,
+) -> Result<ProfileApplyDto, String> {
+    apply_profile_at(
+        &config_file_path(),
+        name.trim(),
+        &current,
+        parse_lang(lang),
+    )
+}
+
+fn apply_profile_at(
+    path: &FsPath,
+    name: &str,
+    current: &ProfileGapsDto,
+    lang: Lang,
+) -> Result<ProfileApplyDto, String> {
+    let (doc, notes) = load_document(path, lang);
+    // 读不到配置就无从谈模板：把「文件不在 / 读不动」那句话说出去，
+    // 而不是回一句「没有这个模板」（那会误导用户去改模板名）。
+    let doc = doc.ok_or_else(|| notes.first().cloned().unwrap_or_default())?;
+    let profile = pick_profile(&doc, name, lang)?;
+    Ok(merge_profile(profile, current, lang))
+}
+
+// ---------------------------------------------------------------------------
+// M17 / M18：安全策略
+// ---------------------------------------------------------------------------
+
+/// 界面要用的安全策略形态。
+///
+/// 除了三个值之外，还把**默认值与上限**一起给出：表单上的提示（「0 = 不限速」
+/// 「目标数不能超过 65536」）由此而来，前端不必自己记一套常数——
+/// 记在自己那边的常数迟早与核心漂移。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanPolicyDto {
+    pub max_pps: u32,
+    pub max_targets: usize,
+    pub allow_reserved: bool,
+    /// 一行摘要（`describe_in(lang)` 的成品）。
+    pub describe: String,
+    pub default_max_pps: u32,
+    /// 速率上限的硬天花板（超过它限速就没意义了，核心直接拒绝）。
+    pub max_pps_limit: u32,
+    /// 目标数上限的结构上限。**只能收紧，不能放宽**。
+    pub max_targets_limit: usize,
+}
+
+fn policy_dto(policy: ScanPolicy, lang: Lang) -> ScanPolicyDto {
+    ScanPolicyDto {
+        max_pps: policy.max_pps,
+        max_targets: policy.max_targets,
+        allow_reserved: policy.allow_reserved,
+        describe: policy.describe_in(lang),
+        default_max_pps: cping_core::DEFAULT_MAX_PPS,
+        max_pps_limit: cping_core::MAX_PPS_LIMIT,
+        max_targets_limit: cping_core::MAX_TARGETS,
+    }
+}
+
+/// M18：读出当前生效的安全策略。
+#[tauri::command]
+pub fn scan_policy(
+    state: State<'_, AppState>,
+    lang: Option<String>,
+) -> Result<ScanPolicyDto, String> {
+    let lang = parse_lang(lang);
+    let policy = {
+        let sh = state.shared.lock().expect("state poisoned");
+        sh.policy
+    };
+    Ok(policy_dto(policy, lang))
+}
+
+/// M18：改安全策略。
+///
+/// 校验交给核心（[`ScanPolicy::validate_in`]，错误信息已本地化），
+/// **不合法就 `Err` 且一个字节都不改**——越界的值一律报错、绝不静默夹取。
+/// 「我明明设了 1000 怎么还是 500」比报错难查得多。
+#[tauri::command]
+pub fn set_scan_policy(
+    state: State<'_, AppState>,
+    max_pps: u32,
+    max_targets: usize,
+    allow_reserved: bool,
+    lang: Option<String>,
+) -> Result<ScanPolicyDto, String> {
+    let lang = parse_lang(lang);
+    let policy = ScanPolicy {
+        max_pps,
+        max_targets,
+        allow_reserved,
+    };
+    set_scan_policy_in(&state, policy, lang)
+}
+
+/// [`set_scan_policy`] 的实现体。
+///
+/// 拆出来是为了让单元测试不必构造 `tauri::State`（它没法在测试里凭空造一个）。
+/// 校验顺序也是刻意的：**先校验、后落状态**，中间没有任何「先存下来再回滚」
+/// 的窗口——那种写法一旦有人插错一步，非法值就留在状态里了。
+fn set_scan_policy_in(
+    state: &AppState,
+    policy: ScanPolicy,
+    lang: Lang,
+) -> Result<ScanPolicyDto, String> {
+    policy
+        .validate_in(lang)
+        .map_err(|e| e.localized(lang))?;
+    let mut sh = state.shared.lock().expect("state poisoned");
+    sh.policy = policy;
+    Ok(policy_dto(policy, lang))
+}
+
+/// 按探测方式建调度器，并**立刻装上当前安全策略**。
+///
+/// 为什么绑成一个函数：GUI 每次扫描都重建调度器（一次任务只有一种方式），
+/// 于是「切换探测方式后策略不丢」这件事完全靠「每次重建都重新装」。
+/// 把两件事写成两处，迟早会有一次只写了前者
+/// ——切一次探测方式就把限速和保留网段守卫悄悄丢掉，是 M17 在 TUI 上真踩过的坑。
+fn scheduler_with_policy(
+    mode: ProbeMode,
+    policy: ScanPolicy,
+    lang: Lang,
+) -> Result<ProbeScheduler, String> {
+    let mut scheduler = ProbeScheduler::new(select_backend(mode));
+    scheduler
+        .set_policy(policy)
+        .map_err(|e| e.localized(lang))?;
+    Ok(scheduler)
+}
+
+// ---------------------------------------------------------------------------
+// M18：无障碍——主题与字号
+// ---------------------------------------------------------------------------
+//
+// 这一节只做「接线」：主题的三套配色、对比度是否达标、色觉是否可区分，
+// 全部由 `cping_core::a11y` 定义并用测试守着。这里**不抄任何一组颜色**，
+// 也不在这里重算对比度——复刻一份数值迟早与核心漂移，而漂移的表现是
+// 「界面看着还行、其实已经不合规」。
+
+/// 一套界面配色的对外形态。所有颜色都是 `#RRGGBB`（大写）。
+///
+/// # 为什么默认主题的底色不是 `Theme::Default.palette().bg`
+///
+/// `Theme::Default.palette()` 假定**深色底**（它是给终端用的）。
+/// 图形界面的既有外观是浅色的，那套浅色令牌（`bg` / `fg` / `muted` /
+/// `border` / `panel` / `subtle`）是用户的既有体验，**不能因为做主题功能
+/// 就被换掉**。所以：
+///
+/// - `default`：界面令牌取既有浅色值，类别色取
+///   `cping_core::config::DEFAULT_COLOR_*`（与原版一致的类别色）；
+/// - `high-contrast` / `color-blind`：底色本就是深色，直接用
+///   `Theme::palette()` 的整套值（`panel` / `subtle` 由 `bg` 提亮得出，
+///   `palette` 里没有这两个概念）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThemeDto {
+    /// 主题键名：`default` / `high-contrast` / `color-blind`。
+    pub theme: String,
+    pub bg: String,
+    pub fg: String,
+    pub muted: String,
+    pub border: String,
+    /// 面板底色（卡片、侧栏）。
+    pub panel: String,
+    /// 次要底色（表头等）。
+    pub subtle: String,
+    /// 界面强调色（键盘焦点环等）。
+    pub accent: String,
+    pub low: String,
+    pub mid: String,
+    pub high: String,
+    pub offline: String,
+    pub error: String,
+}
+
+// 界面默认（浅色）主题的令牌。必须与 `apps/cping-gui/src/styles.css` 的
+// `:root` 完全一致——一致性由 `the_default_theme_matches_the_light_ui_tokens`
+// 守着（那边的值改了这个测试就会失败，反之亦然）。
+const UI_LIGHT_BG: Rgb = Rgb::new(0xF5, 0xF6, 0xF8);
+const UI_LIGHT_FG: Rgb = Rgb::new(0x11, 0x18, 0x27);
+const UI_LIGHT_MUTED: Rgb = Rgb::new(0x6B, 0x72, 0x80);
+const UI_LIGHT_BORDER: Rgb = Rgb::new(0xD9, 0xD9, 0xD9);
+const UI_LIGHT_PANEL: Rgb = Rgb::new(0xFF, 0xFF, 0xFF);
+const UI_LIGHT_SUBTLE: Rgb = Rgb::new(0xF8, 0xFA, 0xFC);
+/// 界面强调色。既有界面的主色就是近黑（naive-ui 的 `primaryColor`）。
+const UI_LIGHT_ACCENT: Rgb = Rgb::new(0x11, 0x18, 0x27);
+
+/// 各通道整体提亮 `delta`（饱和到 255）。
+///
+/// 深色主题下用它推 `panel` / `subtle`：`palette()` 只描述了「底色 + 文字 +
+/// 类别色」，没有「面板」这一层，而界面必须有。**提亮而不是另挑一组灰**，
+/// 是为了保证面板与底色的关系在任何主题下都一致（面板永远比底色亮一点）。
+fn lighten(c: Rgb, delta: u8) -> Rgb {
+    Rgb::new(
+        c.r.saturating_add(delta),
+        c.g.saturating_add(delta),
+        c.b.saturating_add(delta),
+    )
+}
+
+/// 主题 → DTO。纯函数，没有窗口也没有环境，便于测试。
+fn theme_dto(theme: Theme) -> ThemeDto {
+    let p = theme.palette();
+    // 默认主题的「界面层」走既有浅色令牌；另外两个主题直接用 palette。
+    let (bg, fg, muted, border, panel, subtle, accent) = if theme == Theme::Default {
+        (
+            UI_LIGHT_BG,
+            UI_LIGHT_FG,
+            UI_LIGHT_MUTED,
+            UI_LIGHT_BORDER,
+            UI_LIGHT_PANEL,
+            UI_LIGHT_SUBTLE,
+            UI_LIGHT_ACCENT,
+        )
+    } else {
+        (
+            p.bg,
+            p.fg,
+            p.muted,
+            p.border,
+            lighten(p.bg, 0x0C),
+            lighten(p.bg, 0x06),
+            p.accent,
+        )
+    };
+    // 默认主题的类别色显式取自核心的 `DEFAULT_COLOR_*`：核心有测试断言
+    // 「`Theme::Default.palette()` 的类别色 == 这几个常量」，所以两条来源
+    // 恒等；这里写常量是为了让「默认主题的类别色就是原版那几个」在代码里
+    // 一眼可见，而不是要求读者去追一层。
+    let (low, mid, high, offline, error) = if theme == Theme::Default {
+        (
+            cping_core::config::DEFAULT_COLOR_LOW.to_string(),
+            cping_core::config::DEFAULT_COLOR_MID.to_string(),
+            cping_core::config::DEFAULT_COLOR_HIGH.to_string(),
+            cping_core::config::DEFAULT_COLOR_OFFLINE.to_string(),
+            cping_core::config::DEFAULT_COLOR_ERROR.to_string(),
+        )
+    } else {
+        (
+            p.low.to_hex(),
+            p.mid.to_hex(),
+            p.high.to_hex(),
+            p.offline.to_hex(),
+            p.error.to_hex(),
+        )
+    };
+    ThemeDto {
+        theme: theme.key().to_string(),
+        bg: bg.to_hex(),
+        fg: fg.to_hex(),
+        muted: muted.to_hex(),
+        border: border.to_hex(),
+        panel: panel.to_hex(),
+        subtle: subtle.to_hex(),
+        accent: accent.to_hex(),
+        low,
+        mid,
+        high,
+        offline,
+        error,
+    }
+}
+
+/// 解析 `a11y_theme` 的主题参数。
+///
+/// - `None`：前端没指定 → 用**环境变量**给出的默认主题（`CPING_THEME`）。
+///   环境里的非法值由核心**忽略并保持默认**（`A11ySettings::from_env` 的
+///   既有语义：环境可能被别人的脚本设成任何东西，为此让程序起不来太过分）。
+/// - `Some(v)`：用户当场选的 → **认不出就报错**，绝不静默回落成默认主题。
+///   「以为自己开了无障碍、其实没开」正是本轮要防的事故，所以这里不采用
+///   `unwrap_or_default`。
+fn parse_theme_arg(raw: Option<&str>, lang: Lang) -> Result<Theme, String> {
+    match raw {
+        None => Ok(A11ySettings::from_env().theme),
+        Some(v) => Theme::parse(v)
+            .ok_or_else(|| i18n::render(lang, Key::A11yUnsupportedTheme, &[v])),
+    }
+}
+
+/// 解析字号档位。非法值报错（理由同 [`parse_theme_arg`]）。
+fn parse_font_scale_arg(raw: &str, lang: Lang) -> Result<FontScale, String> {
+    FontScale::parse(raw)
+        .ok_or_else(|| i18n::render(lang, Key::A11yUnsupportedFontScale, &[raw]))
+}
+
+/// M18：取一套界面配色。`theme` 为空时用环境默认。
+#[tauri::command]
+pub fn a11y_theme(theme: Option<String>, lang: Option<String>) -> Result<ThemeDto, String> {
+    let lang = parse_lang(lang);
+    Ok(theme_dto(parse_theme_arg(theme.as_deref(), lang)?))
+}
+
+/// M18：把该窗口的界面缩放到给定档位，返回生效的百分比。
+///
+/// **失败必须可见**：`set_zoom` 在 Android 上不支持（见 tauri 的
+/// `WebviewWindow::set_zoom` 文档），macOS 11 / iOS 14 以下同样不可用。
+/// 这些情况下这里**返回 Err 并把平台原因带出去**，界面会把它显示在状态栏——
+/// 静默什么都不做会让用户以为「自己没点到」，那是最难查的一类问题。
+///
+/// 缩放的是**整个 webview**（而不是改 CSS 字号）：只放大文字会让按钮变得比
+/// 手指小，对「看不清所以放大」的人反而是倒退（核心的 `MIN_TARGET_PX` 说明了
+/// 这条）。`set_zoom` 连控件一起放大，所以这里不需要再单独缩放控件尺寸。
+#[tauri::command]
+pub fn set_font_scale(
+    scale: String,
+    window: tauri::WebviewWindow,
+    lang: Option<String>,
+) -> Result<u32, String> {
+    let lang = parse_lang(lang);
+    let font_scale = parse_font_scale_arg(&scale, lang)?;
+    window
+        .set_zoom(font_scale.factor())
+        .map_err(|e| i18n::render(lang, Key::A11yZoomFailed, &[&e.to_string()]))?;
+    Ok(font_scale.percent())
+}
+
+// ---------------------------------------------------------------------------
 // 时间工具（不引入 chrono，保持依赖面最小）
 // ---------------------------------------------------------------------------
 
@@ -2328,4 +3005,548 @@ fn unix_millis() -> u64 {
 /// （此前 CLI/TUI/GUI 各一份拷贝），此处只做转发。
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     cping_core::civil_from_days(z)
+}
+
+// ---------------------------------------------------------------------------
+// 测试
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 一次性临时目录：带上进程号，避免同机并行跑两份测试时互相踩
+    /// （`crates/cping-core/src/policy.rs` 的审计测试用的是同一条做法）。
+    fn tmp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cping_gui_{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        dir
+    }
+
+    fn write_config(dir: &FsPath, text: &str) -> PathBuf {
+        let path = dir.join("cping.toml");
+        std::fs::write(&path, text).expect("写配置");
+        path
+    }
+
+    const TWO_PROFILES: &str = r#"
+schema_version = 2
+default_profile = "prod"
+
+[[profiles]]
+name = "prod"
+spec = "10.0.0.0/30"
+range = "hosts_only"
+timeout_ms = 700
+concurrency = 16
+mode = "tcp"
+tcp_port = 443
+note = "生产网段"
+
+[[profiles]]
+name = "lab"
+spec = "192.168.1"
+"#;
+
+    // ------------------------------------------------------------------
+    // M17：安全策略
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn an_invalid_policy_is_rejected_and_the_state_is_untouched() {
+        let state = AppState::new();
+        // 先落到一个**可辨认**的合法值，否则「状态没变」会被默认值掩盖
+        set_scan_policy_in(
+            &state,
+            ScanPolicy {
+                max_pps: 800,
+                max_targets: 100,
+                allow_reserved: false,
+            },
+            Lang::Zh,
+        )
+        .expect("合法策略必须能设上");
+        assert_eq!(state.shared.lock().unwrap().policy.max_pps, 800);
+
+        // 速率超过硬天花板 → 拒绝
+        let err = set_scan_policy_in(
+            &state,
+            ScanPolicy {
+                max_pps: cping_core::MAX_PPS_LIMIT + 1,
+                ..ScanPolicy::default()
+            },
+            Lang::Zh,
+        )
+        .unwrap_err();
+        assert!(err.contains("速率上限"), "{err}");
+        let now = state.shared.lock().unwrap().policy;
+        assert_eq!(
+            (now.max_pps, now.max_targets, now.allow_reserved),
+            (800, 100, false),
+            "非法策略不得改动状态（这正是「不静默夹取」的反面）"
+        );
+
+        // 目标数 0 → 拒绝
+        assert!(set_scan_policy_in(
+            &state,
+            ScanPolicy {
+                max_targets: 0,
+                ..ScanPolicy::default()
+            },
+            Lang::Zh,
+        )
+        .is_err());
+
+        // 目标数超过**结构上限**：只能收紧不能放宽
+        let err = set_scan_policy_in(
+            &state,
+            ScanPolicy {
+                max_targets: cping_core::MAX_TARGETS + 1,
+                ..ScanPolicy::default()
+            },
+            Lang::Zh,
+        )
+        .unwrap_err();
+        assert!(err.contains("只能收紧"), "{err}");
+        // 三次非法输入之后，状态仍然是那一次合法设置
+        let now = state.shared.lock().unwrap().policy;
+        assert_eq!((now.max_pps, now.max_targets), (800, 100));
+    }
+
+    #[test]
+    fn a_valid_policy_is_what_the_next_scan_will_use() {
+        let state = AppState::new();
+        let dto = set_scan_policy_in(
+            &state,
+            ScanPolicy {
+                max_pps: 0,
+                max_targets: 254,
+                allow_reserved: true,
+            },
+            Lang::Zh,
+        )
+        .unwrap();
+        // 返回的是**设上之后**的策略，界面据此回填，不必再拉一次
+        assert_eq!(dto.max_pps, 0);
+        assert!(dto.allow_reserved);
+        assert!(dto.describe.contains("不限速"), "{}", dto.describe);
+        // 上限/默认值随 DTO 一起给出，前端不自己记常数
+        assert_eq!(dto.default_max_pps, cping_core::DEFAULT_MAX_PPS);
+        assert_eq!(dto.max_targets_limit, cping_core::MAX_TARGETS);
+        // 状态里就是它
+        assert_eq!(state.shared.lock().unwrap().policy.max_pps, 0);
+    }
+
+    #[test]
+    fn policy_errors_follow_the_requested_language() {
+        let state = AppState::new();
+        let err = set_scan_policy_in(
+            &state,
+            ScanPolicy {
+                max_pps: cping_core::MAX_PPS_LIMIT + 1,
+                ..ScanPolicy::default()
+            },
+            Lang::En,
+        )
+        .unwrap_err();
+        assert!(err.contains("rate limit"), "{err}");
+        assert!(!err.contains("速率上限"), "{err}");
+        // 界面照旧不会被改到
+        assert_eq!(
+            state.shared.lock().unwrap().policy.max_pps,
+            cping_core::DEFAULT_MAX_PPS
+        );
+    }
+
+    #[test]
+    fn the_default_policy_is_the_safe_one() {
+        // 「可调」不等于「默认不安全」：没碰过设置面板时必须是限速 + 拒绝保留网段。
+        let policy = AppState::new().shared.lock().unwrap().policy;
+        assert_eq!(policy.max_pps, cping_core::DEFAULT_MAX_PPS);
+        assert!(policy.max_pps > 0, "默认必须限速");
+        assert!(!policy.allow_reserved, "默认必须拦保留网段");
+        assert_eq!(policy.max_targets, cping_core::MAX_TARGETS);
+    }
+
+    #[test]
+    fn rebuilding_the_scheduler_for_each_mode_keeps_the_policy() {
+        // 「切换探测方式后重建调度器时策略不丢」：GUI 每次扫描都重建调度器，
+        // 所以这条只能靠「建调度器时一定装上策略」来保证。
+        let policy = ScanPolicy {
+            max_pps: 123,
+            max_targets: 9,
+            allow_reserved: true,
+        };
+        for mode in [ProbeMode::Icmp, ProbeMode::Tcp { port: 445 }] {
+            let scheduler = scheduler_with_policy(mode, policy, Lang::Zh).expect("建调度器");
+            assert_eq!(scheduler.policy(), policy, "{mode:?} 下策略丢了");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // M18：无障碍（主题 / 字号）
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn the_default_theme_matches_the_light_ui_tokens() {
+        // 默认主题的界面令牌必须与 `styles.css` 的 `:root` 逐字一致。
+        // 「做主题功能不改现有外观」这条约束就压在这个断言上：谁想顺手把
+        // 默认主题换成核心 palette 的深色（那是给终端用的），会在这里被拦住。
+        let dto = theme_dto(Theme::Default);
+        assert_eq!(dto.theme, "default");
+        assert_eq!(dto.bg, "#F5F6F8");
+        assert_eq!(dto.fg, "#111827");
+        assert_eq!(dto.muted, "#6B7280");
+        assert_eq!(dto.border, "#D9D9D9");
+        assert_eq!(dto.panel, "#FFFFFF");
+        assert_eq!(dto.subtle, "#F8FAFC");
+        assert_eq!(dto.accent, "#111827");
+        // 类别色就是原版那几个常量，没有被「顺手优化」
+        assert_eq!(dto.low, cping_core::config::DEFAULT_COLOR_LOW);
+        assert_eq!(dto.mid, cping_core::config::DEFAULT_COLOR_MID);
+        assert_eq!(dto.high, cping_core::config::DEFAULT_COLOR_HIGH);
+        assert_eq!(dto.offline, cping_core::config::DEFAULT_COLOR_OFFLINE);
+        assert_eq!(dto.error, cping_core::config::DEFAULT_COLOR_ERROR);
+    }
+
+    #[test]
+    fn the_dark_themes_come_straight_from_the_core_palette() {
+        for (theme, key) in [
+            (Theme::HighContrast, "high-contrast"),
+            (Theme::ColorBlind, "color-blind"),
+        ] {
+            let dto = theme_dto(theme);
+            let p = theme.palette();
+            assert_eq!(dto.theme, key);
+            assert_eq!(dto.bg, p.bg.to_hex());
+            assert_eq!(dto.fg, p.fg.to_hex());
+            assert_eq!(dto.muted, p.muted.to_hex());
+            assert_eq!(dto.border, p.border.to_hex());
+            assert_eq!(dto.accent, p.accent.to_hex());
+            // 类别色一个不差地等于核心 palette —— 界面**不许**自己另挑一组
+            assert_eq!(dto.low, p.low.to_hex());
+            assert_eq!(dto.mid, p.mid.to_hex());
+            assert_eq!(dto.high, p.high.to_hex());
+            assert_eq!(dto.offline, p.offline.to_hex());
+            assert_eq!(dto.error, p.error.to_hex());
+            // 深色主题下界面必须有「面板」这一层：panel 严格比底色亮
+            let panel = Rgb::parse(&dto.panel).expect("panel 必须是 #RRGGBB");
+            assert!(
+                panel.r > p.bg.r && panel.g > p.bg.g && panel.b > p.bg.b,
+                "{} 的 panel={} 没有比 bg={} 亮",
+                key,
+                dto.panel,
+                dto.bg
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_theme_name_errors_with_the_name_in_the_message() {
+        // 拼错必须报错——「以为开了无障碍、其实没开」是本轮要防的事故。
+        let err = parse_theme_arg(Some("kontrast"), Lang::Zh).unwrap_err();
+        assert!(err.contains("kontrast"), "{err}");
+        let err_en = parse_theme_arg(Some("kontrast"), Lang::En).unwrap_err();
+        assert!(err_en.to_ascii_lowercase().contains("theme"), "{err_en}");
+        assert!(
+            !err_en.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
+            "英文错误里出现了汉字：{err_en}"
+        );
+
+        // 合法名（含核心接受的别名）照常解析
+        assert_eq!(
+            parse_theme_arg(Some(" Color-Blind "), Lang::Zh).unwrap(),
+            Theme::ColorBlind
+        );
+        assert_eq!(
+            parse_theme_arg(Some("highcontrast"), Lang::Zh).unwrap(),
+            Theme::HighContrast
+        );
+
+        // `None`（前端没指定）走环境默认，而不是报错——旧前端配新后端必须照常能用
+        assert_eq!(
+            parse_theme_arg(None, Lang::Zh).unwrap(),
+            A11ySettings::from_env().theme
+        );
+    }
+
+    #[test]
+    fn every_theme_key_round_trips_through_the_parser() {
+        for theme in Theme::ALL {
+            let dto = theme_dto(theme);
+            assert_eq!(
+                parse_theme_arg(Some(&dto.theme), Lang::Zh).unwrap(),
+                theme,
+                "{} 的键名无法被自己的解析器读回",
+                dto.theme
+            );
+        }
+    }
+
+    #[test]
+    fn font_scale_accepts_spec_spellings_and_rejects_the_rest() {
+        assert_eq!(
+            parse_font_scale_arg("150%", Lang::Zh).unwrap(),
+            FontScale::Large
+        );
+        assert_eq!(FontScale::Large.percent(), 150);
+        assert_eq!(
+            parse_font_scale_arg("200", Lang::Zh).unwrap(),
+            FontScale::Huge
+        );
+        assert_eq!(FontScale::Huge.percent(), 200);
+        assert_eq!(
+            parse_font_scale_arg("normal", Lang::Zh).unwrap(),
+            FontScale::Normal
+        );
+        assert_eq!(FontScale::Normal.percent(), 100);
+
+        let err = parse_font_scale_arg("jumbo", Lang::Zh).unwrap_err();
+        assert!(err.contains("jumbo"), "{err}");
+        let err_en = parse_font_scale_arg("jumbo", Lang::En).unwrap_err();
+        assert!(err_en.to_ascii_lowercase().contains("size"), "{err_en}");
+    }
+
+    // ------------------------------------------------------------------
+    // M16：配置文件读取
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn a_missing_config_file_yields_an_empty_list_and_a_note_not_an_error() {
+        let dir = tmp_dir("no_config");
+        let path = dir.join("cping.toml");
+        let list = list_profiles_at(&path, Lang::Zh);
+        assert!(list.profiles.is_empty());
+        assert_eq!(list.notes.len(), 1, "空列表必须带且只带一条说明");
+        assert!(
+            list.notes[0].contains("CPING_CONFIG"),
+            "说明要告诉用户文件该放哪：{:?}",
+            list.notes
+        );
+        assert_eq!(list.path, path.display().to_string());
+
+        // 英文模式下同样是英文说明（不是「没翻」）
+        let list = list_profiles_at(&path, Lang::En);
+        assert_eq!(list.notes.len(), 1);
+        assert!(list.notes[0].contains("CPING_CONFIG"), "{:?}", list.notes);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_config_without_profiles_says_so_instead_of_looking_missing() {
+        let dir = tmp_dir("empty_config");
+        let path = write_config(&dir, "schema_version = 2\n\n[probe]\ntimeout_ms = 900\n");
+        let list = list_profiles_at(&path, Lang::Zh);
+        assert!(list.profiles.is_empty());
+        assert!(
+            list.notes.iter().any(|n| n.contains("[[profiles]]")),
+            "「文件在，但里面没有模板」与「文件不在」必须说成两件事：{:?}",
+            list.notes
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unreadable_config_file_is_reported_not_swallowed() {
+        let dir = tmp_dir("bad_config");
+        // 不是 TOML 子集能读的东西：直接报读不动，而不是返回空列表装作没事
+        let path = write_config(&dir, "schema_version = 9\n");
+        let list = list_profiles_at(&path, Lang::Zh);
+        assert!(list.profiles.is_empty());
+        assert!(
+            list.notes.iter().any(|n| n.contains("无法读取")),
+            "{:?}",
+            list.notes
+        );
+
+        let err = apply_profile_at(&path, "prod", &ProfileGapsDto::default(), Lang::Zh).unwrap_err();
+        assert!(err.contains("无法读取"), "应用模板时也要说清是文件读不动：{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn listing_profiles_reports_names_descriptions_and_target_counts() {
+        let dir = tmp_dir("list_profiles");
+        let path = write_config(&dir, TWO_PROFILES);
+        let list = list_profiles_at(&path, Lang::Zh);
+        assert!(list.notes.is_empty(), "{:?}", list.notes);
+
+        let names: Vec<&str> = list.profiles.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["prod", "lab"], "顺序必须是配置文件里的顺序");
+
+        let prod = &list.profiles[0];
+        assert_eq!(prod.targets, Some(2), "10.0.0.0/30 有 2 个可用地址");
+        assert!(prod.is_default, "default_profile 指向 prod");
+        assert!(!list.profiles[1].is_default);
+        // 摘要来自核心，用户写的说明原样带出
+        for needle in ["prod", "10.0.0.0/30", "hosts_only", "TCP:443", "生产网段"] {
+            assert!(prod.describe.contains(needle), "{} 缺少 {needle}", prod.describe);
+        }
+        assert_eq!(prod.note, "生产网段");
+        // 目标数按语言渲染
+        let en = list_profiles_at(&path, Lang::En);
+        assert!(en.profiles[0].describe.contains("hosts_only"), "{}", en.profiles[0].describe);
+        assert!(!en.profiles[0].describe.contains("目标"), "{}", en.profiles[0].describe);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ------------------------------------------------------------------
+    // M16：模板的点名与应用
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn naming_a_missing_profile_errors_instead_of_falling_back() {
+        let dir = tmp_dir("missing_profile");
+        let path = write_config(&dir, TWO_PROFILES);
+
+        // 存在的那一份能拿到
+        let ok = apply_profile_at(&path, "lab", &ProfileGapsDto::default(), Lang::Zh).unwrap();
+        assert_eq!(ok.target.as_deref(), Some("192.168.1"));
+
+        // 大小写不敏感（与 `ConfigDocument::profile` 同一套规则）
+        let ok = apply_profile_at(&path, "PROD", &ProfileGapsDto::default(), Lang::Zh).unwrap();
+        assert_eq!(ok.name, "prod");
+
+        // 点名不存在的模板 → Err，且**绝不回退到 default_profile**
+        let err = apply_profile_at(&path, "nope", &ProfileGapsDto::default(), Lang::Zh)
+            .unwrap_err();
+        assert!(err.contains("nope"), "{err}");
+        assert!(
+            err.contains("prod"),
+            "报错要把现有模板列出来，否则用户不知道该改成什么：{err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn applying_a_profile_only_fills_the_gaps_and_reports_both_sides() {
+        let dir = tmp_dir("apply_gaps");
+        let path = write_config(&dir, TWO_PROFILES);
+        // 用户在界面上已经填了目标与并发；超时与方式保持空缺
+        let current = ProfileGapsDto {
+            target: Some("192.168.7".into()),
+            timeout_ms: None,
+            concurrency: Some(8),
+            mode: None,
+            tcp_port: None,
+        };
+        let out = apply_profile_at(&path, "prod", &current, Lang::Zh).unwrap();
+
+        // 已填的两项：一个字都不动，并在 skipped 里说清模板里本来是什么值
+        assert!(out.target.is_none());
+        assert!(out.concurrency.is_none());
+        assert!(out
+            .skipped
+            .iter()
+            .any(|f| f.field == "target" && f.value == "10.0.0.0/30"));
+        assert!(out
+            .skipped
+            .iter()
+            .any(|f| f.field == "concurrency" && f.value == "16"));
+
+        // 空缺的两项：由模板填上（来源要在界面上说清）
+        assert_eq!(out.timeout_ms, Some(700));
+        assert_eq!(out.mode.as_deref(), Some("tcp"));
+        assert_eq!(out.tcp_port, Some(443));
+        let filled: Vec<&str> = out.filled.iter().map(|f| f.field.as_str()).collect();
+        assert_eq!(filled, vec!["timeout_ms", "mode"], "filled 只记真正填上的项");
+        assert_eq!(out.name, "prod");
+        assert_eq!(out.targets, Some(2));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn equal_values_are_not_reported_as_skipped() {
+        // 值一样就不打扰：同一件事说两遍会把真正重要的说明淹掉
+        // （CLI 的 `apply_config` 用的是同一条判据）。
+        let dir = tmp_dir("apply_equal");
+        let path = write_config(&dir, TWO_PROFILES);
+        let current = ProfileGapsDto {
+            target: Some("10.0.0.0/30".into()),
+            timeout_ms: Some(700),
+            concurrency: Some(16),
+            mode: Some("tcp".into()),
+            tcp_port: Some(443),
+        };
+        let out = apply_profile_at(&path, "prod", &current, Lang::Zh).unwrap();
+        assert!(out.filled.is_empty(), "{:?}", out.filled);
+        assert!(out.skipped.is_empty(), "{:?}", out.skipped);
+        assert!(out.target.is_none() && out.mode.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_mode_comparison_includes_the_port() {
+        // 只比 `tcp` 会让 TCP:80 悄悄顶掉用户填的 TCP:443——端口不同就是不同的探测目标。
+        let dir = tmp_dir("apply_mode_port");
+        let path = write_config(&dir, TWO_PROFILES);
+        let current = ProfileGapsDto {
+            mode: Some("tcp".into()),
+            tcp_port: Some(80),
+            ..ProfileGapsDto::default()
+        };
+        let out = apply_profile_at(&path, "prod", &current, Lang::Zh).unwrap();
+        assert!(out.mode.is_none(), "用户填过方式，模板不该动它");
+        let skipped_mode = out
+            .skipped
+            .iter()
+            .find(|f| f.field == "mode")
+            .expect("端口不同必须被记录成「没覆盖」");
+        assert_eq!(skipped_mode.value, "TCP:443");
+
+        // 端口一致时不再啰嗦
+        let current = ProfileGapsDto {
+            mode: Some("tcp".into()),
+            tcp_port: Some(443),
+            ..ProfileGapsDto::default()
+        };
+        let out = apply_profile_at(&path, "prod", &current, Lang::Zh).unwrap();
+        assert!(out
+            .skipped
+            .iter()
+            .all(|f| f.field != "mode"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_non_standard_range_is_reported_as_unapplied() {
+        // 界面固定按 standard 展开目标；模板写了 hosts_only 就必须说出来，
+        // 悄悄按 standard 跑等于换掉了用户选的规格。
+        let dir = tmp_dir("apply_range");
+        let path = write_config(&dir, TWO_PROFILES);
+        let out = apply_profile_at(&path, "prod", &ProfileGapsDto::default(), Lang::Zh).unwrap();
+        assert_eq!(out.range, "hosts_only");
+        assert!(out.range_unapplied);
+
+        // lab 用的是默认的 standard → 没有可抱怨的
+        let out = apply_profile_at(&path, "lab", &ProfileGapsDto::default(), Lang::Zh).unwrap();
+        assert_eq!(out.range, "standard");
+        assert!(!out.range_unapplied);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ------------------------------------------------------------------
+    // 配置文件路径
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn the_config_path_prefers_the_env_var_and_falls_back_to_the_shared_name() {
+        // 不改进程环境（多线程测试里那是竞态源），直接把「环境变量的值」当参数传
+        assert_eq!(
+            config_file_path_from(None),
+            PathBuf::from(DEFAULT_CONFIG_FILE)
+        );
+        assert_eq!(
+            config_file_path_from(Some(std::ffi::OsString::new())),
+            PathBuf::from(DEFAULT_CONFIG_FILE),
+            "空的环境变量视同没设"
+        );
+        assert_eq!(
+            config_file_path_from(Some(std::ffi::OsString::from("/tmp/x.toml"))),
+            PathBuf::from("/tmp/x.toml")
+        );
+        // 默认名与 TUI 的 `DEFAULT_CONFIG_FILE` 一致（CLI 必须显式 `--config`）
+        assert_eq!(DEFAULT_CONFIG_FILE, "cping.toml");
+    }
 }

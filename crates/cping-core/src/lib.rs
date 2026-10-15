@@ -9,6 +9,9 @@
 //! - 分类与统计**只在这里算一次**，界面不得自行重算。
 //! - 权限不足、超时、不可达、内部错误必须互相区分（见 [`error::ProbeError`]）。
 
+/// M18 第三步：无障碍。主题、**可验证的**配色性质（WCAG 对比度、
+/// 色觉模拟下的可区分度）、字体缩放。
+pub mod a11y;
 pub mod alerts;
 pub mod classify;
 pub mod config;
@@ -49,6 +52,11 @@ pub mod timeseries;
 #[cfg(feature = "async")]
 pub mod asynchronous;
 
+pub use a11y::{
+    color_distance, contrast_ratio, ensure_contrast, relative_luminance, simulate, A11yIssue,
+    A11ySettings, ColorVision, FontScale, Palette, Rgb, Theme, COLOR_BLIND_MIN_DISTANCE,
+    CONTRAST_AA, CONTRAST_AAA, MIN_TARGET_PX,
+};
 pub use alerts::{
     all_kinds, default_rules, match_rule, online_map, rule_kinds_in_display_order, AlertConfig,
     AlertContext, AlertEngine, AlertEvent, AlertKind, AlertLog, AlertRule, Severity,

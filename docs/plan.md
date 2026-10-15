@@ -1383,3 +1383,120 @@ M16 模板选择器与 M17 策略面板接入 TUI；GUI 命令层语言贯通；
   没有真人在终端里敲过 `P` / `G`
 - **非中文 Windows / 纯英文 Linux 上的默认语言推断仍未实测**
   （本机测的是显式 `--lang` 与 Git Bash 的环境变量）
+
+### M18 — v2.6.0 国际化与无障碍（第三步实施记录，2026-10-15）
+
+> 本步把 M18 的最后一块做完：**无障碍与键盘全导航**（高对比主题、字体缩放、
+> ARIA 标注、色盲友好备选配色、GUI 纯键盘可达），并补上第二步欠下的
+> **M16 / M17 的 GUI 界面**。M18 三步到此收口，版本号升到 **v2.6.0**。
+>
+> 这一步最值钱的地方不是「加了三套颜色」，而是**把配色变成了能算出对错的性质**：
+> 对比度用 WCAG 公式算、色觉可区分度用色觉模拟后的色距算，
+> 于是「配色被改坏了」会在测试里失败，而不是等色盲用户来报告。
+
+**实现文件**
+
+- `crates/cping-core/src/a11y.rs`（新增，约 900 行含 19 条测试）：
+  `Rgb` / `relative_luminance` / `contrast_ratio`（WCAG 2.x，**先线性化 sRGB**）、
+  `ColorVision`（4 种）+ `simulate`（Viénot/Brettel 矩阵）+ `color_distance`（redmean）、
+  `Theme`（3 套）+ `Palette` + `Palette::audit` + `A11yIssue`、
+  `ensure_contrast`、`FontScale`（3 档）+ `MIN_TARGET_PX`、`A11ySettings` + `flag_is_on`
+- `crates/cping-core/src/classify.rs`：`ResultClass::symbol()` —— 符号的唯一来源
+- `crates/cping-core/src/html.rs`：类别色改走 CSS 变量（浅底 / 深底两套）、
+  `REPORT_BG_LIGHT` / `REPORT_BG_DARK` + `EXPORT_CONTRAST_TARGET`（8% 余量）、
+  统计卡片与类别列改用类名
+- `crates/cping-core/src/i18n.rs`：键 **151 → 163**（主题名 / 字号档 / 视觉类型 / 两条审计问题）
+- `crates/cping-core/src/lib.rs`：新增模块与 re-export
+- `apps/cping-tui/src/app.rs` / `ui.rs` / `i18n.rs`：`Options` 加 `theme` / `font_scale`；
+  新增 `ui::Look`（**颜色的唯一出口**）；全部硬编码 `Color::*` 收敛；
+  符号与「未探测」字符各归其位；字典 217 → 219
+- `apps/cping-gui/src-tauri/`：新增 `a11y_theme` / `set_font_scale`（+ `ThemeDto`）、
+  M16/M17 的 `list_profiles` / `apply_profile` / `scan_policy` / `set_scan_policy`；
+  Rust 侧字典 37 → 45 键
+- `apps/cping-gui/src/`：新增 `A11ySettings.vue` / `ProfileSettings.vue` /
+  `PolicySettings.vue`；`styles.css`（语义令牌 + `:focus-visible` + 减少动效）；
+  12 个组件的 ARIA 与键盘可达性；i18n 字典 241 → 291 键
+- `scripts/check-symbols.mjs`（新增）+ `.github/workflows/ci.yml`（接进 portability job）
+
+**定死的边界（下阶段别推翻）**
+
+1. **三套主题的目标不同，不是「同一套颜色的三档亮度」**：`default` 保持原版视觉
+   （兼容性优先）；`high-contrast` 对比度优先（**≥ 7:1**，AAA 正文）；
+   `color-blind` 用 Okabe-Ito 配色，**色觉可区分优先**（色距 ≥ 60）。
+   把三个目标混成一个，结果一定是两头都不突出。
+2. **高对比 ≠ 色盲友好，这是实测结论不是感觉**：传统高对比配色
+   （纯绿 `#00FF00` + 纯黄 `#FFFF00`）在红色盲下几乎同色——实测色距 **37.9**，
+   而阈值是 60。所以高对比主题**不承诺**色觉可区分，并把这条写成断言
+   （`high_contrast_does_not_imply_color_blind_safe`，它同时守住「默认主题的
+   类别色没有被顺手优化」）。
+3. **「无色」去掉的是颜色，不是字形属性**。加粗 / 反显 / 弱化必须保留——
+   无色之后「焦点在哪」只能靠反显、「这是次要信息」只能靠弱化。
+   TUI 的输入区焦点从「黄底黑字」改成**反显**，正是这个道理。
+4. **`NO_COLOR` 是「存在且非空」**（no-color.org）。空串不算。
+5. **显式选了无障碍主题时，主题色优先于用户自定义色**：那两个主题的价值就在
+   「达标」，允许用户配置覆盖等于把无障碍开关变成摆设。
+6. **符号只有一个来源**（核心 `ResultClass::symbol()`），由
+   `scripts/check-symbols.mjs` 在 CI 里守住。报表里 `low` 用中点 `·` 是
+   **登记过的例外**（打印观感），例外之外任何差异都失败。
+7. **导出侧给对比度留余量**（8%）：`ensure_contrast` 返回「第一个达标的点」，
+   不留余量会贴着 4.5 过线（实测 4.54 / 4.56 / 4.57），
+   四舍五入或换渲染引擎就可能掉下去。
+8. **矩阵格不进 Tab 序**（`ResultGrid`）：255 个停靠点会让键盘用户寸步难行。
+   格子没有点击行为，纯展示——这是**有意不给**，不是漏了。
+9. **GUI 的主题色由核心给出**并注入 CSS 变量，**前端不做任何颜色运算**：
+   否则就是第四份配色，迟早与核心漂移。
+10. **模板「只填空缺」在三端口径一致**：GUI 把「我已填哪些」交给后端，
+    合并只在一处判定；被模板顶掉的字段必须在界面上说明来源。
+
+**范围决定：本步做到哪**
+
+**做完的**：核心 a11y（对比度与色觉达标都是可测性质）；三套主题在三端落地；
+字体缩放；无色模式全覆盖；键盘可达与 ARIA；M16/M17 接入 GUI；
+符号与配色收敛到单一来源；报表可读性缺陷修复；静态守卫接进 CI；版本升 v2.6.0。
+
+**刻意没做的**（不是遗漏，是边界）：
+
+- **TUI 的主题与无色没有真人在终端里看过**：渲染只由 `TestBackend` 内存后端
+  断言文本与样式数据，实际终端里的观感（颜色实际呈现、宽字符对齐）未人工确认。
+- **GUI 没有真机点击过**：本机没有可用的桌面会话。`set_zoom` 的成功路径
+  只做到「编译期签名核对（`tauri-2.12.3` 源码）+ 失败路径 Err 透传」。
+- **字号与主题不落盘**：字号是窗口的 zoom 状态，前端没有反读接口，
+  持久化会造出「界面显示标准、实际 150%」这种自相矛盾的状态。
+- **组件内的中性灰没有全量令牌化**：只令牌化**主要语义色**
+  （背景 / 文字 / 边框 / 面板 / 弱化 / 强调 / 次要底色）。
+  局部徽章配色保留原值，理由是它们在中性灰上本来就够读，
+  全量替换会铺开几十处 diff 且与「默认主题视觉完全一致」直接冲突。
+  边界写在 `styles.css` 里。
+- **naive-ui 抽屉关闭按钮的 `aria-label` 未本地化**（库内置英文）。
+  它至少有标注，不属于「只有符号没有标注」。
+- **`AppConfig::validate()` 的内层细节仍是中文**（第二步登记过，本步未动）。
+
+**测试与实测**
+
+- 测试：工作区 **525 → 552 passed / 0 failed**（核心 +22 = a11y 19 + 报表 3，
+  TUI +5）；GUI 独立工程 **25 → 30 passed**；合计 **582**
+- `cargo fmt --check` / 工作区 `clippy -D warnings` / GUI 独立工程 clippy /
+  `npm run typecheck` / `node scripts/check-i18n.mjs`（291 键）/ `npm run build`
+  全部干净
+- **静态守卫的负向测试**：往 `CLASS_SYMBOLS` 注入一个错符号 →
+  `check-symbols.mjs` 以 1 退出并指出差异；还原后通过
+- **真实冒烟（Windows 本机，debug 二进制）**：
+  1. `cping-tui --help` → 列出 `--theme` / `--font-scale`（本机 shell 环境推断为英文）
+  2. `env -u LANG -u LC_MESSAGES -u LC_CTYPE LC_ALL=C cping-tui --help` → **中文**，
+     即「`C` / `POSIX` 是『无偏好』而不是英文」这条边界**在真实环境里成立**
+     （第一步时它登记为未实测）
+  3. `cping-tui --lang zh --help` → 中文对照
+  4. `cping-cli -t 127.0.0.1,127.0.0.2,127.0.0.3 -c 3 --out x.html` → 导出成功
+  5. **对导出的报表做真实计算**（算出来的，不是看出来的）：无内联
+     `style="color:`；浅色纸面 `#00FF00 → #008200`（4.69）、
+     `#FFFF00 → #757500`（4.58）；深色纸面保持原色（12.95 / 16.55）；
+     十项全部 ≥ 4.5
+
+**未实测（如实登记）**
+
+- TUI 三套主题与无色模式的**真实终端观感**（只由内存后端断言数据路径）
+- TUI 的 `--theme` / `--font-scale` 在真终端里的敲击体验
+- **GUI 真机点击**：主题切换、字号缩放、ARIA 在屏幕阅读器下的实际朗读效果
+- `set_zoom` 的**成功路径**（签名已核对，本机无桌面会话，没真跑过改字号）
+- 非中文 Windows / 纯英文 Linux 上的默认语言推断
+  （本机测的是 Git Bash 默认环境与 `LC_ALL=C` 两种）

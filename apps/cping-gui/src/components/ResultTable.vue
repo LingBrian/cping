@@ -29,17 +29,19 @@ function changeTitle(index: number, base: string): string {
     <!-- 列宽用百分比而非固定像素：表格是 table-layout: fixed，
          百分比让七列永远按比例填满容器，不会因为内容变长而撑出横向滚动条。
          放不下的内容由 .result-table__ellipsis 截断，完整值放 title。 -->
-    <table class="result-table">
+    <table class="result-table" :aria-label="t('aria.resultTable')">
       <thead>
         <tr>
-          <th style="width: 13%">{{ t('table.ip') }}</th>
-          <th style="width: 14%">{{ t('table.status') }}</th>
+          <!-- `scope="col"` 让读屏器把「单元格 ↔ 表头」的关系说清楚：
+               否则念到某一格时只会报一串数字，用户不知道那是 RTT 还是厂商。 -->
+          <th scope="col" style="width: 13%">{{ t('table.ip') }}</th>
+          <th scope="col" style="width: 14%">{{ t('table.status') }}</th>
           <!-- RTT 是语言中立的技术缩写，中英文一致，故不入字典 -->
-          <th style="width: 6%">RTT</th>
-          <th style="width: 16%">{{ t('table.mac') }}</th>
-          <th style="width: 21%">{{ t('table.vendor') }}</th>
-          <th style="width: 20%">{{ t('table.hostname') }}</th>
-          <th style="width: 10%">{{ t('table.class') }}</th>
+          <th scope="col" style="width: 6%">RTT</th>
+          <th scope="col" style="width: 16%">{{ t('table.mac') }}</th>
+          <th scope="col" style="width: 21%">{{ t('table.vendor') }}</th>
+          <th scope="col" style="width: 20%">{{ t('table.hostname') }}</th>
+          <th scope="col" style="width: 10%">{{ t('table.class') }}</th>
         </tr>
       </thead>
       <tbody>
@@ -75,6 +77,7 @@ function changeTitle(index: number, base: string): string {
                 quaternary
                 :loading="store.hostnameBusy === row.index"
                 :disabled="store.hostnameBusy !== null"
+                :aria-label="t('aria.lookup', row.ip)"
                 @click="onLookup(row.index)"
               >
                 {{ t('btn.lookupShort') }}

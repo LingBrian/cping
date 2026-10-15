@@ -38,6 +38,19 @@ async function onDismiss(deleteFile: boolean) {
 </script>
 
 <template>
+  <!--
+    对话框语义**必须自己补上**：这里的 NModal 没有指定 `preset`，走的是
+    naive-ui 的「自定义内容」分支，它只提供遮罩 + 焦点陷阱（`trapFocus` /
+    `autoFocus` 默认都是 true，所以打开时焦点会落进来、Tab 也出不去），
+    **不会**渲染 `role="dialog"` / `aria-modal`——那两个属性只在 preset 为
+    card/dialog/confirm 时才由 naive 加上（见 naive-ui 的 BodyWrapper）。
+
+    - `role="dialog"` + `aria-modal="true"`：告诉读屏器「这是一个模态框，
+      外面那些内容现在不算数」；
+    - `aria-labelledby` 指向标题，读屏器先念标题再说内容；
+    - `tabindex="-1"` 让容器本身可编程聚焦（焦点陷阱有时会把焦点放在容器上）；
+    - Esc 关闭由 `:close-on-esc` + `@esc` 负责（下面已经写了）。
+  -->
   <NModal
     :show="show"
     :mask-closable="true"
@@ -46,8 +59,17 @@ async function onDismiss(deleteFile: boolean) {
     @mask-click="onDismiss(false)"
     @esc="onDismiss(false)"
   >
-    <div class="cping-panel" style="width: min(520px, 92vw); padding: 18px">
-      <div style="font-size: 15px; font-weight: 600">{{ t('restore.title') }}</div>
+    <div
+      class="cping-panel"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="restore-snapshot-title"
+      tabindex="-1"
+      style="width: min(520px, 92vw); padding: 18px"
+    >
+      <div id="restore-snapshot-title" style="font-size: 15px; font-weight: 600">
+        {{ t('restore.title') }}
+      </div>
 
       <template v-if="readable">
         <div style="font-size: 13px; color: #374151; margin-top: 12px; line-height: 1.9">

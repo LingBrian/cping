@@ -17,6 +17,7 @@ const keys: ResultClassKey[] = ['low', 'mid', 'high', 'offline', 'error']
       <input
         type="color"
         :value="store.colors[key]"
+        :aria-label="t('aria.colorForClass', t(CLASS_LABEL_KEYS[key]))"
         style="width: 34px; height: 20px; border: 1px solid var(--cping-border); border-radius: 4px; padding: 0"
         @input="store.setColor(key, ($event.target as HTMLInputElement).value)"
       />

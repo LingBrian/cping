@@ -75,6 +75,171 @@ export interface SnapshotDto {
 
 export type ProbeModeKey = 'icmp' | 'tcp'
 
+// ---------------------------------------------------------------------------
+// M16：扫描模板（配置文件里的 `[[profiles]]`）
+// ---------------------------------------------------------------------------
+
+/**
+ * 一份命名扫描模板。
+ *
+ * `describe` 是**后端按当前语言渲染好的成品摘要**（规格 · 目标数 · range ·
+ * 超时 · 并发 · 方式 · 说明）：前端只展示，不再自己拼一句话——
+ * 两份措辞必然漂移，而漂移了没人会发现。
+ */
+export interface ProfileDto {
+  name: string
+  /** 一行摘要（后端渲染） */
+  describe: string
+  /** 展开后的目标数；规格解析不出来时为 null（不猜、不填 0） */
+  targets: number | null
+  /** 模板自带的一句话说明（用户写在配置文件里的文本，原样透传） */
+  note: string
+  /** 是否为 `default_profile` 指向的那一份 */
+  isDefault: boolean
+}
+
+/**
+ * 模板列表 + 「为什么它是空的」。
+ *
+ * 空列表恰恰是最需要解释的状态：文件不在 / 读不动 / 里面没有 `[[profiles]]`，
+ * 三种情况的处理方式完全不同，让用户自己猜是哪一种是最没必要的往返。
+ */
+export interface ProfileListDto {
+  /** 实际读取的路径（读不到也给出，好让用户知道该把文件放哪） */
+  path: string
+  notes: string[]
+  profiles: ProfileDto[]
+}
+
+/** 一条「这个字段的值是哪来的」。`field` 是稳定机器码（`target` / `timeout_ms` / …）。 */
+export interface ProfileFieldDto {
+  field: string
+  value: string
+}
+
+/**
+ * 应用模板的结果。
+ *
+ * `target` / `timeoutMs` / `concurrency` / `mode` / `tcpPort` 为 `null` 表示
+ * **模板没有填这一项**（界面上已填好，保留原值）。`filled` 是本次由模板填上的
+ * 字段（来源 = 模板），`skipped` 是用户已填、模板没覆盖的字段
+ * （`value` 是模板里本来可以填的值）——两者都要展示，否则就成了「悄悄换掉用户输入」。
+ */
+export interface ProfileApplyDto {
+  name: string
+  describe: string
+  targets: number | null
+  target: string | null
+  timeoutMs: number | null
+  concurrency: number | null
+  mode: ProbeModeKey | null
+  tcpPort: number | null
+  filled: ProfileFieldDto[]
+  skipped: ProfileFieldDto[]
+  range: string
+  /** 模板声明的 range 在本界面用不上（界面固定按 standard 展开目标） */
+  rangeUnapplied: boolean
+}
+
+/**
+ * 字段机器码 → 界面字典键。与 `CHANGE_LABEL_KEYS` 同一套做法：
+ * 结构只留映射，文案在 `src/i18n/*.ts` 里，这样同一段文本才能跟着语言变。
+ * 后端返回的是机器码而不是标签，正是为了这一点。
+ */
+export const PROFILE_FIELD_LABEL_KEYS: Record<string, string> = {
+  target: 'field.target',
+  timeout_ms: 'field.timeout',
+  concurrency: 'field.concurrency',
+  mode: 'field.mode',
+}
+
+// ---------------------------------------------------------------------------
+// M17 / M18：安全策略
+// ---------------------------------------------------------------------------
+
+/**
+ * 当前生效的安全策略。
+ *
+ * `defaultMaxPps` / `maxPpsLimit` / `maxTargetsLimit` 都来自核心：表单上的提示
+ * （「0 = 不限速」「目标数只能收紧」）由此而来，前端不自己记一套常数——
+ * 记在界面这边的常数迟早与核心漂移。
+ */
+export interface ScanPolicyDto {
+  maxPps: number
+  maxTargets: number
+  allowReserved: boolean
+  /** 一行摘要（后端渲染） */
+  describe: string
+  defaultMaxPps: number
+  maxPpsLimit: number
+  maxTargetsLimit: number
+}
+
+// ---------------------------------------------------------------------------
+// M18：无障碍（主题 / 字号）
+// ---------------------------------------------------------------------------
+
+/**
+ * 一套界面配色。所有颜色都是后端渲染好的 `#RRGGBB`。
+ *
+ * **界面不持有任何一组颜色**：默认主题的浅色令牌、高对比 / 色盲友好的
+ * 类别色，全都在 Rust 侧算好（那边才有对比度与色觉可区分性的测试）。
+ * 前端只把它写成 CSS 变量。
+ */
+export interface ThemeDto {
+  /** 主题键名：`default` / `high-contrast` / `color-blind` */
+  theme: string
+  bg: string
+  fg: string
+  muted: string
+  border: string
+  /** 面板底色（卡片、侧栏） */
+  panel: string
+  /** 次要底色（表头等） */
+  subtle: string
+  /** 界面强调色（键盘焦点环等） */
+  accent: string
+  low: string
+  mid: string
+  high: string
+  offline: string
+  error: string
+}
+
+/** 主题键（与核心 `Theme::key()` 一致）。 */
+export type ThemeKey = 'default' | 'high-contrast' | 'color-blind'
+
+/** 字号档位（与核心 `FontScale::key()` 一致）。 */
+export type FontScaleKey = 'normal' | 'large' | 'huge'
+
+/** 主题的展示顺序：默认 → 高对比 → 色盲友好。 */
+export const THEME_KEYS: readonly ThemeKey[] = ['default', 'high-contrast', 'color-blind']
+
+/** 字号档位的展示顺序：标准 → 大 → 特大。 */
+export const FONT_SCALE_KEYS: readonly FontScaleKey[] = ['normal', 'large', 'huge']
+
+/**
+ * 主题 → 界面字典键。与 `CLASS_LABEL_KEYS` 同一套做法：
+ * 结构只留映射，文案在 `src/i18n/*.ts` 里，这样同一段文本才能跟着语言变。
+ *
+ * 注意 `default` 用的是**界面侧**的名字（「默认」），而不是核心
+ * `Key::LabelThemeDefault` 的措辞：那边是给终端用的（默认主题在终端里是
+ * 深色配色），直接拿来会与这里「浅色默认」的语义冲突。
+ */
+export const THEME_LABEL_KEYS: Record<ThemeKey, string> = {
+  default: 'a11y.themeDefault',
+  'high-contrast': 'a11y.themeHighContrast',
+  'color-blind': 'a11y.themeColorBlind',
+}
+
+/** 字号档位 → 界面字典键。 */
+export const FONT_SCALE_LABEL_KEYS: Record<FontScaleKey, string> = {
+  normal: 'a11y.fontNormal',
+  large: 'a11y.fontLarge',
+  huge: 'a11y.fontHuge',
+}
+
+
 /** 一个输入网段在目标列表中的区间（M9 多网段） */
 export interface SegmentDto {
   label: string

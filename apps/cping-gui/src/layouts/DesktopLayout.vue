@@ -11,10 +11,13 @@ import {
 } from 'naive-ui'
 import { save } from '@tauri-apps/plugin-dialog'
 import ChangePanel from '../components/ChangePanel.vue'
+import A11ySettings from '../components/A11ySettings.vue'
 import ColorSettings from '../components/ColorSettings.vue'
 import FingerprintPanel from '../components/FingerprintPanel.vue'
 import LanguageSettings from '../components/LanguageSettings.vue'
+import PolicySettings from '../components/PolicySettings.vue'
 import PrefixForm from '../components/PrefixForm.vue'
+import ProfileSettings from '../components/ProfileSettings.vue'
 import ProgressSummary from '../components/ProgressSummary.vue'
 import ResultGrid from '../components/ResultGrid.vue'
 import ResultTable from '../components/ResultTable.vue'
@@ -210,6 +213,13 @@ async function onSaveSnapshot() {
 
       <ColorSettings />
       <LanguageSettings />
+      <!-- M18：无障碍（主题 / 字号 / 减少动效）。紧挨类别色设置——
+           一个是「结果怎么看」，一个是「界面能不能用」，放在一起最省来回找。 -->
+      <A11ySettings />
+      <!-- M16 / M17：扫描模板与安全策略。紧挨其它设置项，不另开抽屉——
+           桌面侧的「设置」就是这个侧栏。 -->
+      <ProfileSettings />
+      <PolicySettings />
       <div class="cping-panel">
         <div style="display: flex; align-items: center; justify-content: space-between">
           <span style="font-size: 13px">{{ t('common.onlineOnly') }}</span>

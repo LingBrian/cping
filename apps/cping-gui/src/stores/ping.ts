@@ -6,6 +6,8 @@ import {
   DEFAULT_COLORS,
   MATRIX_CELLS,
   MONITOR_INTERVALS,
+  PROFILE_FIELD_LABEL_KEYS,
+  THEME_LABEL_KEYS,
   type AlertDto,
   type AlertEventDto,
   type AppConfigDto,
@@ -14,13 +16,20 @@ import {
   type ColorConfigDto,
   type ExportFormatKey,
   type FingerprintDto,
+  type FontScaleKey,
   type PendingSnapshotDto,
   type ProbeModeKey,
   type ProbeResultDto,
+  type ProfileApplyDto,
+  type ProfileDto,
+  type ProfileFieldDto,
   type ResultClassKey,
+  type ScanPolicyDto,
   type ScanStatsDto,
   type SegmentDto,
   type SnapshotDto,
+  type ThemeDto,
+  type ThemeKey,
   type TrendDto,
 } from '../shared/types'
 import * as svc from '../services/ping'
@@ -450,6 +459,8 @@ export const usePingStore = defineStore('ping', () => {
   function setMode(key: ProbeModeKey) {
     if (mode.value === key) return
     mode.value = key
+    // M16：这是**用户**改的方式，模板从此不再覆盖它（「只填空缺」）
+    markEdited('mode')
     status.value = t('status.modeChanged', modeLabel.value)
   }
 
@@ -666,9 +677,187 @@ export const usePingStore = defineStore('ping', () => {
 
   const alertCount = computed(() => alerts.value?.total ?? 0)
 
+  // -------------------------------------------------------------------------
+  // M16：扫描模板（配置文件里的 [[profiles]]）
+  // -------------------------------------------------------------------------
+
+  /**
+   * 配置文件里的模板列表、路径，以及「为什么没有模板」的说明。
+   *
+   * `profilesNotes` 存在的理由：空列表是最需要解释的状态——文件不在 / 读不动 /
+   * 里面没有 `[[profiles]]`，三种情况的处理方式完全不同。
+   * 后端把原因一起给过来了（读不到文件**不算失败**），界面照原样展示即可。
+   */
+  const profiles = ref<ProfileDto[]>([])
+  const profilesPath = ref('')
+  const profilesNotes = ref<string[]>([])
+  /** 是否已经拉过一次（切语言时据此决定要不要重拉，与趋势/告警同一条规矩） */
+  const profilesLoaded = ref(false)
+  const profileBusy = ref(false)
+  /** 最近一次成功应用的模板名（界面据此打「当前」标记） */
+  const activeProfile = ref<string | null>(null)
+  /** 最近一次应用模板的完整结果：界面用它说清「哪个字段来自模板、哪个没动」 */
+  const lastProfileApply = ref<ProfileApplyDto | null>(null)
+
+  /**
+   * 界面上「**用户亲手填过**」的字段——M16 的「模板只填空缺」就靠它。
+   *
+   * 为什么不去看「值是否等于默认值」：默认值（1000 ms / 32 并发）本身就是一个
+   * 用户可能真心想要的取值，拿它当「没填过」等于把用户的选择吃掉。
+   * 只有真实交互（输入、切换）才置位；**模板自己填上的值不置位**——
+   * 这样「被模板填过的空缺」对下一份模板仍然是空缺，用户可以换个模板再试。
+   */
+  const edited = ref({ target: false, timeout: false, concurrency: false, mode: false })
+
+  function markEdited(field: 'target' | 'timeout' | 'concurrency' | 'mode'): void {
+    edited.value = { ...edited.value, [field]: true }
+  }
+
+  /** 界面输入目标的唯一入口：写入 + 记账（「用户填过」）。 */
+  function setTargetSpec(value: string): void {
+    prefix.value = value
+    markEdited('target')
+  }
+
+  function setTimeoutMs(value: number): void {
+    if (!Number.isFinite(value) || value <= 0) return
+    timeoutMs.value = Math.floor(value)
+    markEdited('timeout')
+  }
+
+  function setConcurrency(value: number): void {
+    if (!Number.isFinite(value) || value <= 0) return
+    concurrency.value = Math.floor(value)
+    markEdited('concurrency')
+  }
+
+  /**
+   * 把「哪些字段、值是多少」折成一句人话。
+   *
+   * 标签查界面字典（`PROFILE_FIELD_LABEL_KEYS`），而 `field` 机器码由后端给——
+   * 后端拼文本就翻不了，前端硬编码字段名就会与后端漂移，所以两边各管一半。
+   */
+  function fieldSummary(list: ProfileFieldDto[]): string {
+    return list
+      .map((f) => t(PROFILE_FIELD_LABEL_KEYS[f.field] ?? 'field.unknown', f.value))
+      .join(' / ')
+  }
+
+  /** 拉一次模板列表。**读不到配置文件不算失败**，后端返回空列表 + 说明。 */
+  async function loadProfiles(): Promise<void> {
+    try {
+      const list = await svc.listProfiles()
+      profiles.value = list.profiles
+      profilesPath.value = list.path
+      profilesNotes.value = list.notes
+    } catch (e) {
+      // 只有真正的传输错误会走到这里（文件层面的问题后端已当正常情况处理）
+      profiles.value = []
+      profilesNotes.value = []
+      status.value = t('status.profilesFailed', String(e))
+    } finally {
+      profilesLoaded.value = true
+    }
+  }
+
+  /**
+   * 应用一份模板。
+   *
+   * **只填空缺**：界面上已经填好的项以非 `null` 传给后端，后端一个字都不会动它们；
+   * 返回的 `filled` / `skipped` 两条清单交给界面把「来源」说清楚。
+   * 「模板悄悄换掉了用户输入」是本项目最不能接受的一类行为，所以这里宁可多显示一行字。
+   */
+  async function applyProfileByName(name: string): Promise<boolean> {
+    if (profileBusy.value) return false
+    profileBusy.value = true
+    try {
+      const r = await svc.applyProfile(name, {
+        target: edited.value.target ? prefix.value : null,
+        timeoutMs: edited.value.timeout ? timeoutMs.value : null,
+        concurrency: edited.value.concurrency ? concurrency.value : null,
+        // 方式连同端口一起报：TCP 下端口不同就是不同的探测目标
+        mode: edited.value.mode ? mode.value : null,
+        tcpPort: edited.value.mode ? tcpPort.value : null,
+      })
+      // 后端只返回**这次真正要填**的项（`null` = 模板没填这一项），其余保持界面原值
+      if (r.target != null) prefix.value = r.target
+      if (r.timeoutMs != null) timeoutMs.value = r.timeoutMs
+      if (r.concurrency != null) concurrency.value = r.concurrency
+      if (r.mode != null) mode.value = r.mode
+      if (r.tcpPort != null) tcpPort.value = r.tcpPort
+      activeProfile.value = r.name
+      lastProfileApply.value = r
+      // 目标换了就重新解析一次：摘要、分段、矩阵可用性全由后端算，
+      // 前端不实现第二套解析规则（解析不出来时后端给的那句话会进 specError）。
+      if (r.target != null) await validateSpec(prefix.value)
+      status.value =
+        r.filled.length > 0
+          ? t('status.profileApplied', r.name, fieldSummary(r.filled))
+          : t('status.profileAppliedNoGap', r.name)
+      return true
+    } catch (e) {
+      // 后端给的是可直接展示的原因（点名不存在的模板 / 配置文件读不动……），不要再包一层
+      status.value = String(e)
+      return false
+    } finally {
+      profileBusy.value = false
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // M17 / M18：安全策略
+  // -------------------------------------------------------------------------
+
+  /**
+   * 当前生效的安全策略。`null` = 还没从后端拉过。
+   *
+   * 后端在没有人为设置时给的是**安全的默认值**（限速 500 包/秒 + 拒绝保留网段）：
+   * 把「可调」做出来，但绝不因此把默认值放松。
+   */
+  const policy = ref<ScanPolicyDto | null>(null)
+  const policyBusy = ref(false)
+
+  async function loadPolicy(): Promise<void> {
+    policyBusy.value = true
+    try {
+      policy.value = await svc.scanPolicy()
+    } catch (e) {
+      status.value = t('status.policyFailed', String(e))
+    } finally {
+      policyBusy.value = false
+    }
+  }
+
+  /**
+   * 改策略。
+   *
+   * 越界的值后端**拒绝并给出原因、且不改动状态**（不静默夹取），
+   * 界面把原因原样显示出来——自己不夹取、也不改写那句话。
+   */
+  async function updatePolicy(
+    maxPps: number,
+    maxTargets: number,
+    allowReserved: boolean,
+  ): Promise<boolean> {
+    policyBusy.value = true
+    try {
+      const p = await svc.setScanPolicy(maxPps, maxTargets, allowReserved)
+      policy.value = p
+      status.value = t('status.policyApplied', p.describe)
+      return true
+    } catch (e) {
+      status.value = String(e)
+      return false
+    } finally {
+      policyBusy.value = false
+    }
+  }
+
   function setTcpPort(port: number) {
     if (!Number.isFinite(port) || port <= 0 || port > 65535) return
     tcpPort.value = Math.floor(port)
+    // 端口是方式的一部分：用户手改过端口，模板就不该再动「怎么扫」
+    markEdited('mode')
     if (mode.value !== 'tcp') setMode('tcp')
     else status.value = t('status.modeChanged', modeLabel.value)
   }
@@ -690,6 +879,8 @@ export const usePingStore = defineStore('ping', () => {
    *   代价与收益不成比例；要换语言就得用户自己再点一次「指纹」。
    * - **不回溯改写 `status` / `enrichNote`**：它们是事件日志，记录事件发生
    *   那一刻的语言（既有约定，见 `status` 的声明处）。
+   * - **模板与策略照「已经看过才拉」的规矩办**：它们的摘要/描述是后端按当时的
+   *   语言渲染好的成品，不重拉就会一直停在旧语言。
    */
   async function refreshLocalizedViews(): Promise<void> {
     await loadBackendCaps()
@@ -704,6 +895,8 @@ export const usePingStore = defineStore('ping', () => {
     await loadChanges(200)
     if (trend.value !== null) await loadTrend()
     if (alerts.value !== null) await loadAlerts()
+    if (profilesLoaded.value) await loadProfiles()
+    if (policy.value !== null) await loadPolicy()
   }
 
   /** 在常用端口之间轮换（`T` 之外的鼠标友好路径）。 */
@@ -711,6 +904,130 @@ export const usePingStore = defineStore('ping', () => {
     const idx = pool.indexOf(tcpPort.value)
     const next = pool[(idx + 1) % pool.length]
     setTcpPort(next)
+  }
+
+  // -------------------------------------------------------------------------
+  // M18：无障碍（主题 / 字号 / 减少动效）
+  // -------------------------------------------------------------------------
+
+  /**
+   * 无障碍状态。
+   *
+   * `theme` / `fontScale` **不落盘**：字号是 zoom 在**后端窗口**上的状态，
+   * 前端没有反过来读它的接口；持久化只会造出「界面显示标准、实际缩放 150%」
+   * 这种对不上的状态，那比不记住更糟。本轮只要求「当前会话可达」。
+   *
+   * `reduceMotion` 的初值取系统偏好（`prefers-reduced-motion`），让开关的
+   * 位置与实际生效的动效一致——CSS 侧本来就有一条同名的媒体查询，
+   * 开关是给「系统没设、但这个用户不想看动画」的人准备的显式入口。
+   */
+  const a11y = ref({
+    theme: 'default' as ThemeKey,
+    fontScale: 'normal' as FontScaleKey,
+    /** 当前生效的字号百分比（由后端回报；失败时保持上一次的值） */
+    percent: 100,
+    reduceMotion: systemPrefersReducedMotion(),
+  })
+
+  function systemPrefersReducedMotion(): boolean {
+    try {
+      return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true
+    } catch {
+      // 拿不到媒体查询（旧 WebView / 非浏览器环境）：当作「不减少」，不影响使用
+      return false
+    }
+  }
+
+  /**
+   * 最近一次应用到的配色（`null` = 还没从后端拿到）。
+   *
+   * 为什么要留一份：`styles.css` 里**自绘**的部分靠 CSS 变量就够了，但
+   * naive-ui 的内置控件（页签、输入框、按钮）走它自己的主题系统，读不到
+   * CSS 变量。`App.vue` 据此决定「要不要切 naive 的深色主题」以及主色取什么
+   * ——深色主题下不切的话，页签文字会是深灰配深底，直接读不出来。
+   */
+  const themePalette = ref<ThemeDto | null>(null)
+
+  /**
+   * 把一套配色写成根元素的 CSS 变量，并标出主题键。
+   *
+   * 写成 `document.documentElement` 上的**内联变量**（而不是往 stylesheet 里
+   * 注入规则）：`:root` 里的浅色默认值因此一直留在样式表里，未加载主题时
+   * 视觉与改动前完全一致；同时也让「哪几个令牌参与主题」在 CSS 里一眼可见。
+   */
+  function applyTheme(dto: ThemeDto): void {
+    const root = document.documentElement
+    root.style.setProperty('--cping-bg', dto.bg)
+    root.style.setProperty('--cping-fg', dto.fg)
+    root.style.setProperty('--cping-muted', dto.muted)
+    root.style.setProperty('--cping-border', dto.border)
+    root.style.setProperty('--cping-panel', dto.panel)
+    root.style.setProperty('--cping-subtle', dto.subtle)
+    root.style.setProperty('--cping-accent', dto.accent)
+    root.dataset.theme = dto.theme
+  }
+
+  /** 减少动效：给根元素打标，`styles.css` 里有一条同名的属性选择器覆盖。 */
+  function applyReduceMotion(on: boolean): void {
+    const root = document.documentElement
+    if (on) root.dataset.reduceMotion = 'true'
+    else delete root.dataset.reduceMotion
+  }
+
+  /** 启动时读一次主题（不传名字 = 用环境默认）。失败只写状态栏，不影响探测。 */
+  async function loadA11y(): Promise<void> {
+    applyReduceMotion(a11y.value.reduceMotion)
+    try {
+      const dto = await svc.a11yTheme(null)
+      applyTheme(dto)
+      themePalette.value = dto
+      a11y.value = { ...a11y.value, theme: dto.theme as ThemeKey }
+    } catch (e) {
+      // 主题读不到不拦路：界面继续用 `:root` 里的浅色默认值
+      status.value = t('status.a11yThemeFailed', String(e))
+    }
+  }
+
+  /**
+   * 切主题。
+   *
+   * **不做本地白名单校验**：认得/认不得只有一处判定（核心的 `Theme::parse`），
+   * 界面再抄一份名单迟早与之漂移。后端认不出会报错，这里原样显示那个原因。
+   */
+  async function setTheme(name: ThemeKey): Promise<void> {
+    try {
+      const dto = await svc.a11yTheme(name)
+      applyTheme(dto)
+      themePalette.value = dto
+      a11y.value = { ...a11y.value, theme: dto.theme as ThemeKey }
+      const label = (THEME_LABEL_KEYS as Record<string, string>)[dto.theme] ?? dto.theme
+      status.value = t('status.a11yThemeSet', label)
+    } catch (e) {
+      status.value = String(e)
+    }
+  }
+
+  /**
+   * 切字号（整个 webview 缩放）。
+   *
+   * 平台不支持或调用失败时**后端会抛错**，这里原样显示原因——用户点了没反应
+   * 是最难查的一类问题，所以这条路径绝不吞异常。
+   */
+  async function setFontScale(name: FontScaleKey): Promise<void> {
+    try {
+      const percent = await svc.setFontScale(name)
+      a11y.value = { ...a11y.value, fontScale: name, percent }
+      status.value = t('status.a11yFontScaleSet', percent)
+    } catch (e) {
+      status.value = String(e)
+    }
+  }
+
+  /** 减少动效开关。纯界面行为，不需要后端参与，因此不会失败。 */
+  function setReduceMotion(on: boolean): void {
+    a11y.value = { ...a11y.value, reduceMotion: on }
+    applyReduceMotion(on)
+    status.value = on ? t('status.reduceMotionOn') : t('status.reduceMotionOff')
   }
 
   // -------------------------------------------------------------------------
@@ -1105,6 +1422,28 @@ export const usePingStore = defineStore('ping', () => {
     setAlertMuted,
     updateAlertRules,
     dropAlerts,
+    // M16：扫描模板
+    profiles,
+    profilesPath,
+    profilesNotes,
+    profileBusy,
+    activeProfile,
+    lastProfileApply,
+    loadProfiles,
+    applyProfileByName,
+    fieldSummary,
+    // M17 / M18：安全策略
+    policy,
+    policyBusy,
+    loadPolicy,
+    updatePolicy,
+    // M18：无障碍（主题 / 字号 / 减少动效）
+    a11y,
+    themePalette,
+    loadA11y,
+    setTheme,
+    setFontScale,
+    setReduceMotion,
     // M8
     round,
     changes,
@@ -1141,6 +1480,10 @@ export const usePingStore = defineStore('ping', () => {
     setMode,
     setTcpPort,
     cycleTcpPort,
+    // M16：用户在界面上「填过」的唯一入口（模板「只填空缺」据此判定）
+    setTargetSpec,
+    setTimeoutMs,
+    setConcurrency,
     toggleMonitor,
     setMonitorInterval,
     shiftMonitorInterval,

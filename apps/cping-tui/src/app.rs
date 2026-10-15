@@ -7,9 +7,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cping_core::classify::{classify_status, ResultClass, Thresholds};
-use cping_core::config::{
-    ColorConfig, ProbeConfig, ViewMode, DEFAULT_CONCURRENCY, DEFAULT_TIMEOUT_MS,
-};
+use cping_core::config::{ProbeConfig, ViewMode, DEFAULT_CONCURRENCY, DEFAULT_TIMEOUT_MS};
 use cping_core::enrich::{enrich_with_mac_and_vendor, EnrichReport};
 use cping_core::export::{export_to_path, ExportMeta};
 use cping_core::i18n::Lang;
@@ -63,6 +61,18 @@ pub struct Options {
     /// 目标规格（M9 起支持 `192.168.1` / `192.168.1.0/24` / 单主机 / 多网段）。
     pub prefix: String,
     pub no_color: bool,
+    /// M18 第三步：界面主题（默认 / 高对比 / 色盲友好）。
+    ///
+    /// 主题与「无颜色」是两件事：`--no-color` 是**完全不要颜色**，
+    /// 主题是**换一套颜色**（高对比 / 色觉友好）。两者可以同时给，
+    /// 同时给时无色优先。
+    pub theme: cping_core::Theme,
+    /// M18 第三步：字号档。
+    ///
+    /// TUI 改不了终端的字号（那是终端的事），但**知道**它被放大了是有用的：
+    /// 字号翻倍时终端能放的行列减半，「窗口太小」的判定要跟着放宽
+    /// （见 `ui::Look::min_rows`）。
+    pub font_scale: cping_core::FontScale,
     pub hide_offline: bool,
     pub view: ViewMode,
     pub help: bool,
@@ -108,6 +118,8 @@ impl Default for Options {
         Self {
             prefix: "192.168.1".into(),
             no_color: false,
+            theme: cping_core::Theme::Default,
+            font_scale: cping_core::FontScale::Normal,
             hide_offline: false,
             view: ViewMode::Matrix,
             help: false,
@@ -131,8 +143,15 @@ impl Default for Options {
 
 impl Options {
     pub fn from_args<I: Iterator<Item = String>>(args: I) -> Self {
+        // M18 第三步：环境变量里的无障碍设置一次取出（`A11ySettings::from_env`）。
+        // `NO_COLOR` 的语义走核心判定：**存在且非空**才算——这里此前用
+        // `var_os(..).is_some()`，于是 `NO_COLOR=` 也被当成「要无色」，
+        // 与 <https://no-color.org> 的约定（非空）不一致。
+        let env_a11y = cping_core::A11ySettings::from_env();
         let mut opts = Options {
-            no_color: std::env::var_os("NO_COLOR").is_some(),
+            no_color: env_a11y.no_color,
+            theme: env_a11y.theme,
+            font_scale: env_a11y.font_scale,
             // M18：不给 `--lang` 时按 POSIX 约定从环境推断（CPING_LANG →
             // LC_ALL → LC_MESSAGES → LANG），兜底中文。显式 `--lang` 会覆盖它。
             lang: Lang::from_env(),
@@ -152,6 +171,26 @@ impl Options {
             match arg.as_str() {
                 "--help" | "-h" => opts.help = true,
                 "--no-color" => opts.no_color = true,
+                // 非法值走 TUI 的既有惯例：**照常启动，把问题摆进状态栏**
+                // （为一个拼错的参数拒绝启动，对交互式程序太苛刻）。
+                // 但绝不静默忽略——「以为自己开了高对比、其实没开」
+                // 是那种事后完全想不明白的误解。
+                "--theme" => {
+                    if let Some(v) = it.next() {
+                        match cping_core::Theme::parse(&v) {
+                            Some(t) => opts.theme = t,
+                            None => warnings.push((Key::WarnBadTheme, vec![v])),
+                        }
+                    }
+                }
+                "--font-scale" => {
+                    if let Some(v) = it.next() {
+                        match cping_core::FontScale::parse(&v) {
+                            Some(f) => opts.font_scale = f,
+                            None => warnings.push((Key::WarnBadFontScale, vec![v])),
+                        }
+                    }
+                }
                 "--hide-offline" => opts.hide_offline = true,
                 "--mock" => opts.mock = true,
                 "--prefix" | "--target" => {
@@ -386,8 +425,12 @@ pub struct App {
     pub view: ViewMode,
     pub hide_offline: bool,
     pub thresholds: Thresholds,
-    pub colors: ColorConfig,
-    pub no_color: bool,
+    /// M18 第三步：界面观感（主题配色 + 类别色 + 无色模式 + 字号档）。
+    ///
+    /// **颜色只能从这里取**：`--no-color` 与 `--theme` 都作用在它身上。
+    /// 此前颜色散落在 `ui.rs` 的十几处 `Color::X` 字面量里，而 `--no-color`
+    /// 只覆盖了其中几处——「号称无色、实际还有颜色」就是这么来的。
+    pub look: crate::ui::Look,
     pub show_help: bool,
     /// M18：界面语言。**唯一**的语言来源：所有界面文案都经 [`App::t`] /
     /// [`App::r`] 从这里取，不允许各处再自己读一遍环境变量（那样会出现
@@ -621,14 +664,28 @@ impl App {
         // M12：后端**与它的标识**由核心一次给出，界面不再自己按 mock/方式推一遍。
         // 注意 `mode` 是**合并之后**的方式（可能来自模板），不是 `options.mode`。
         let (backend_id, backend) = cping_core::resolve_for_run(mode, options.mock);
+        // M18 第三步：类别色来自配置文件（`[colors]`）。
+        //
+        // **这同时修掉一个既有缺陷**：此前这里写死 `ColorConfig::default()`，
+        // 也就是说配置里的 `[colors]` 在 TUI 里**从来没有生效过**——
+        // 用户改了颜色却看不到任何变化，也没有任何提示。
+        // 显式选了高对比 / 色盲友好主题时主题色优先（见 `ui::Look::new`）。
+        let user_colors = config
+            .as_ref()
+            .map(|d| d.app.colors.clone())
+            .unwrap_or_default();
         let mut app = Self {
             prefix,
             editing: false,
             view: options.view,
             hide_offline: options.hide_offline,
             thresholds: Thresholds::default(),
-            colors: ColorConfig::default(),
-            no_color: options.no_color,
+            look: crate::ui::Look::new(
+                options.theme,
+                options.no_color,
+                options.font_scale,
+                &user_colors,
+            ),
             show_help: false,
             lang,
             results: Vec::new(),
@@ -3372,6 +3429,131 @@ mod tests {
 
         let c = Options::from_args(["--max-targets"].iter().map(|s| s.to_string()));
         assert_eq!(c.arg_warnings.len(), 1);
+    }
+
+    // ------------------------------------------------------------------
+    // M18 第三步：无障碍（主题 / 无色 / 字号档 / 符号唯一来源）
+    // ------------------------------------------------------------------
+
+    fn parse_args(args: &[&str]) -> Options {
+        Options::from_args(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn m18_theme_flags_are_parsed_and_bad_values_are_reported() {
+        let a = parse_args(&["--theme", "high-contrast", "--font-scale", "150%"]);
+        assert_eq!(a.theme, cping_core::Theme::HighContrast);
+        assert_eq!(a.font_scale, cping_core::FontScale::Large);
+        assert!(a.arg_warnings.is_empty(), "{:?}", a.arg_warnings);
+
+        // 拼错的主题名必须**说出来**。静默退回默认主题等于
+        // 「以为自己开了高对比、其实没开」——这种误解事后完全想不明白。
+        let b = parse_args(&["--theme", "kontrast"]);
+        assert_eq!(b.theme, cping_core::Theme::Default);
+        assert_eq!(b.arg_warnings.len(), 1);
+        assert!(
+            b.arg_warnings[0].contains("kontrast"),
+            "{:?}",
+            b.arg_warnings
+        );
+
+        let c = parse_args(&["--font-scale", "175"]);
+        assert_eq!(c.font_scale, cping_core::FontScale::Normal);
+        assert_eq!(c.arg_warnings.len(), 1);
+        assert!(c.arg_warnings[0].contains("175"), "{:?}", c.arg_warnings);
+    }
+
+    #[test]
+    fn m18_no_color_removes_every_colour_from_the_palette() {
+        use ratatui::style::Modifier;
+        // 「无颜色」必须覆盖**全部语义角色**。此前 `--no-color` 只改了
+        // 进度条、表格、变化面板、快捷键栏，输入区高亮、模式标签、
+        // 模板标签照旧上色——号称无色，实际还有颜色。
+        let user = cping_core::ColorConfig::default();
+        let look = crate::ui::Look::new(
+            cping_core::Theme::Default,
+            true,
+            cping_core::FontScale::Normal,
+            &user,
+        );
+        let styles = [
+            ("class/low", look.class(Some(ResultClass::Low))),
+            ("class/none", look.class(None)),
+            ("muted", look.muted()),
+            ("accent", look.accent()),
+            ("accent_bold", look.accent_bold()),
+        ];
+        for (name, style) in styles {
+            assert!(style.fg.is_none(), "{name} 在无色模式下仍有前景色");
+            assert!(style.bg.is_none(), "{name} 在无色模式下仍有背景色");
+        }
+        // 但**字形属性不能丢**：无色之后，「焦点在哪」「这是次要信息」
+        // 只能靠它们表达。去掉属性才是把无障碍做反了。
+        let focus = look.focus();
+        assert!(focus.fg.is_none() && focus.bg.is_none());
+        assert!(focus
+            .add_modifier
+            .contains(Modifier::REVERSED | Modifier::BOLD));
+        assert!(look.muted().add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn m18_theme_overrides_user_colours_only_when_explicit() {
+        let user = cping_core::ColorConfig {
+            low: "#123456".into(),
+            ..cping_core::ColorConfig::default()
+        };
+        // 默认主题：沿用配置文件里的颜色（原版行为就是「可自定义」）
+        let d = crate::ui::Look::new(
+            cping_core::Theme::Default,
+            false,
+            cping_core::FontScale::Normal,
+            &user,
+        );
+        assert_eq!(d.class_color(ResultClass::Low).to_hex(), "#123456");
+        // 显式选了无障碍主题：**以主题为准**。否则用户配置会把达标配色顶掉，
+        // 「无障碍开关」就成了摆设。
+        let hc = crate::ui::Look::new(
+            cping_core::Theme::HighContrast,
+            false,
+            cping_core::FontScale::Normal,
+            &user,
+        );
+        assert_ne!(hc.class_color(ResultClass::Low).to_hex(), "#123456");
+        assert_eq!(
+            hc.class_color(ResultClass::Low).to_hex(),
+            cping_core::Theme::HighContrast.palette().low.to_hex()
+        );
+    }
+
+    #[test]
+    fn m18_font_scale_widens_the_too_small_threshold() {
+        let user = cping_core::ColorConfig::default();
+        let mk = |f| crate::ui::Look::new(cping_core::Theme::Default, true, f, &user);
+        assert_eq!(mk(cping_core::FontScale::Normal).min_rows(16), 16);
+        assert_eq!(mk(cping_core::FontScale::Large).min_rows(16), 24);
+        assert_eq!(mk(cping_core::FontScale::Huge).min_rows(16), 32);
+        // 下限必须是 1：算出 0 会让「窗口太小」永远不触发
+        assert!(mk(cping_core::FontScale::Normal).min_rows(0) >= 1);
+    }
+
+    #[test]
+    fn m18_result_symbols_come_from_the_core_and_stay_distinct() {
+        // 符号此前有三份拷贝（GUI 的 TS / 报表 / 这里的 SYM_*）。
+        // 收敛到核心之后，这条测试守住「TUI 用的就是核心那一组」，
+        // 并确认「未探测」的符号不会与任何一个结果符号撞上。
+        let syms = [
+            ResultClass::Low.symbol(),
+            ResultClass::Mid.symbol(),
+            ResultClass::High.symbol(),
+            ResultClass::Offline.symbol(),
+            ResultClass::Error.symbol(),
+        ];
+        let mut uniq = syms.to_vec();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert_eq!(uniq.len(), 5, "符号有重复：{syms:?}");
+        assert!(!syms.contains(&"."), "「未探测」的符号与某个结果符号撞上了");
     }
 
     #[test]

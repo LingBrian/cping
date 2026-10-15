@@ -141,6 +141,25 @@ impl ResultClass {
             ResultClass::Error => "error",
         }
     }
+
+    /// 该类别的**单字符符号**。
+    ///
+    /// 符号是「不依赖颜色」的那条信息通道，所以它必须由核心给出唯一一份：
+    /// 此前 GUI 在 TS 里存了一份、TUI 在渲染代码里又写了一遍、
+    /// 报表里还第三份——三份里任何一份被改，用户就会在三个界面看到
+    /// 同一个状态对应三种符号。**颜色可以没有（`--no-color`），
+    /// 符号不能没有**，这正是它必须只有一个来源的原因。
+    ///
+    /// 五个符号两两不同（有测试断言），且在等宽字体下都是单宽度字符。
+    pub const fn symbol(self) -> &'static str {
+        match self {
+            ResultClass::Low => "#",
+            ResultClass::Mid => "+",
+            ResultClass::High => "*",
+            ResultClass::Offline => "-",
+            ResultClass::Error => "!",
+        }
+    }
 }
 
 /// 纯 RTT 分类。

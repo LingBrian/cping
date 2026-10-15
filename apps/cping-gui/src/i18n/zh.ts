@@ -300,6 +300,66 @@ export const zh = {
   'msg.noRestore': '没有可恢复的历史结果',
   'msg.discarded': '已丢弃上次的结果',
   'msg.ignored': '已忽略，下次启动不再提示',
+
+  // ---- M16：扫描模板（配置文件里的 [[profiles]]） ----
+  'profile.title': '扫描模板',
+  'profile.select': '选择模板',
+  'profile.defaultMark': '默认',
+  'profile.targets': '目标数：{}',
+  'profile.targetsUnknown': '目标数：无法解析（这份模板的规格有误）',
+  'profile.path': '配置文件：{}',
+  'profile.filledFrom': '已按模板 {} 填上：{}',
+  'profile.skippedKept': '保留了你在界面上填好的值，未采用模板里的：{}',
+  'profile.rangeUnapplied': '模板里的 range = {} 本界面未采用：目标固定按 standard（.1-.255）展开',
+  'profile.hint': '模板只填空缺，不会覆盖你已经填好的值。',
+
+  // ---- M17 / M18：安全策略 ----
+  'policy.title': '安全策略',
+  'policy.loading': '正在读取当前策略…',
+  'policy.current': '当前生效：{}',
+  'policy.pps': '速率上限 (包/秒)',
+  'policy.targets': '目标数上限',
+  'policy.allowReserved': '允许保留网段',
+  'policy.warnReserved': '已放行组播 / 保留网段：程序会去探测通常拒绝的地址（组播 224/4、文档示例网段 192.0.2/24 等），可能打扰同网段的其他人。请仅在确知后果时开启。',
+  'policy.limits': '上限：速率 ≤ {} pps（0 = 不限速），目标数 ≤ {}（只能收紧不能放宽）',
+  'policy.hint': '默认限速 500 包/秒并拒绝保留网段。越界的值会被拒绝并给出原因，不会被悄悄改成合法值。',
+  'policy.needNumbers': '请把速率上限与目标数上限都填上',
+
+  // ---- 模板应用时用到的字段名（后端给机器码，标签在这里） ----
+  'field.target': '目标（{}）',
+  'field.timeout': '超时（{} ms）',
+  'field.concurrency': '并发（{}）',
+  'field.mode': '方式（{}）',
+  'field.unknown': '未知字段（{}）',
+
+  // ---- 模板与策略的状态提示 ----
+  'status.profilesFailed': '模板列表读取失败：{}',
+  'status.profileApplied': '已应用模板 {}：填上 {}',
+  'status.profileAppliedNoGap': '已应用模板 {}：界面上的值都已填好，没有空缺可填',
+  'status.policyFailed': '读取安全策略失败：{}',
+  'status.policyApplied': '安全策略已更新：{}',
+
+  // ---- M18：无障碍（主题 / 字号 / 减少动效） ----
+  'a11y.title': '无障碍',
+  'a11y.theme': '主题',
+  'a11y.themeDefault': '默认',
+  'a11y.themeHighContrast': '高对比',
+  'a11y.themeColorBlind': '色盲友好',
+  'a11y.fontScale': '字号',
+  'a11y.fontNormal': '标准',
+  'a11y.fontLarge': '大',
+  'a11y.fontHuge': '特大',
+  'a11y.reduceMotion': '减少动效',
+  'a11y.note': '「默认」与原界面一致；「高对比」「色盲友好」是新增主题。切字号会缩放整个界面（连按钮一起放大）；万一平台不支持，状态栏会给出明确原因，不会静默失效。',
+  'aria.resultTable': '探测结果表格',
+  'aria.gridCell': '{}：{}，{}',
+  'aria.lookup': '反查 {} 的主机名',
+  'aria.colorForClass': '{}的颜色',
+  'status.a11yThemeFailed': '读取主题失败：{}',
+  'status.a11yThemeSet': '已切换到「{}」主题',
+  'status.a11yFontScaleSet': '字号已调整为 {}%',
+  'status.reduceMotionOn': '已开启减少动效',
+  'status.reduceMotionOff': '已关闭减少动效',
 } as const
 
 /**

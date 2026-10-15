@@ -28,7 +28,13 @@ const monitorText = computed(() => {
     <!-- M9：方式必须一直可见——它决定了「在线」的含义 -->
     <span>{{ t('status.mode') }}<b>{{ store.modeLabel }}</b></span>
     <span>{{ t('round.n', store.round) }}</span>
-    <span>{{ t('progress.completed', store.stats.completed, store.stats.total) }}</span>
+    <!-- 进度数字会自己变（扫描过程中每完成一个目标就+1），所以给它
+         `role="status"` + `aria-live="polite"`：读屏器会在停顿处播报，
+         用户不必反复回来查「跑到哪了」。用 polite 而不是 assertive，
+         是因为这不是错误，不该打断正在朗读的内容。 -->
+    <span role="status" aria-live="polite">{{
+      t('progress.completed', store.stats.completed, store.stats.total)
+    }}</span>
     <span>{{ t('status.online') }}<b>{{ store.stats.online }}</b></span>
     <!-- M8：变化计数与摘要。没有变化时明确显示 0，不留空 -->
     <span>

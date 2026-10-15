@@ -6,9 +6,9 @@
 
 Rust 核心 · TUI（ratatui）· 桌面 GUI（Tauri 2 + Vue 3）· Android
 
-[![Release](https://img.shields.io/badge/release-v2.5.0-111827)](../../releases)
+[![Release](https://img.shields.io/badge/release-v2.6.0-111827)](../../releases)
 [![CI](https://github.com/LingBrian/cping/actions/workflows/ci.yml/badge.svg)](https://github.com/LingBrian/cping/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-535%20passed-brightgreen)](docs/testing.md)
+[![Tests](https://img.shields.io/badge/tests-582%20passed-brightgreen)](docs/testing.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20Android-lightgrey)](docs/platform-compatibility.md)
 
@@ -225,6 +225,9 @@ cping-tui                # 交互式启动
 cping-tui --prefix 192.168.1
 cping-tui --max-pps 200 --max-targets 512   # M17：限速与目标数上限（取值不合法只警告不崩）
 cping-tui --lang en                         # M18：英文界面（TUI 是交互式的，非法值只告警）
+cping-tui --theme high-contrast             # M18：高对比主题（对比度 ≥ 7:1；另有 color-blind）
+cping-tui --no-color                        # M18：完全不要颜色（保留加粗 / 反显 / 弱化）
+cping-tui --font-scale 200                  # M18：按 200% 字号放宽「窗口太小」的判定
 cping-tui --config cping.toml               # M16：从配置文件读模板（读不了只在状态栏提示，不崩）
 ```
 
@@ -309,7 +312,8 @@ TUI 与 CLI 共用同一套安全策略（M17）：默认限速、默认拒绝�
 | **v2.3.0** ✅ | M15 | 告警与通知：四类规则（纯函数匹配）、冷却去重与静音、五通道通知、跨会话状态 |
 | **v2.4.0** ✅ | M16 | 配置与模板：命名扫描模板、schema 版本与迁移、未知键保留、CLI 直接消费模板 |
 | **v2.5.0** ✅ | M17 | 安全与合规：默认限速与目标数上限、保留网段守卫、审计日志（JSONL）、首次授权告知、制品签名与清单 |
-| v2.6.0–v2.7.0 | M18–M19 | 国际化与无障碍 · 规模化性能 |
+| **v2.6.0** ✅ | M18 | 国际化与无障碍：中英双语（界面与错误信息）、三套主题（高对比 / 色盲友好）、字体缩放、键盘全导航、ARIA 标注 |
+| v2.7.0 | M19 | 规模化性能：万级目标分片流式扫描、背压与内存预算、基准用例 |
 | v3.0.0 | M20 | 生态与开放：插件接口、脚本化任务、对外 API（主版本） |
 | v3.1.0 | M21 | 协议扩展：SNMP 只读、DNS 解析与校验、逐跳路径探测 |
 | v3.2.0 | M22 | 拓扑与可视化：自动成图（标注为推断）、机架布局、SVG/PNG 导出 |

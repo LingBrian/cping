@@ -1,5 +1,6 @@
 //! 绘制。颜色只是辅助：**每个状态都有独立的形状符号**，无颜色终端下同样可读。
 
+use cping_core::a11y::{FontScale, Palette, Rgb, Theme};
 use cping_core::classify::ResultClass;
 use cping_core::export::{pad, truncate_display};
 use cping_core::target::{MATRIX_COLS, MATRIX_ROWS};
@@ -13,11 +14,9 @@ use ratatui::Frame;
 use crate::app::{App, PendingRestore};
 use crate::i18n::{self, Key};
 
-const SYM_LOW: &str = "#";
-const SYM_MID: &str = "+";
-const SYM_HIGH: &str = "*";
-const SYM_OFFLINE: &str = "-";
-const SYM_ERROR: &str = "!";
+/// 「未探测」格的符号。**这是这里唯一保留的符号常量**：
+/// 五个探测结果的符号统一由核心给出（`ResultClass::symbol`），
+/// 而「还没测」不是一个探测结果，核心没有对应变体。
 const SYM_PENDING: &str = ".";
 
 /// 表格里 MAC 单列所需宽度（含前导空格）。
@@ -168,8 +167,10 @@ fn draw_fingerprints(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
+    // M18 第三步：编辑态用**反显**而不是「黄底黑字」——反显在无色终端里
+    // 同样醒目，而黄底黑字在单色终端下等于没有标记。
     let style = if app.editing {
-        Style::default().fg(Color::Black).bg(Color::Yellow)
+        app.look.focus()
     } else {
         Style::default()
     };
@@ -195,19 +196,9 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Span::styled(format!(" {} ", app.prefix), style),
-        Span::styled(
-            mode_tag,
-            Style::default()
-                .add_modifier(Modifier::BOLD)
-                .fg(Color::Cyan),
-        ),
-        Span::styled(
-            profile_tag,
-            Style::default()
-                .add_modifier(Modifier::BOLD)
-                .fg(Color::Magenta),
-        ),
-        Span::styled(hint, Style::default().fg(Color::DarkGray)),
+        Span::styled(mode_tag, app.look.accent_bold()),
+        Span::styled(profile_tag, app.look.accent_bold()),
+        Span::styled(hint, app.look.muted()),
     ]);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -231,12 +222,18 @@ fn draw_matrix(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    if inner.height < MATRIX_ROWS as u16 || inner.width < (MATRIX_COLS * 4) as u16 {
+    // 字号档会把「够不够大」的门槛按倍率抬高：用户在 200% 字号下
+    // 需要两倍的行数才看得到同样多的信息（见 [`Look::min_rows`]）。
+    // 提示里报的必须是**抬高之后**的要求值，否则用户按提示去调窗口
+    // 却发现还是不够——提示反而成了误导。
+    let need_cols = MATRIX_COLS as u16 * 4;
+    let need_rows = app.look.min_rows(MATRIX_ROWS as u16);
+    if inner.height < need_rows || inner.width < need_cols {
         let msg = app.r(
             Key::TerminalTooSmall,
             &[
-                &(MATRIX_COLS * 4).to_string(),
-                &MATRIX_ROWS.to_string(),
+                &need_cols.to_string(),
+                &need_rows.to_string(),
                 &inner.width.to_string(),
                 &inner.height.to_string(),
             ],
@@ -253,11 +250,12 @@ fn draw_matrix(f: &mut Frame, app: &App, area: Rect) {
             let result = app.cell_result(host);
             let class = app.class_of(result);
             let sym = match class {
-                Some(ResultClass::Low) => SYM_LOW,
-                Some(ResultClass::Mid) => SYM_MID,
-                Some(ResultClass::High) => SYM_HIGH,
-                Some(ResultClass::Offline) => SYM_OFFLINE,
-                Some(ResultClass::Error) => SYM_ERROR,
+                // M18 第三步：符号上收到核心（`ResultClass::symbol`）。
+                // 此前它有三份拷贝——GUI 的 TS、报表的 `class_symbol`、
+                // 这里的 `SYM_*`；任何一份被改，用户就会在三个界面看到
+                // 同一个状态对应三种符号。颜色可以被关掉（`--no-color`），
+                // **符号是最后那条信息通道**，所以它必须只有一个来源。
+                Some(c) => c.symbol(),
                 None => SYM_PENDING,
             };
             let style = app.style_for(class);
@@ -367,7 +365,7 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
         };
         lines.push(Line::from(Span::styled(
             truncate_display(&detail, inner_w),
-            Style::default().fg(Color::DarkGray),
+            app.look.muted(),
         )));
     }
     f.render_widget(Paragraph::new(Text::from(lines)), inner);
@@ -377,14 +375,12 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
 
     let ratio = app.progress_ratio();
-    // 显式指定 gauge 配色：默认样式在深色主题下几乎不可见
+    // 进度条走主题的强调色。**无色模式下不涂色**——`Color::Reset` 看着像
+    // 「没上色」，但它会让进度条在深色终端里几乎看不见（这条注释原来就写着
+    // 「默认样式在深色主题下几乎不可见」，而 `Reset` 并没有解决它）。
     let gauge = Gauge::default()
         .ratio(ratio.clamp(0.0, 1.0))
-        .gauge_style(Style::default().fg(if app.no_color {
-            Color::Reset
-        } else {
-            Color::Rgb(0x2e, 0xc4, 0x6b)
-        }))
+        .gauge_style(app.look.accent())
         .label(format!(
             "{}/{} ({:.0}%)",
             app.stats.completed,
@@ -461,11 +457,7 @@ fn draw_keys(f: &mut Frame, app: &App, area: Rect) {
         // `|` 与两侧空格是纯排版分隔符，不随语言变。
         format!("{base}  |  {}", app.status)
     };
-    let style = if app.no_color {
-        Style::default()
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
+    let style = app.look.muted();
     f.render_widget(
         Paragraph::new(truncate_display(&text, area.width as usize)).style(style),
         area,
@@ -585,14 +577,15 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         Line::from(app.t(Key::HelpLineCtrlC)),
         Line::from(app.t(Key::HelpCliFlags)),
         // 状态符号原样保留：它们是「无颜色终端下仍可读」的实现，翻了就失去意义。
+        // 取值来自核心（`ResultClass::symbol`），不在这里另抄一份。
         Line::from(app.r(
             Key::HelpSymbols,
             &[
-                SYM_LOW,
-                SYM_MID,
-                SYM_HIGH,
-                SYM_OFFLINE,
-                SYM_ERROR,
+                ResultClass::Low.symbol(),
+                ResultClass::Mid.symbol(),
+                ResultClass::High.symbol(),
+                ResultClass::Offline.symbol(),
+                ResultClass::Error.symbol(),
                 SYM_PENDING,
             ],
         )),
@@ -638,14 +631,15 @@ fn draw_changes(f: &mut Frame, app: &App, area: Rect) {
     let rows = (inner.height as usize).saturating_sub(1);
     let mut lines: Vec<Line> = Vec::with_capacity(rows);
     for c in app.recent_changes(rows) {
-        let style = if app.no_color {
-            Style::default()
-        } else {
-            match c.kind {
-                cping_core::monitor::ChangeKind::Appeared => Style::default().fg(Color::Green),
-                cping_core::monitor::ChangeKind::Disappeared => Style::default().fg(Color::Gray),
-                _ => Style::default().fg(Color::Yellow),
+        // 变化类型有**文字标签**（见下面 `kind` 那一列），颜色只是增强。
+        // 三档借主题色：上线 / 离线 / 其他（延迟或状态变化）——
+        // 语义与类别色不同，但主题里就这几档能表达「好 / 消失 / 注意」。
+        let style = match c.kind {
+            cping_core::monitor::ChangeKind::Appeared => app.look.class(Some(ResultClass::Low)),
+            cping_core::monitor::ChangeKind::Disappeared => {
+                app.look.class(Some(ResultClass::Offline))
             }
+            _ => app.look.class(Some(ResultClass::Mid)),
         };
         // 行内两列用固定宽度对齐（15 / 6），这是排版而不是文案；英文类别名比
         // 中文长时 `{:<6}` 只是不再补空格，不会串位。
@@ -679,32 +673,131 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
-impl App {
-    /// 分类 → 样式。`no_color` 时只保留符号差异。
-    pub fn style_for(&self, class: Option<ResultClass>) -> Style {
-        if self.no_color {
-            return Style::default();
+/// 界面观感：主题配色 + 类别色 + 无色模式 + 字号档。
+///
+/// 为什么要有这一层：颜色此前散落在本文件的十几处
+/// `Style::default().fg(Color::X)` 字面量里，而 `--no-color` 只改了其中几处
+/// （进度条、表格、变化面板、快捷键栏），输入区的高亮、模式标签、
+/// 模板标签照旧上色——**号称无色、实际还有颜色**。
+/// 把「语义角色 → 样式」集中到一处之后，无色模式的覆盖范围一眼可见，
+/// 也不可能再漏。
+#[derive(Debug, Clone, Copy)]
+pub struct Look {
+    /// 主题配色（界面色：前景 / 弱化 / 强调 / 边框）。
+    pub palette: Palette,
+    /// 五个类别色，顺序同 [`Palette::class_colors`]。
+    classes: [Rgb; 5],
+    pub no_color: bool,
+    pub font_scale: FontScale,
+}
+
+impl Look {
+    /// 从「主题 + 用户配置的类别色」构造。
+    ///
+    /// 优先级取舍：**默认主题沿用配置文件里的 `[colors]`**（那是用户自己挑的，
+    /// 原版行为也是「可自定义」）；**显式选了高对比 / 色盲友好主题时，
+    /// 类别色以主题为准**——那两个主题的价值就在于「达标」，
+    /// 允许用户配置覆盖等于把无障碍开关变成摆设。
+    pub fn new(
+        theme: Theme,
+        no_color: bool,
+        font_scale: FontScale,
+        user: &cping_core::ColorConfig,
+    ) -> Self {
+        let palette = theme.palette();
+        let mut classes = [palette.offline; 5];
+        for (i, (class, fallback)) in palette.class_colors().into_iter().enumerate() {
+            classes[i] = if theme == Theme::Default {
+                user.get(class.color_key())
+                    .and_then(Rgb::parse)
+                    .unwrap_or(fallback)
+            } else {
+                fallback
+            };
         }
-        let hex = match class {
-            Some(ResultClass::Low) => self.colors.low.as_str(),
-            Some(ResultClass::Mid) => self.colors.mid.as_str(),
-            Some(ResultClass::High) => self.colors.high.as_str(),
-            Some(ResultClass::Offline) => self.colors.offline.as_str(),
-            Some(ResultClass::Error) => self.colors.error.as_str(),
-            None => return Style::default().fg(Color::DarkGray),
+        Self {
+            palette,
+            classes,
+            no_color,
+            font_scale,
+        }
+    }
+
+    /// 类别 → 交互色。
+    pub fn class_color(&self, class: ResultClass) -> Rgb {
+        let idx = match class {
+            ResultClass::Low => 0,
+            ResultClass::Mid => 1,
+            ResultClass::High => 2,
+            ResultClass::Offline => 3,
+            ResultClass::Error => 4,
         };
-        Style::default().fg(parse_hex(hex))
+        self.classes[idx]
+    }
+
+    /// 上色。**无色模式下返回默认样式**（这是唯一的着色出口）。
+    fn paint(self, color: Rgb) -> Style {
+        if self.no_color {
+            Style::default()
+        } else {
+            Style::default().fg(Color::Rgb(color.r, color.g, color.b))
+        }
+    }
+
+    /// 类别样式。
+    pub fn class(self, class: Option<ResultClass>) -> Style {
+        match class {
+            Some(c) => self.paint(self.class_color(c)),
+            None => self.muted(),
+        }
+    }
+
+    /// 次要信息（提示、详情行）。
+    ///
+    /// 无色模式下用**弱化（DIM）**而不是灰色：灰色本身也是一种颜色，
+    /// 而 DIM 是字形属性，单色终端照样能表达「这是次要的」。
+    pub fn muted(self) -> Style {
+        if self.no_color {
+            Style::default().add_modifier(Modifier::DIM)
+        } else {
+            self.paint(self.palette.muted)
+        }
+    }
+
+    /// 强调（模式标签、模板标签、进度条）。
+    pub fn accent(self) -> Style {
+        self.paint(self.palette.accent)
+    }
+
+    /// 强调 + 加粗（页签一类的「当前项」）。
+    pub fn accent_bold(self) -> Style {
+        self.accent().add_modifier(Modifier::BOLD)
+    }
+
+    /// 焦点（输入框编辑态）。
+    ///
+    /// **无色模式下也必须醒目**，所以用反显而不是换底色。
+    /// 原来这里是「黄底黑字」——那是**依赖颜色**的做法：单色终端下
+    /// 黄底与普通底色没有区别，焦点就丢了。反显是前景/背景互换，
+    /// 在任何终端、任何主题下都成立。
+    pub fn focus(self) -> Style {
+        Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    }
+
+    /// 「窗口太小」的行数阈值——按字号档放大。
+    ///
+    /// 用户把终端字号调到 200% 时，同样的信息需要两倍的行数；
+    /// 此时若还按原阈值判断「窗口够大」，界面会被硬挤成一团。
+    pub fn min_rows(self, base: u16) -> u16 {
+        let scaled = f64::from(base) * self.font_scale.factor();
+        (scaled.round() as u16).max(1)
     }
 }
 
-/// `#RRGGBB` → ratatui 颜色；非法值退化为默认色，不 panic。
-pub fn parse_hex(hex: &str) -> Color {
-    let bytes = hex.as_bytes();
-    if bytes.len() == 7 && bytes[0] == b'#' {
-        let parse = |s: &str| u8::from_str_radix(s, 16);
-        if let (Ok(r), Ok(g), Ok(b)) = (parse(&hex[1..3]), parse(&hex[3..5]), parse(&hex[5..7])) {
-            return Color::Rgb(r, g, b);
-        }
+impl App {
+    /// 分类 → 样式。走 [`Look`]，不再直接读用户配置的十六进制值
+    /// （那一步在 `Look::new` 里做完了，且保证无色模式覆盖得到）。
+    pub fn style_for(&self, class: Option<ResultClass>) -> Style {
+        self.look.class(class)
     }
-    Color::Reset
 }

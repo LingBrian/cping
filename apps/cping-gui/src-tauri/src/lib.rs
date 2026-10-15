@@ -68,7 +68,15 @@ pub fn run() {
             commands::set_alert_muted,
             commands::update_alert_rules,
             commands::clear_alerts,
+            // M16 / M17：扫描模板与安全策略
+            commands::list_profiles,
+            commands::apply_profile,
+            commands::scan_policy,
+            commands::set_scan_policy,
             commands::async_scheduler_available,
+            // M18：无障碍（主题 / 字号）
+            commands::a11y_theme,
+            commands::set_font_scale,
             commands::start_scan,
             commands::cancel_scan,
             commands::snapshot,

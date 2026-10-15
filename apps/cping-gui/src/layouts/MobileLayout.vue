@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import {
   NButton,
   NDrawer,
@@ -12,9 +12,12 @@ import {
   useMessage,
 } from 'naive-ui'
 import ChangePanel from '../components/ChangePanel.vue'
+import A11ySettings from '../components/A11ySettings.vue'
 import ColorSettings from '../components/ColorSettings.vue'
 import LanguageSettings from '../components/LanguageSettings.vue'
 import MobileResultList from '../components/MobileResultList.vue'
+import PolicySettings from '../components/PolicySettings.vue'
+import ProfileSettings from '../components/ProfileSettings.vue'
 import ResultGrid from '../components/ResultGrid.vue'
 import AlertPanel from '../components/AlertPanel.vue'
 import TrendPanel from '../components/TrendPanel.vue'
@@ -34,6 +37,20 @@ const tab = ref<'list' | 'matrix' | 'changes' | 'trend' | 'alerts'>('list')
 const showSettings = ref(false)
 const localSpec = ref(store.prefix)
 const specError = ref<string | null>(null)
+
+/**
+ * store 里的目标变了就同步到输入框（与 `PrefixForm` 同一条规矩）。
+ *
+ * M16 之前不需要这一步：目标只会由这里的输入框自己改。现在设置抽屉里的模板
+ * 也会填目标，而抽屉与输入框是两个组件——不同步的话，用户切完模板再点「开始」
+ * 会把模板填好的目标**覆盖回输入框里的旧值**，成了「模板不生效」。
+ */
+watch(
+  () => store.prefix,
+  (v) => {
+    localSpec.value = v
+  },
+)
 
 const percent = computed(() => Math.round(store.progress * 100))
 const canStart = computed(() => !store.running)
@@ -59,7 +76,7 @@ async function onStart() {
     message.error(specError.value)
     return
   }
-  store.prefix = localSpec.value
+  store.setTargetSpec(localSpec.value)
   await store.start()
 }
 
@@ -164,10 +181,11 @@ function openAlerts() {
           </NRadioGroup>
           <NSelect
             v-if="isTcp"
-            v-model:value="store.tcpPort"
+            :value="store.tcpPort"
             size="small"
             style="width: 110px"
             :options="portOptions"
+            @update:value="store.setTcpPort"
           />
         </div>
         <div style="font-size: 11px; color: #6b7280; margin-top: 4px">
@@ -310,6 +328,11 @@ function openAlerts() {
       <NDrawerContent :title="t('btn.settings')" closable>
         <ColorSettings />
         <LanguageSettings />
+        <!-- M18：无障碍（主题 / 字号 / 减少动效） -->
+        <A11ySettings />
+        <!-- M16 / M17：扫描模板与安全策略（紧挨其它设置项） -->
+        <ProfileSettings />
+        <PolicySettings />
         <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 12px">
           <span style="font-size: 13px">{{ t('common.onlineOnly') }}</span>
           <NSwitch v-model:value="store.hideOffline" size="small" />
@@ -331,7 +354,7 @@ function openAlerts() {
             size="small"
             style="width: 120px"
             inputmode="numeric"
-            @update:value="(v: string) => (store.timeoutMs = Number(v) || 1000)"
+            @update:value="(v: string) => store.setTimeoutMs(Number(v) || 1000)"
           />
         </div>
         <div style="font-size: 11px; color: #6b7280; margin-top: 10px">{{ t('label.exportFormat') }}</div>
