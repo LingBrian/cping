@@ -13,9 +13,9 @@
 
 use crate::config::ProbeConfig;
 use crate::error::{CoreError, CoreResult, ProbeError};
+use crate::policy::{RateLimiter, ScanPolicy};
 use crate::probe::ProbeBackend;
 use crate::result::{ProbeEvent, ProbeResult, ProbeStatus, ScanStats, TaskId};
-use crate::target::MAX_TARGETS;
 use std::collections::VecDeque;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -60,12 +60,20 @@ struct Shared {
     task_id: TaskId,
     total: usize,
     timeout: Duration,
+    /// M17：全局限速。所有 worker 共用同一个令牌桶。
+    limiter: Arc<RateLimiter>,
 }
 
 /// 调度器。可长期持有，反复 `start`。
 pub struct ProbeScheduler {
     backend: Arc<dyn ProbeBackend>,
     active: Arc<AtomicBool>,
+    /// M17：安全策略（限速 / 目标上限 / 保留网段守卫）。
+    ///
+    /// 挂在调度器上而不是塞进 [`ProbeConfig`]：`ProbeConfig` 会被配置文件
+    /// 序列化、被模板覆盖，而「限速多少」是**本机合规策略**，不该被一份
+    /// 从别处拷来的模板悄悄改掉。
+    policy: ScanPolicy,
 }
 
 impl ProbeScheduler {
@@ -73,7 +81,19 @@ impl ProbeScheduler {
         Self {
             backend: Arc::new(backend),
             active: Arc::new(AtomicBool::new(false)),
+            policy: ScanPolicy::default(),
         }
+    }
+
+    /// 换一套安全策略。三端在 `start` 之前调用。
+    pub fn set_policy(&mut self, policy: ScanPolicy) -> CoreResult<()> {
+        policy.validate()?;
+        self.policy = policy;
+        Ok(())
+    }
+
+    pub fn policy(&self) -> ScanPolicy {
+        self.policy
     }
 
     pub fn backend_name(&self) -> &'static str {
@@ -86,17 +106,17 @@ impl ProbeScheduler {
     }
 
     /// 启动一次探测。目标必须是已生成好的列表（顺序即 `index`）。
+    ///
+    /// 会在**起线程之前**按 [`ScanPolicy`] 校验：目标数上限与保留网段。
+    /// 保留网段在这里拦而不是在解析 `--target` 时拦，是因为「展开后到底是
+    /// 哪些地址」只有到这里才确定（`224.0.0.0/29` 这种写法在解析阶段看不出来）。
     pub fn start(&self, config: &ProbeConfig, targets: Vec<IpAddr>) -> CoreResult<SchedulerHandle> {
         config.validate()?;
         if targets.is_empty() {
             return Err(CoreError::InvalidConfig("目标列表为空".into()));
         }
-        if targets.len() > MAX_TARGETS {
-            return Err(CoreError::TooManyTargets {
-                actual: targets.len(),
-                limit: MAX_TARGETS,
-            });
-        }
+        // M17：数量上限与保留网段守卫（一条路，不做两处判断）
+        self.policy.check_targets(&targets)?;
         // 重复任务防护
         if self
             .active
@@ -130,6 +150,7 @@ impl ProbeScheduler {
             task_id: task_id.clone(),
             total,
             timeout: Duration::from_millis(config.timeout_ms),
+            limiter: Arc::new(RateLimiter::new(self.policy.max_pps)),
         });
 
         let _ = tx.send(ProbeEvent::Started {
@@ -200,6 +221,14 @@ fn worker_loop(backend: Arc<dyn ProbeBackend>, shared: Arc<Shared>) {
         let Some((index, ip)) = item else { break };
 
         // 取到目标后再次确认取消状态：取消后绝不发起新的探测
+        if shared.cancel.load(Ordering::SeqCst) {
+            break;
+        }
+
+        // M17：全局限速。放在「已拿到目标、确认没取消」之后、「真正发包」之前
+        // ——这样被限速挡下的目标不会被算作已发出，取消也能立刻生效
+        //（限速绝不能变成取消不掉的等待）。
+        shared.limiter.wait(|| shared.cancel.load(Ordering::SeqCst));
         if shared.cancel.load(Ordering::SeqCst) {
             break;
         }

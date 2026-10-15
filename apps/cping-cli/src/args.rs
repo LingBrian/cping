@@ -72,6 +72,10 @@ pub const HELP: &str = r#"CPing 无头命令行 —— 批量 PING，结果可�
       --profile <名>      选用配置里的哪一份模板（名字不区分大小写）
       --list-profiles     列出配置里的全部模板后退出（需同时给 --config）
       --dump-config <路径> 把**这次实际生效**的参数写成配置文件后退出
+      --max-pps <n>       全局速率上限（探测包/秒，默认 500；写 0 = 不限速）
+      --max-targets <n>   单次任务的目标数上限（只能比结构上限 65536 更严）
+      --allow-reserved    放行组播 / 保留段等特殊网段（默认拒绝）
+      --audit <路径>      审计日志（JSONL 追加写；含谁/何时/参数/结果计数）
   -h, --help              显示本帮助
   -V, --version           显示版本
 
@@ -107,6 +111,18 @@ pub const HELP: &str = r#"CPing 无头命令行 —— 批量 PING，结果可�
   但**注释不保留**（子集解析器不建 AST）。
   --dump-config 只写「扫什么、怎么扫」：导出路径、--history、通知通道、告警规则
   刻意不写进去——否则换个模板会把通知一起换掉。
+
+关于 --max-pps / --max-targets / --allow-reserved / --audit（M17）：
+  这四项是**本机的合规策略**，刻意只走命令行、不进配置文件——否则一份从别处
+  拷来的模板就能把限速改成「不限速」，等于留了个绕过合规的暗门。
+  默认已限速（500 包/秒）并拒绝三类特殊网段：组播（会打扰整组主机）、
+  保留段（含 255.255.255.255 广播）、文档示例网段（公网不路由，扫了必失败）。
+  **私有网段与回环不拦**（10/8、172.16/12、192.168/16、127/8）——那正是本
+  工具的正常用途。命中时给出原因与放行方式，而不是笼统的「参数错误」。
+  越界值一律报错，不静默夹取：`--max-pps` 上限 100000、`--max-targets`
+  只能比 65536 更严（那是结果槽位的结构上限，参数突破不了）。
+  --audit 写出的是 JSONL（首行 `CPING-AUDIT 1`）：只记「谁、何时、扫了什么
+  规格、结果计数」，**不记**逐主机明细、MAC、厂商或反查出的主机名。
 
 关于 --fingerprint：
   端口指纹是**独立于在线判定的第二趟探测**，只对在线主机做：
@@ -195,6 +211,14 @@ pub struct Args {
     pub list_profiles: bool,
     /// M16：把生效配置写到该路径后退出。
     pub dump_config: Option<String>,
+    /// M17：全局速率上限（探测包/秒）。`0` = 不限速。
+    pub max_pps: u32,
+    /// M17：单次任务的目标数上限（只能比结构上限更严）。
+    pub max_targets: usize,
+    /// M17：放行组播 / 保留段等特殊网段。
+    pub allow_reserved: bool,
+    /// M17：审计日志路径（JSONL 追加写）。
+    pub audit: Option<String>,
     /// M16：从 `--config` 读到的文档（已迁移/已校验）。
     pub config_doc: Option<cping_core::ConfigDocument>,
     /// M16：配置相关的说明（迁移、字段来源、被命令行覆盖的项）。
@@ -252,6 +276,10 @@ impl Default for Args {
             out: None,
             quiet: false,
             list_backends: false,
+            max_pps: cping_core::DEFAULT_MAX_PPS,
+            max_targets: cping_core::MAX_TARGETS,
+            allow_reserved: false,
+            audit: None,
             config: None,
             profile: None,
             list_profiles: false,
@@ -512,6 +540,15 @@ impl Args {
                     args.alert = true;
                 }
                 "--notify-list" => args.notify_list = true,
+                "--max-pps" => {
+                    args.max_pps = parse_u32("--max-pps", &take_value("--max-pps")?)?;
+                }
+                "--max-targets" => {
+                    args.max_targets =
+                        parse_u64("--max-targets", &take_value("--max-targets")?)? as usize;
+                }
+                "--allow-reserved" => args.allow_reserved = true,
+                "--audit" => args.audit = Some(take_value("--audit")?),
                 "--config" => args.config = Some(take_value("--config")?),
                 "--profile" => args.profile = Some(take_value("--profile")?),
                 "--list-profiles" => args.list_profiles = true,
@@ -677,6 +714,19 @@ impl Args {
         Ok(())
     }
 
+    /// M17：把安全策略参数收敛成核心层能直接消费的一份策略。
+    ///
+    /// 这几项**刻意只走命令行**，不进配置文件：限速、目标上限、是否放行保留
+    /// 网段都是「本机的合规策略」。让一份从别处拷来的模板能把限速改成
+    /// 「不限速」，等于给了个绕过合规的暗门。
+    pub fn policy(&self) -> cping_core::ScanPolicy {
+        cping_core::ScanPolicy {
+            max_pps: self.max_pps,
+            max_targets: self.max_targets,
+            allow_reserved: self.allow_reserved,
+        }
+    }
+
     /// 校验「必需项都在」，返回可执行的配置。
     pub fn validate(&self) -> Result<(), String> {
         if self.help || self.version {
@@ -688,6 +738,10 @@ impl Args {
                 .into());
         }
         self.mode.validate().map_err(|e| e.to_string())?;
+        // M17：策略越界一律报错，不静默夹取（「我设了 1000 怎么还是 500」
+        // 比报错难查得多）。放在这里能让 `--list-profiles` 等早退分支不受影响，
+        // 同时保证坏参数走不到发包那一步。
+        self.policy().validate().map_err(|e| e.to_string())?;
         // M14：`--keep-days` 只在写时序文件时才有意义。静默忽略会让人以为
         // 「我明明设了 30 天，怎么还在按 7 天裁」——这类参数必须报错。
         if self.history.is_none() && self.keep_days != DEFAULT_KEEP_DAYS {
@@ -764,8 +818,15 @@ impl Args {
             (Some(path), None) => format!(" · 配置 {path}"),
             (None, _) => String::new(),
         };
+        // M17：只在限速**被改动**时才提一句。默认值写进每一行只会变成噪音，
+        // 而「被关掉限速」是需要摆在明面上的事。
+        let pol = if self.max_pps != cping_core::DEFAULT_MAX_PPS || self.allow_reserved {
+            format!(" · {}", self.policy().describe())
+        } else {
+            String::new()
+        };
         format!(
-            "{} · {} 并发 · 超时 {} ms{cfg}{watch}{fp}{hist}{rep}{alerts}",
+            "{} · {} 并发 · 超时 {} ms{pol}{cfg}{watch}{fp}{hist}{rep}{alerts}",
             self.mode.describe(),
             self.concurrency,
             self.timeout_ms,
@@ -1617,6 +1678,98 @@ note = ""
             assert!(HELP.contains(flag), "帮助里没有 {flag}");
         }
         assert!(HELP.contains("双方括号"), "要提醒 [[profiles]] 是双方括号");
+    }
+
+    // ------------------------------------------------------------------
+    // M17：安全策略与审计
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn m17_policy_defaults_are_limited_and_guarded() {
+        let a = Args::parse(&argv(&["-t", "10.0.0.1"])).unwrap();
+        assert_eq!(a.max_pps, cping_core::DEFAULT_MAX_PPS);
+        assert!(a.max_pps > 0, "默认必须限速，不能指望用户自觉");
+        assert_eq!(a.max_targets, cping_core::MAX_TARGETS);
+        assert!(!a.allow_reserved, "默认必须拦保留网段");
+        assert!(a.audit.is_none(), "审计不默认开——默认往磁盘写文件不合适");
+        // 默认值不进摘要（否则每一行都多一句噪音）
+        assert!(!a.describe().contains("限速"), "{}", a.describe());
+    }
+
+    #[test]
+    fn m17_policy_flags_are_parsed_and_shown_in_describe() {
+        let a = Args::parse(&argv(&[
+            "-t",
+            "10.0.0.1",
+            "--max-pps",
+            "0",
+            "--allow-reserved",
+        ]))
+        .unwrap();
+        assert_eq!(a.max_pps, 0);
+        assert!(a.allow_reserved);
+        let text = a.describe();
+        assert!(text.contains("不限速"), "关掉限速必须摆在明面上：{text}");
+        assert!(text.contains("允许保留网段"), "{text}");
+
+        let b = Args::parse(&argv(&["-t", "10.0.0.1", "--max-targets", "256"])).unwrap();
+        assert_eq!(b.max_targets, 256);
+        assert!(b.policy().validate().is_ok());
+    }
+
+    #[test]
+    fn m17_out_of_range_policy_is_rejected_not_clamped() {
+        // 越界的值一律报错：「我设了 1000 怎么还是 500」比报错难查得多
+        let a = Args::parse(&argv(&["-t", "10.0.0.1", "--max-pps", "100001"])).unwrap();
+        let err = a.validate().unwrap_err();
+        assert!(err.contains("100000"), "{err}");
+        assert!(err.contains("关闭限速"), "{err}");
+
+        let b = Args::parse(&argv(&["-t", "10.0.0.1", "--max-targets", "70000"])).unwrap();
+        let err = b.validate().unwrap_err();
+        assert!(err.contains("只能收紧"), "{err}");
+
+        let c = Args::parse(&argv(&["-t", "10.0.0.1", "--max-targets", "0"])).unwrap();
+        assert!(c.validate().is_err());
+
+        // 非数字直接是解析错误
+        assert!(Args::parse(&argv(&["-t", "10.0.0.1", "--max-pps", "abc"])).is_err());
+    }
+
+    #[test]
+    fn m17_reserved_targets_are_refused_with_a_reason_and_a_way_out() {
+        let a = Args::parse(&argv(&["-t", "224.0.0.0/29"])).unwrap();
+        let spec = cping_core::parse_spec(&a.target_spec, a.range).unwrap();
+        let err = a.policy().check_targets(&spec.targets).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("保留网段"), "{text}");
+        assert!(text.contains("组播"), "{text}");
+        // 放行之后就不再拦
+        let b = Args::parse(&argv(&["-t", "224.0.0.0/29", "--allow-reserved"])).unwrap();
+        assert!(b.policy().check_targets(&spec.targets).is_ok());
+    }
+
+    #[test]
+    fn m17_private_and_loopback_targets_still_work() {
+        // 拦保留网段不能把工具的正常用途一起拦掉
+        for spec_text in ["192.168.1", "10.0.0.0/30", "127.0.0.1"] {
+            let a = Args::parse(&argv(&["-t", spec_text])).unwrap();
+            let spec = cping_core::parse_spec(&a.target_spec, a.range).unwrap();
+            assert!(
+                a.policy().check_targets(&spec.targets).is_ok(),
+                "{spec_text} 不该被拦下"
+            );
+        }
+    }
+
+    #[test]
+    fn m17_audit_path_is_collected_and_documented() {
+        let a = Args::parse(&argv(&["-t", "10.0.0.1", "--audit", "run.jsonl"])).unwrap();
+        assert_eq!(a.audit.as_deref(), Some("run.jsonl"));
+        assert!(HELP.contains("--audit"), "帮助里没有 --audit");
+        for flag in ["--max-pps", "--max-targets", "--allow-reserved"] {
+            assert!(HELP.contains(flag), "帮助里没有 {flag}");
+        }
     }
 
     #[test]

@@ -30,6 +30,19 @@ pub const AUTOSAVE_FILE: &str = "cping-autosave.snap";
 /// 「已处理过」的指纹文件名。同一份结果只问一次。
 pub const HANDLED_FILE: &str = "cping-autosave.handled";
 
+/// M17：首次运行向用户告知「仅用于获授权网络」。
+///
+/// 与 CLI 共用 `cping-core::policy::consent` 的同一份状态与同一段文案：
+/// 三端提示不一致，用户会以为哪一份是过期的。
+pub fn print_authorization_notice() {
+    if !cping_core::policy::consent::load().needs_notice() {
+        return;
+    }
+    println!("{}", cping_core::policy::consent::notice_text());
+    println!();
+    let _ = cping_core::policy::consent::acknowledge(cping_core::unix_millis_now());
+}
+
 /// 命令行选项（仅作为初始值，不替代交互界面）。
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -52,6 +65,14 @@ pub struct Options {
     pub alert: bool,
     /// M15：告警配置（阈值 / 冷却 / 启用哪几类）。
     pub alert_config: cping_core::AlertConfig,
+    /// M17：安全策略（限速 / 目标上限 / 保留网段守卫）。
+    pub policy: cping_core::ScanPolicy,
+    /// M17：参数解析过程中的问题。
+    ///
+    /// TUI 是交互式全屏程序，为一个参数拼错就拒绝启动体验很差；但**静默**
+    /// 忽略用户显式给的参数是本项目最不能接受的一类问题。折中：照常启动，
+    /// 把问题写进状态栏、摆在用户眼前。
+    pub arg_warnings: Vec<String>,
 }
 
 impl Default for Options {
@@ -68,6 +89,8 @@ impl Default for Options {
             snapshot_dir: None,
             alert: false,
             alert_config: cping_core::AlertConfig::default(),
+            policy: cping_core::ScanPolicy::default(),
+            arg_warnings: Vec::new(),
         }
     }
 }
@@ -130,6 +153,27 @@ impl Options {
                         opts.snapshot_dir = Some(PathBuf::from(v));
                     }
                 }
+                // M17：安全策略。取值不合法要**说出来**（写进状态栏），
+                // 不能像没看见一样按默认值跑。
+                "--max-pps" => match it.next() {
+                    Some(v) => match v.parse::<u32>() {
+                        Ok(n) => opts.policy.max_pps = n,
+                        Err(_) => opts
+                            .arg_warnings
+                            .push(format!("--max-pps 需要一个非负整数，得到 {v:?}")),
+                    },
+                    None => opts.arg_warnings.push("--max-pps 缺少取值".into()),
+                },
+                "--max-targets" => match it.next() {
+                    Some(v) => match v.parse::<usize>() {
+                        Ok(n) => opts.policy.max_targets = n,
+                        Err(_) => opts
+                            .arg_warnings
+                            .push(format!("--max-targets 需要一个非负整数，得到 {v:?}")),
+                    },
+                    None => opts.arg_warnings.push("--max-targets 缺少取值".into()),
+                },
+                "--allow-reserved" => opts.policy.allow_reserved = true,
                 "--view" => {
                     if let Some(v) = it.next() {
                         opts.view = if v == "table" {
@@ -356,6 +400,11 @@ pub struct App {
 
     handle: Option<SchedulerHandle>,
     scheduler: ProbeScheduler,
+
+    // ---- M17 安全策略 ----
+    /// 限速 / 目标上限 / 保留网段守卫。挂在 App 上而不是调度器上，
+    /// 因为切换探测方式时会重建调度器，策略得跟着一起装上。
+    policy: cping_core::ScanPolicy,
 }
 
 impl App {
@@ -367,6 +416,9 @@ impl App {
         } else {
             None
         };
+        // M17：策略与参数告警也要在字段被搬走之前取出来
+        let policy = options.policy;
+        let arg_warnings = options.arg_warnings.clone();
         let spec = parse_spec(&options.prefix, TargetRange::Standard)
             .unwrap_or_else(|_| TargetSpec::default());
         let monitor = MonitorState::new(MonitorConfig {
@@ -426,9 +478,23 @@ impl App {
             // M5 起默认使用**平台原生 ICMP**；`--mock` 可切回模拟后端做演示。
             // M12：后端选择（含 mock 分支）统一走核心注册表，三端共用一处。
             scheduler: ProbeScheduler::new(backend),
+            policy,
         };
+        // M17：把安全策略装上调度器。策略来自命令行，不合法时写进状态栏——
+        // 界面上看得见，而不是静默按默认值跑。
+        app.apply_policy();
+        if !arg_warnings.is_empty() {
+            app.status = arg_warnings.join("；");
+        }
         app.check_pending_snapshot();
         app
+    }
+
+    /// M17：把当前策略装上调度器。失败时写进状态栏（不 panic、不静默）。
+    fn apply_policy(&mut self) {
+        if let Err(e) = self.scheduler.set_policy(self.policy) {
+            self.status = format!("安全策略无效：{e}");
+        }
     }
 
     pub fn backend_name(&self) -> &'static str {
@@ -487,6 +553,10 @@ impl App {
         // 换方式后旧结果不再可比，重置变化基线
         self.monitor.reset_baseline();
         self.status = format!("探测方式已切换为 {}", mode.describe());
+        // M17：换了调度器就得把策略重新装上，否则切一次探测方式，限速与
+        // 保留网段守卫就被悄悄丢掉了。放在最后，好让装配失败的信息
+        // 盖过上面那句成功提示。
+        self.apply_policy();
     }
 
     pub fn run<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> io::Result<()> {
@@ -2618,5 +2688,72 @@ mod tests {
 
         let d = Options::from_args(["--alert"].iter().map(|s| s.to_string()));
         assert!(d.alert_config.rules.iter().all(|r| r.enabled), "默认全集");
+    }
+
+    // ------------------------------------------------------------------
+    // M17：安全策略
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn m17_tui_flags_build_the_policy_and_bad_values_are_reported() {
+        let a = Options::from_args(
+            [
+                "--max-pps",
+                "120",
+                "--max-targets",
+                "64",
+                "--allow-reserved",
+            ]
+            .iter()
+            .map(|s| s.to_string()),
+        );
+        assert_eq!(a.policy.max_pps, 120);
+        assert_eq!(a.policy.max_targets, 64);
+        assert!(a.policy.allow_reserved);
+        assert!(a.arg_warnings.is_empty(), "{:?}", a.arg_warnings);
+
+        // 取值不合法必须**说出来**，不能像没看见一样按默认值跑
+        let b = Options::from_args(["--max-pps", "abc"].iter().map(|s| s.to_string()));
+        assert_eq!(b.policy.max_pps, cping_core::DEFAULT_MAX_PPS);
+        assert_eq!(b.arg_warnings.len(), 1);
+        assert!(
+            b.arg_warnings[0].contains("--max-pps"),
+            "{:?}",
+            b.arg_warnings
+        );
+
+        let c = Options::from_args(["--max-targets"].iter().map(|s| s.to_string()));
+        assert_eq!(c.arg_warnings.len(), 1);
+    }
+
+    #[test]
+    fn m17_policy_is_installed_on_the_scheduler() {
+        let mut o = opts();
+        o.policy.max_pps = 7;
+        let app = App::new(o);
+        assert_eq!(app.scheduler.policy().max_pps, 7);
+    }
+
+    #[test]
+    fn m17_switching_probe_mode_keeps_the_policy() {
+        // 切探测方式会重建调度器；策略要是没跟着装回去，一次切换就把限速丢了
+        let mut o = opts();
+        o.policy.max_pps = 9;
+        let mut app = App::new(o);
+        app.set_mode(ProbeMode::Icmp);
+        assert_eq!(app.scheduler.policy().max_pps, 9);
+    }
+
+    #[test]
+    fn m17_bad_policy_lands_in_the_status_bar_not_a_panic() {
+        let mut o = opts();
+        // 直接绕过命令行塞一个越界值（等价于从配置文件里读到的坏值）
+        o.policy.max_pps = cping_core::MAX_PPS_LIMIT + 1;
+        let app = App::new(o);
+        assert!(
+            app.status.contains("安全策略无效"),
+            "坏策略必须看得见：{}",
+            app.status
+        );
     }
 }

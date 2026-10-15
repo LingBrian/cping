@@ -96,11 +96,58 @@ fn run(argv: &[String]) -> i32 {
         }
     };
 
+    // M17：首次运行告知「仅用于获授权网络」。位置刻意放在参数都校验完、
+    // 确认真的要开扫之后——为一次失败的调用弹一段授权提示只会让人麻木。
+    print_authorization_notice(parsed.quiet);
+
+    // M17：保留网段与目标数上限在**开扫之前**就拦下。晚一步拦的代价是：
+    // 错误会被一堆轮次输出淹掉，而且线程已经起来了。调度器里那道检查仍然保留，
+    // 它是权威（三端共用），这里只是把同一份判断提前一次，让 CLI 的体验一致。
+    if let Err(e) = parsed.policy().check_targets(&spec.targets) {
+        eprintln!("参数错误：{e}");
+        if matches!(e, cping_core::CoreError::ReservedTarget { .. }) {
+            eprintln!(
+                "提示：确认要扫就加 --allow-reserved；这类地址扫了要么没意义、要么会打扰别人。"
+            );
+        }
+        return EXIT_USAGE;
+    }
+
     let mut session = match Session::new(&parsed, &spec) {
         Ok(s) => s,
         Err(code) => return code,
     };
     session.execute()
+}
+
+/// M17：首次运行（或提示文案升版后）打印一次授权提示，并记下「已告知」。
+///
+/// **不做阻塞式确认**：这个 CLI 会被 CI 与计划任务调用，卡在等人按回车
+/// 等于把工具弄坏。提示一次、记一次，就足以起到告知作用。
+///
+/// `--quiet` 下改走 stderr：静默模式是「别刷屏」，不是「免告知」。
+fn print_authorization_notice(quiet: bool) {
+    use cping_core::policy::consent;
+    if !consent::load().needs_notice() {
+        return;
+    }
+    let text = consent::notice_text();
+    if quiet {
+        eprintln!("{text}");
+    } else {
+        println!("{text}");
+        println!();
+    }
+    if !consent::acknowledge(cping_core::unix_millis_now()) {
+        // 写不进去不是致命错误，但要说清楚——否则每次启动都提示一遍，
+        // 用户会以为程序坏了
+        eprintln!(
+            "提示：无法记录授权确认状态（{} 不可写），下次启动会再提示一遍",
+            consent::consent_path()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| "家目录".into())
+        );
+    }
 }
 
 /// 一次 CLI 会话（可能包含多轮 watch）。
@@ -118,6 +165,14 @@ struct Session {
     alerts: Option<cping_core::AlertEngine>,
     /// M15：后台通知投递（有通知通道时才有）。
     sink: Option<cping_core::AlertSink>,
+    /// M17：审计日志（`--audit` 时才有）。
+    audit: Option<cping_core::AuditLog>,
+    /// M17：最近一轮的用时（审计用）。
+    last_elapsed_ms: u64,
+    /// M17：本次会话的调度任务号（审计用）。没有活跃任务时为空串。
+    current_task_id: String,
+    /// M17：会话退出码，收尾写审计时用。
+    exit_code: Option<i32>,
 }
 
 impl Session {
@@ -214,12 +269,37 @@ impl Session {
         // M15：通知在后台线程投递，绝不在扫描主循环里做网络 I/O
         let sink = cping_core::AlertSink::spawn(args.notify_config());
 
-        Ok(Self {
+        // M12：后端选择统一走核心注册表。CLI 面向自动化，**不提供** mock —
+        // 无头命令行里混进模拟数据只会让脚本的退出码失去意义。
+        let mut scheduler = ProbeScheduler::new(backend_for_run(args.mode, false));
+        // M17：限速与保留网段守卫在**起线程之前**生效
+        if let Err(e) = scheduler.set_policy(args.policy()) {
+            eprintln!("安全策略无效：{e}");
+            return Err(EXIT_USAGE);
+        }
+        // 只在限速被改动时把策略摆出来。默认值写进每一行只会变成噪音，
+        // 而「限速被关掉」是需要摆在明面上的事。
+        if !args.quiet && scheduler.policy().max_pps != cping_core::DEFAULT_MAX_PPS {
+            println!("{}", scheduler.policy().describe());
+        }
+
+        // M17：审计日志。**打开失败直接退出码 2**——用户显式要求留审计，
+        // 就该在「审计没留成」的时候立刻失败，而不是扫完才发现。
+        let audit = match &args.audit {
+            Some(path) => match cping_core::AuditLog::open(path) {
+                Ok(log) => Some(log),
+                Err(e) => {
+                    eprintln!("审计日志不可用：{e}");
+                    return Err(EXIT_USAGE);
+                }
+            },
+            None => None,
+        };
+
+        let mut session = Self {
             args: args.clone(),
             spec: spec.clone(),
-            // M12：后端选择统一走核心注册表。CLI 面向自动化，**不提供** mock —
-            // 无头命令行里混进模拟数据只会让脚本的退出码失去意义。
-            scheduler: ProbeScheduler::new(backend_for_run(args.mode, false)),
+            scheduler,
             previous: Vec::new(),
             changes: ChangeLog::new(DEFAULT_CHANGE_CAPACITY),
             round: 0,
@@ -227,7 +307,15 @@ impl Session {
             series,
             alerts,
             sink,
-        })
+            audit,
+            last_elapsed_ms: 0,
+            current_task_id: String::new(),
+            exit_code: None,
+        };
+        // M17：会话开始就落一条审计，把「谁、何时、扫什么规格、什么参数」记下来。
+        // 放在这里而不是轮次里，是因为第一轮之前的参数信息最完整。
+        session.write_audit(cping_core::AuditEvent::SessionStart, now_ms());
+        Ok(session)
     }
 
     fn execute(&mut self) -> i32 {
@@ -235,7 +323,71 @@ impl Session {
         // 「跑完一轮就 Ctrl+C」正是最该把冷却记录留下来的场景。
         let code = self.run_rounds();
         self.finish_alerts();
+        // M17：审计收尾放在最后，退出码才有意义
+        self.exit_code = Some(code);
+        self.write_audit(cping_core::AuditEvent::SessionEnd, now_ms());
+        if let Some(log) = &self.audit {
+            if !self.args.quiet {
+                println!(
+                    "  审计：{} 条记录 → {}",
+                    log.written(),
+                    log.path().to_string_lossy()
+                );
+            }
+        }
         code
+    }
+
+    /// M17：按当前状态组装一条审计记录。
+    ///
+    /// **只放计数与参数**，不放逐主机明细 / MAC / 厂商 / 反查出的主机名——
+    /// 审计要能自证「我扫了什么、结果如何」，而不是变成一份资产清单。
+    fn audit_record(&self, event: cping_core::AuditEvent, at_ms: u64) -> cping_core::AuditRecord {
+        let st = &self.last_stats;
+        let mut r = cping_core::AuditRecord::new(at_ms, event);
+        r.task_id = self.scheduler_task_id();
+        r.operator = cping_core::operator_name();
+        r.machine = cping_core::machine_name();
+        r.round = self.round;
+        r.target_spec = self.spec.summary();
+        r.targets = st.total;
+        r.online = st.online;
+        r.timeout = st.timeout;
+        r.unreachable = st.unreachable;
+        r.permission_denied = st.permission_denied;
+        r.unsupported = st.unsupported;
+        r.error = st.error;
+        r.elapsed_ms = self.last_elapsed_ms;
+        r.mode = self.args.mode.describe();
+        r.range = self.args.range.key().to_string();
+        r.timeout_ms = self.args.timeout_ms;
+        r.concurrency = self.args.concurrency;
+        r.max_pps = self.args.max_pps;
+        r.config_path = self.args.config.clone().unwrap_or_default();
+        r.profile = self.args.profile.clone().unwrap_or_default();
+        if event == cping_core::AuditEvent::SessionEnd {
+            r.exit_code = Some(self.exit_code.unwrap_or(0));
+        }
+        r
+    }
+
+    /// 审计里的任务号。没有活跃任务时留空——**不编一个看起来像真的编号**。
+    fn scheduler_task_id(&self) -> String {
+        self.current_task_id.clone()
+    }
+
+    /// 追加一条审计记录。写失败**必须可见**：安静地丢审计比没有审计更糟。
+    fn write_audit(&mut self, event: cping_core::AuditEvent, at_ms: u64) {
+        if self.audit.is_none() {
+            return;
+        }
+        // 先组装（只读借用），再写入（可变借用）——顺序不能反
+        let record = self.audit_record(event, at_ms);
+        if let Some(log) = &mut self.audit {
+            if let Err(e) = log.append(&record) {
+                eprintln!("审计写入失败：{e}");
+            }
+        }
     }
 
     /// 主循环：跑完 `--rounds` 轮（或直到 Ctrl+C），返回退出码。
@@ -259,6 +411,8 @@ impl Session {
                 Err(code) => return code,
             };
             self.last_stats = outcome.stats.clone();
+            self.last_elapsed_ms = outcome.elapsed_ms;
+            self.current_task_id = outcome.task_id.clone();
 
             if !self.args.quiet {
                 print_round(
@@ -306,6 +460,10 @@ impl Session {
 
             self.previous = outcome.results;
             self.changes.extend(outcome.changes);
+
+            // M17：每轮落一条审计。放在所有本轮统计都定稿之后，
+            // 这样记录里的计数与屏幕上打印的完全一致。
+            self.write_audit(cping_core::AuditEvent::Round, now_ms());
 
             if let Some(total) = self.args.rounds {
                 if self.round >= total {
@@ -367,6 +525,8 @@ impl Session {
                 return Err(EXIT_USAGE);
             }
         };
+        // 任务号要在 `run_to_completion` 消费掉 handle 之前取出来（审计要用）
+        let task_id = handle.task_id.clone();
         let outcome = handle.run_to_completion();
         let mut results = outcome.results;
 
@@ -416,6 +576,7 @@ impl Session {
         Ok(RoundOutcome {
             results,
             stats,
+            task_id,
             elapsed_ms: outcome.elapsed_ms.max(started.elapsed().as_millis() as u64),
             cancelled: outcome.cancelled,
             changes,
@@ -571,6 +732,8 @@ struct RoundOutcome {
     results: Vec<ProbeResult>,
     stats: ScanStats,
     elapsed_ms: u64,
+    /// M17：调度器分配的任务号（审计里用它把会话与轮次串起来）。
+    task_id: String,
     cancelled: bool,
     changes: Vec<Change>,
     /// M13：端口指纹（独立于 results，不参与在线判定）。
@@ -939,6 +1102,7 @@ mod tests {
                 ProbeStatus::Online { rtt_ms: 1 },
             )]),
             elapsed_ms: 12,
+            task_id: "t-test".into(),
             cancelled: false,
             changes: Vec::new(),
             fingerprints: Vec::new(),

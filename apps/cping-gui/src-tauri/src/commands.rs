@@ -952,6 +952,11 @@ pub fn start_scan(
 
     // 每次扫描按当前方式新建调度器：一次任务只有一种方式，
     // 这样「ICMP 在线」与「TCP 开放」永远不可能混在同一次统计里。
+    //
+    // M17：这里**刻意**不调用 `set_policy`，用的是 `ScanPolicy::default()`
+    // ——桌面端的用户最不可能去读文档，所以「默认限速 + 拒绝保留网段」
+    // 必须是无条件的默认值，而不是一个需要用户去找开关的选项。
+    // 界面里可调的策略（限速值等）随 M18 的界面工作一起接入。
     let scheduler = ProbeScheduler::new(select_backend(mode));
     let handle: SchedulerHandle = scheduler
         .start(&config, targets.clone())

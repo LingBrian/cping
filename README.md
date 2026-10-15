@@ -6,9 +6,9 @@
 
 Rust 核心 · TUI（ratatui）· 桌面 GUI（Tauri 2 + Vue 3）· Android
 
-[![Release](https://img.shields.io/badge/release-v2.4.0-111827)](../../releases)
+[![Release](https://img.shields.io/badge/release-v2.5.0-111827)](../../releases)
 [![CI](https://github.com/LingBrian/cping/actions/workflows/ci.yml/badge.svg)](https://github.com/LingBrian/cping/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-336%20passed-brightgreen)](docs/testing.md)
+[![Tests](https://img.shields.io/badge/tests-460%20passed-brightgreen)](docs/testing.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20Android-lightgrey)](docs/platform-compatibility.md)
 
@@ -78,16 +78,18 @@ cping/
 │   ├── notify                          M15：五通道通知（console/system/webhook/command/smtp）
 │   ├── timefmt                         M15：时间算法（三端共用，同一处实现）
 │   ├── profile                         M16：配置文件 · 命名模板 · schema 版本与迁移 · 未知键保留
+│   ├── policy                          M17：令牌桶限速 · 保留网段守卫 · 审计日志 · 首次授权告知
 │   ├── oui/neighbor/hostname/enrich    M7：厂商识别 · ARP 取 MAC · 反查主机名 · 信息补全
 │   ├── snapshot                        结果快照落盘与恢复（严格解析，坏数据宁可报错）
 │   ├── data/                           IEEE OUI 三表（54,190 条，编译期嵌入）
 │   └── native.rs                       Windows/Linux/Android 原生 ICMP 与 TCP
 ├── apps/cping-tui/           ratatui + crossterm 交互式终端界面
-├── apps/cping-cli/           M10/M16：无头命令行（可判退出码）+ 配置文件与模板
+├── apps/cping-cli/           M10/M16/M17：无头命令行（可判退出码）· 配置模板 · 安全策略与审计
 ├── apps/cping-gui/           Tauri 2 + Vue 3 + TypeScript
 │   ├── src/                  桌面布局 + 移动布局（自动切换）
 │   └── src-tauri/            Tauri 容器（唯一前后端通道）
 ├── scripts/                  M11：打包脚本（tar.gz / zip + SHA256SUMS）
+│                             M17：制品清单与签名（manifest / Authenticode / apksigner）
 ├── tools/oui-gen/            IEEE 官方 CSV → 嵌入数据表的确定性生成器
 └── tools/android-forensics/  Android 平台行为取证对照程序（不参与构建）
 ```
@@ -145,6 +147,10 @@ cping-cli --config prod.toml --list-profiles      # 看有哪些模板、各扫�
 cping-cli --config prod.toml --profile dmz --out dmz.csv
 cping-cli --config prod.toml                      # 不给 --profile 就用 default_profile
 cping-cli -t 10.0.0.0/24 -c 64 --dump-config nightly.toml   # 把生效参数固化下来
+# M17：安全与合规（限速与保留网段守卫是默认行为，不是选配）
+cping-cli -t 192.168.1 --max-pps 200 --max-targets 512      # 速率上限（pps）/ 目标数上限
+cping-cli -t 192.168.1 --watch 30 --audit scan-audit.jsonl  # 追加审计记录（JSONL，可导出自证）
+cping-cli -t 192.0.2.5 --allow-reserved                     # 显式放行保留网段（默认拒绝）
 ```
 
 退出码：`0` 全部在线 / `1` 存在离线 / `2` 参数错误 / `3` 权限不足或后端不可用。
@@ -179,12 +185,25 @@ cping-cli -t 10.0.0.0/24 -c 64 --dump-config nightly.toml   # 把生效参数固
 > 比本程序更新的版本**拒绝读取**。**不认识的键原样保留，但注释不保留**
 > （受限子集解析器不建 AST——这条写在生成文件的第一行里）。
 > 可直接从 [`cping.example.toml`](cping.example.toml) 改起。
+>
+> **安全与合规（M17）**：**默认就限速**（`500` pps）且**默认拒绝保留 / 特殊用途网段**
+> （组播、`0.0.0.0/8`、`240/4`、三个文档示例网段、`198.18/15`、IPv6 文档段与组播等），
+> 被拦时会说明**是哪一类地址、为什么拦**，而不是笼统说「非法」。私有网段、回环、
+> 链路本地与 CGNAT **不拦**——它们正是本工具的正当用途。`--allow-reserved` 可显式放行。
+> 限速、目标数上限、是否放行保留网段这三项**只走命令行、刻意不进配置文件**：
+> 一份从别处拷来的模板不该能把限速改成「不限速」。`--max-pps 0` 关闭限速。
+> **首次运行会打印一次授权告知**（仅在告知版本变化时再提示，且不阻塞扫描），
+> 确认后落盘到 `~/.cping/consent`。`--audit` 写出的 JSONL **只含时间、参数、计数
+> 与操作者名，不含 MAC / 厂商 / 主机名结果**——自证合规用不着把邻居的隐私一起记下来。
+> 制品签名的真实现状（哪些有签名、哪些只是 SHA-256）如实登记在
+> [`docs/signing.md`](docs/signing.md)。
 
 ### TUI
 
 ```bash
 cping-tui                # 交互式启动
 cping-tui --prefix 192.168.1
+cping-tui --max-pps 200 --max-targets 512   # M17：限速与目标数上限（取值不合法只警告不崩）
 ```
 
 | 键 | 功能 | 键 | 功能 |
@@ -212,6 +231,10 @@ cping-tui --prefix 192.168.1
 （不必重启加参数）；`!` 切静音——静音的只是通知，判定与冷却照常推进。
 
 可选 `--snapshot-dir <目录>` 指定快照目录（默认当前目录）。
+
+TUI 与 CLI 共用同一套安全策略（M17）：默认限速、默认拒绝保留网段，首次运行打印
+同一个授权告知（**打印在进入备用屏幕之前**，否则确认文字会随备用屏幕一起被清掉）；
+切换探测方式时会重建调度器并**重新装配策略**——不然切一次方式限速就丢了。
 
 ### 桌面 GUI
 
@@ -258,7 +281,8 @@ cping-tui --prefix 192.168.1
 | **v2.2.0** ✅ | M14 | 历史与趋势：跨会话时序（版本化格式 + 降采样）、可用率报表、在线率曲线 |
 | **v2.3.0** ✅ | M15 | 告警与通知：四类规则（纯函数匹配）、冷却去重与静音、五通道通知、跨会话状态 |
 | **v2.4.0** ✅ | M16 | 配置与模板：命名扫描模板、schema 版本与迁移、未知键保留、CLI 直接消费模板 |
-| v2.5.0–v2.7.0 | M17–M19 | 安全与合规 · 国际化与无障碍 · 规模化性能 |
+| **v2.5.0** ✅ | M17 | 安全与合规：默认限速与目标数上限、保留网段守卫、审计日志（JSONL）、首次授权告知、制品签名与清单 |
+| v2.6.0–v2.7.0 | M18–M19 | 国际化与无障碍 · 规模化性能 |
 | v3.0.0 | M20 | 生态与开放：插件接口、脚本化任务、对外 API（主版本） |
 
 各阶段详细功能与验收条件见 [`docs/plan.md`](docs/plan.md)「路线图」章节。
@@ -272,6 +296,7 @@ cping-tui --prefix 192.168.1
 | [`docs/platform-compatibility.md`](docs/platform-compatibility.md) | 各平台 ICMP 能力、权限要求与实测记录 |
 | [`docs/testing.md`](docs/testing.md) | 每阶段真实构建/测试记录与踩坑 |
 | [`docs/release.md`](docs/release.md) | 产物清单与发布说明 |
+| [`docs/signing.md`](docs/signing.md) | 制品签名现状（三平台如实登记）、校验步骤、补签流程 |
 | [`docs/release-notes-v2.0.0.md`](docs/release-notes-v2.0.0.md) | v2.0.0 发布说明 |
 | [`CHANGELOG.md`](CHANGELOG.md) | 版本变更记录（含 v2.0.0 破坏性变更迁移表） |
 
@@ -300,7 +325,8 @@ cping-tui --prefix 192.168.1
   选中会得到明确的「不支持」，而不是静默超时。IPv6 的完整可用路径是 **TCP**。
 - **Android 已在 Android 15 模拟器完成真机级验收**（安装/启动/扫描/导出/横竖屏/
   前后台）；真机上的厂商后台管控与字体缩放仍待验证。release APK 用 **Android Debug
-  密钥**签名，可侧载试用，**不可上架**（同时提供未签名版供自行签名）。
+  密钥**签名，可侧载试用，**不可上架**（同时提供未签名版供自行签名）。签名现状
+  与自行签名步骤见 [`docs/signing.md`](docs/signing.md)。
 - TUI 状态栏的本机地址尚未接入网卡枚举，显示「未知」，**不伪造**；
   MAC 与厂商已通过本机邻居表 + 离线 OUI 库接入。
 - 目标范围默认 `.1`–`.255`（对齐原版），`.0` 不参与探测。
@@ -310,7 +336,16 @@ cping-tui --prefix 192.168.1
   不是同一个模型，硬接会出现「选了模板但矩阵是空的」。
 - **配置文件里的注释不会被保留**：解析器是受限 TOML 子集，不建 AST；
   不认识的键会原样保留。写回前请自行备份带注释的原文件。
-- **仅用于你拥有或获授权管理的网络**；并发与目标数均有上限。
+- **安全与合规策略（M17）**：默认速率上限 `500` pps、目标数上限 `65536`、默认拒绝
+  保留 / 特殊用途网段；三项都能在命令行收紧，但**上限只能收紧不能放宽**，
+  只有 `--max-pps 0` 会真正关闭限速。这三项刻意**不进配置文件**（防模板暗门）。
+  审计日志（`--audit`）只记时间 / 参数 / 计数 / 操作者名，**不含** MAC、厂商、
+  主机名等邻居隐私。
+- **签名现状如实登记**：Windows exe 无证书时**不签**，只给 SHA-256 与
+  `MANIFEST.json` 自证清单；官方构建的 Android release APK 目前仍是 **debug 密钥**
+  签名；Linux 产物是未签名 tar.gz / zip + `SHA256SUMS`。**不把 SHA-256 说成签名，
+  也不用自签证书冒充正式签名**——补签方法见 [`docs/signing.md`](docs/signing.md)。
+- **仅用于你拥有或获授权管理的网络**；并发、速率与目标数均有上限。
 
 ## License
 

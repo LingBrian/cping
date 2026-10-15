@@ -390,14 +390,14 @@ dependencies = [
 
 [[package]]
 name = "cping-core"
-version = "2.3.0"
+version = "2.5.0"
 dependencies = [
  "tokio",
 ]
 
 [[package]]
 name = "cping-gui"
-version = "2.3.0"
+version = "2.5.0"
 dependencies = [
  "cping-core",
  "indexmap 1.9.3",

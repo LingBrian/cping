@@ -78,6 +78,12 @@ pub enum CoreError {
     InvalidPrefix(String),
     /// 目标数量超过安全上限。
     TooManyTargets { actual: usize, limit: usize },
+    /// M17：目标落在保留 / 特殊用途网段，而策略未放行。
+    ///
+    /// 单独立一个变体（而不是塞进 [`CoreError::InvalidConfig`]）的理由：
+    /// 三端都要能把「这条提示」与「配置写错了」区分开——前者要给出
+    /// 「加 --allow-reserved 才能扫」这类**可执行的下一步**。
+    ReservedTarget { ip: String, reason: String },
     /// 配置不合法（并发、超时、阈值等）。
     InvalidConfig(String),
     /// 导出失败。
@@ -94,6 +100,9 @@ impl fmt::Display for CoreError {
             CoreError::InvalidPrefix(msg) => write!(f, "网段前缀无效：{msg}"),
             CoreError::TooManyTargets { actual, limit } => {
                 write!(f, "目标数量 {actual} 超出上限 {limit}")
+            }
+            CoreError::ReservedTarget { ip, reason } => {
+                write!(f, "目标 {ip} 属于保留网段：{reason}")
             }
             CoreError::InvalidConfig(msg) => write!(f, "配置无效：{msg}"),
             CoreError::Export(msg) => write!(f, "导出失败：{msg}"),

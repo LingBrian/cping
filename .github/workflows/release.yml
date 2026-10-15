@@ -64,6 +64,21 @@ jobs:
             -TargetDir 'target/${{ matrix.target }}/release' `
             -OutDir 'release/${{ steps.ver.outputs.version }}'
 
+      - name: 制品签名（M17）
+        # 有证书（Secrets）就做 Authenticode 签名，没有就打印 SHA-256 并说明
+        # **未签名**——绝不用自签证书冒充正式签名。
+        shell: pwsh
+        env:
+          CPING_SIGN_CERT_PFX_BASE64: ${{ secrets.CPING_SIGN_CERT_PFX_BASE64 }}
+          CPING_SIGN_CERT_PASSWORD: ${{ secrets.CPING_SIGN_CERT_PASSWORD }}
+        run: |
+          $d = 'target/${{ matrix.target }}/release'
+          if (Test-Path $d) {
+            pwsh -File scripts/sign-windows.ps1 -Path $d
+          } else {
+            Write-Host "跳过：找不到 $d"
+          }
+
       - uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.tag }}
@@ -261,6 +276,16 @@ jobs:
             -name '*.apk' -exec cp -v {} "$out/" \;
           ls -la "$out"
 
+      - name: APK 签名与校验（M17）
+        # 有 keystore（Secrets）就用正式密钥重签并 verify；没有就如实报告
+        # 「当前是 debug 签名，可侧载、不可上架」，绝不把 debug 包当正式版发。
+        env:
+          CPING_ANDROID_KEYSTORE_BASE64: ${{ secrets.CPING_ANDROID_KEYSTORE_BASE64 }}
+          CPING_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.CPING_ANDROID_KEYSTORE_PASSWORD }}
+          CPING_ANDROID_KEY_ALIAS: ${{ secrets.CPING_ANDROID_KEY_ALIAS }}
+          CPING_ANDROID_KEY_PASSWORD: ${{ secrets.CPING_ANDROID_KEY_PASSWORD }}
+        run: bash scripts/sign-android.sh release/android
+
       - uses: actions/upload-artifact@v4
         with:
           name: dist-android
@@ -311,6 +336,16 @@ jobs:
           ls -la
           echo "==== SHA256SUMS.txt ===="
           cat SHA256SUMS.txt
+
+      - name: 生成制品清单 MANIFEST.json（M17）
+        # 记录每个产物的 sha256 / 字节数，以及构建来源（版本、提交、工具链）。
+        # 提供了 CPING_SIGNING_KEY 时顺带对它做 gpg 分离签名；没有就明确写
+        # `"signed": false` 并打印补签方法——sha256 不能冒充签名。
+        env:
+          CPING_SIGNING_KEY: ${{ secrets.CPING_SIGNING_KEY }}
+        run: |
+          bash scripts/artifact-manifest.sh \
+            '${{ steps.ver.outputs.version }}' dist
 
       - name: 准备发布说明
         # body_path 指向不存在的文件会让 action 报错，所以先兜底生成一份。

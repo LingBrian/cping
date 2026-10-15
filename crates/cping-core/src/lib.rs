@@ -27,6 +27,7 @@ pub mod native;
 pub mod neighbor;
 pub mod notify;
 pub mod oui;
+pub mod policy;
 pub mod probe;
 pub mod profile;
 pub mod registry;
@@ -103,6 +104,11 @@ pub use notify::{
     DeliveryOutcome, NotifyConfig, SmtpAccount, SINK_QUEUE_CAPACITY,
 };
 pub use oui::{entry_counts, mac_to_string, parse_mac, vendor_of, DATA_SOURCE};
+pub use policy::{
+    machine_name, operator_name, reserved_reason, AuditEvent, AuditLog, AuditRecord, Bucket,
+    RateLimiter, ScanPolicy, AUDIT_FORMAT, AUDIT_FORMAT_VERSION, CONSENT_VERSION, DEFAULT_MAX_PPS,
+    MAX_PPS_LIMIT,
+};
 pub use probe::{
     MockBackend, MockPolicy, MockResponse, ProbeBackend, ProbeOutcome, RecordingBackend,
 };

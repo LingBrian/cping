@@ -309,7 +309,7 @@ CLI 模式不初始化终端 UI。
 | M14 | v2.2.0 | 历史与趋势 | 时序落盘、可用率报表、离线率曲线 |
 | M15 | **v2.3.0** ✅ | 告警与通知 | 阈值告警、Webhook / 邮件 / 系统通知 |
 | M16 | **v2.4.0** ✅ | 配置与模板 | 扫描模板、配置导入导出、CLI 配置文件 |
-| M17 | v2.5.0 | 安全与合规 | 签名制品、权限最小化、审计日志、限速 |
+| M17 | **v2.5.0** ✅ | 安全与合规 | 签名制品、权限最小化、审计日志、限速 |
 | M18 | v2.6.0 | 国际化与无障碍 | i18n（中/英）、键盘全导航、屏幕阅读器 |
 | M19 | v2.7.0 | 规模化性能 | 万级目标、流式结果、内存预算与背压 |
 | M20 | **v3.0.0** | 生态与开放 | 插件 SDK、REST/WS API、脚本引擎 |
@@ -832,3 +832,122 @@ RTT 本来就是 0 ms ——拿 0 当「没测到」的哨兵，会把一台**�
   9. 配置文件缺失 / 写出路径不可写 → 均退出码 2，**不静默按默认值跑**
 - 未实测：TUI / GUI 侧的模板消费（本版未接，见上「范围决定」）；
   Linux / Android 上的 `--config`（与平台无关的纯文件读写，但未在真机跑过）
+
+### M17 — v2.5.0 安全与合规（实施记录，2026-10-15）
+
+**实现文件**
+
+- `crates/cping-core/src/policy.rs`（新增，约 1000 行含 20 条测试）
+  - `ScanPolicy { max_pps, max_targets, allow_reserved }` + `validate()` /
+    `check_targets()` / `describe()`
+  - `reserved_reason(ip) -> Option<&'static str>`（纯函数，给**原因**而不是布尔）
+  - `Bucket`（纯算术令牌桶）+ `RateLimiter`（带时钟、可取消的等待）
+  - `AuditEvent` / `AuditRecord` / `AuditLog`（JSONL 追加写，首行带格式标识）
+  - `consent` 子模块：`ConsentState` / `consent_path()` / `load()` /
+    `acknowledge()` / `notice_text()`
+  - `operator_name()` / `machine_name()`（取不到就空串，**不猜、不填占位符**）
+- `crates/cping-core/src/error.rs`：新增 `CoreError::ReservedTarget { ip, reason }`
+  ——单独立变体而不是塞进 `InvalidConfig`，因为三端都要能把「这条提示」与
+  「配置写错了」区分开，前者要给出**可执行的下一步**
+- `crates/cping-core/src/scheduler.rs`：`ProbeScheduler` 持有 `ScanPolicy`
+  （`set_policy` / `policy`）；`Shared` 带 `Arc<RateLimiter>`；
+  `worker_loop` 在「已拿到目标、确认没取消」之后、「真正发包」之前限速
+- `apps/cping-cli`：`--max-pps` / `--max-targets` / `--allow-reserved` /
+  `--audit`，`print_authorization_notice()`，`Session` 带 `AuditLog`，
+  会话开始 / 每轮 / 会话结束各落一条审计
+- `apps/cping-tui`：同样三个策略参数；`App.policy` + `apply_policy()`
+  （装配失败写状态栏）；授权提示在进入备用屏幕**之前**打印
+- `apps/cping-gui`：**刻意**不调 `set_policy`，用无条件默认值（见下）
+- `scripts/artifact-manifest.sh` / `scripts/sign-windows.ps1` /
+  `scripts/sign-android.sh`（新增）；`release.yml` 三处接入
+- `docs/signing.md`（新增）
+
+**实现时定死的几处边界**
+
+1. **默认就是「有限速」**（500 包/秒）。合规不能指望用户自觉去找开关。
+   想关必须显式写 `--max-pps 0`，而且关掉这件事会出现在参数摘要里
+   ——「限速被关掉」需要摆在明面上，默认值则不（否则每行都是噪音）。
+2. **保留网段拦的是什么，不拦什么，都是刻意的**。拦「会打扰别人」（组播、
+   广播）、「没有意义」（`0.0.0.0/8`）、「一定会失败」（文档示例网段）；
+   **不拦**私有网段与回环——那正是本工具的正常用途，拦掉等于把工具废掉。
+   自测用的 `127.0.0.1` 因此仍然可用。
+3. **只报第一个命中的地址**。列 255 条不会让人更快修好配置，只会把真正
+   那一句淹掉。
+4. **越界一律报错，不夹取**。`--max-pps 100000` 是上限；`--max-targets`
+   **只能比 65536 更严**（那是结果槽位的预分配长度，参数突破不了）。报错
+   里直接写清「想关限速请写 0」「只能收紧」。
+5. **限速绝不阻塞取消**。`RateLimiter::wait` 每轮醒来都问一次「是否已取消」，
+   单次睡眠上限 50 毫秒——限速变成取消不掉的等待，用户就只能杀进程。
+6. **策略不进配置文件**。`--max-pps` / `--max-targets` / `--allow-reserved`
+   只走命令行：一份从别处拷来的模板能把限速改成「不限速」，等于留了个
+   绕过合规的暗门。
+7. **审计不放隐私**。只有「谁、何时、扫什么规格、什么参数、结果计数、退出码」；
+   逐主机明细、MAC、厂商、反查出的主机名一律不写。审计要能自证「我扫了什么」，
+   而不是变成一份资产清单。
+8. **审计文件认标识**。首行不是 `CPING-AUDIT <版本>` 就拒绝追加——往别人的
+   文件里塞东西比写不进去危险得多。写入失败必须打到 stderr。
+9. **首次告知不阻塞**。CLI 会被 CI 与计划任务调用，卡在等人按回车等于把工具
+   弄坏。提示一次、记一次（按版本号判重），`--quiet` 下改走 stderr。
+10. **不伪造签名**。这是本阶段最重要的一条：没有密钥时 `signed: false` +
+    打印补签命令；**不用自签证书冒充正式签名**，**不把 SHA-256 说成签名**。
+    Android 未配置 keystore 时如实报告「debug 签名，可侧载不可上架」。
+
+**范围决定：GUI 的策略设置随 M18 接入**
+
+`apps/cping-gui` 里**刻意**不调 `set_policy`，用 `ScanPolicy::default()`：
+桌面端用户最不可能去读文档，所以「默认限速 + 拒绝保留网段」必须是无条件的
+默认值。界面里可调的限速值与 M16 的模板选择器一起，随 M18 的界面工作接入
+（同一块设置区改两遍不值得）。
+
+**验收对照**
+
+| 验收要点 | 落地情况 |
+| --- | --- |
+| 默认速率上限存在且可配置 | `policy_defaults_are_the_documented_ones` + `m17_policy_defaults_are_limited_and_guarded`（默认 500）；`--max-pps` / TUI 同名参数；`limiter_is_a_no_op_when_unlimited` 反证「关掉才不限速」 |
+| 速率真的被限住 | `bucket_never_exceeds_the_rate_over_a_long_run`（整数断言，不靠 sleep）；`bucket_wait_is_rounded_up_never_down`；实测见下 |
+| 限速不阻塞取消 | `limiter_can_be_cancelled_while_waiting` |
+| 目标数上限 | `check_targets_enforces_count_and_reserved`、`policy_rejects_out_of_range_values_instead_of_clamping`（只能收紧） |
+| 保留网段白名单机制 | `multicast_broadcast_and_reserved_are_rejected_with_a_reason`、`reserved_boundaries_do_not_bleed`、`private_and_loopback_are_deliberately_allowed`；`--allow-reserved` 放行有测试 |
+| 审计日志可导出、不含敏感内容 | `audit_line_is_single_line_json_with_the_fields_we_promised`（逐字段点名）、`audit_log_refuses_a_file_it_did_not_write`；字段集合里没有 MAC/厂商/主机名 |
+| 审计行不会被注入 | `audit_line_escapes_hostile_target_specs`（带引号/反斜杠/换行的目标规格仍产出单行合法 JSON） |
+| 首次启动提示 | `consent_needs_notice_until_the_version_is_reached`、`consent_notice_text_says_what_it_must_say`；CLI 实测见下 |
+| 文档明确「仅用于获授权网络」 | 三端共用 `consent::notice_text()`；README 与 `docs/signing.md` 同步 |
+| 签名不伪造 | `artifact-manifest.sh` 的 `signed` 字段；密钥导入失败**显式报错**且不改成 `true`（实测见下） |
+| 平台签名脚本可执行 | `bash -n` 语法检查 + 无密钥分支实跑；Android / Windows 的正式签名分支需要密钥，**未实测**（见下） |
+
+**测试与实测**
+
+- 单元/集成测试：+30（`policy.rs` 20 + CLI 6 + TUI 4），工作区合计
+  **460 passed / 0 failed**（CLI 45 → 51，TUI 43 → 47）
+- `cargo fmt --check` / `cargo clippy --workspace --all-targets -- -D warnings`
+  干净；GUI（独立工程）另跑一遍同样干净（首次因 Windows 文件锁报
+  `os error 5`，重试即通过）
+- 真实冒烟（Windows 本机）：
+  1. **首次运行**打印授权提示并把状态落到 `~/.cping/consent`；**第二次运行不再打印**
+  2. **限速实测**：目标 `127.0.0.0/24`（254 个回环地址）
+     - `--max-pps 0`（不限速）：**644 ms**
+     - `--max-pps 50`：**4708 ms**，与理论值（启动 ~0.6 s + 突发 50 +
+       其余 204 个 ÷ 50 pps ≈ 4.08 s）吻合
+  3. `-t 224.0.0.0/29` → 退出码 2，提示「组播地址：一个探测会打扰整组主机」
+     并给出 `--allow-reserved`；加放行后真的发出（结果如实为离线，无应答）
+  4. `-t 192.0.2.5` → 退出码 2，提示「文档示例网段 TEST-NET-1（RFC 5737）」
+  5. `--max-targets 3` + 6 个目标 → 退出码 2；`--max-targets 70000` →
+     「只能收紧，不能放宽」；`--max-pps 100001` → 「要关闭限速请写 0」
+  6. `--audit x.jsonl` + `--watch 1 --rounds 3` → 文件首行 `CPING-AUDIT 1`，
+     事件序列 `session_start / round ×3 / session_end`，轮次 0/1/2/3/3，
+     `exitCode` 只出现在 `session_end`
+  7. 审计路径指向别人的文件 → 退出码 2「不是 CPing 审计文件，拒绝追加」；
+     追加到已有审计文件不重写表头、不丢已有记录
+  8. `artifact-manifest.sh` 在无密钥时产出 `signed: false` 并打印补签方法；
+     故意给一个坏密钥 → **显式报错**且 `signed` 仍为 `false`
+  9. 三个新脚本均过 `bash -n`
+- **未实测**（如实登记）：
+  - gpg **成功**签名路径：本机 gpg 在 Git Bash 下把 `GNUPGHOME` 路径解释错，
+    只跑通了「导入失败 → 显式报错 → signed 保持 false」这一支；
+    成功分支需在 Linux CI 上验证
+  - Windows Authenticode 正式签名（需要代码签名证书）、Android 正式签名
+    （需要 keystore）：脚本的无密钥分支可跑，**有密钥分支未实测**
+  - `scripts/sign-windows.ps1` 的语法未在真实 PowerShell 里实跑过
+  - Linux deb 签名：本仓库当前不产出 deb，`docs/signing.md` 只给流程说明
+  - TUI / GUI 的限速人工冒烟：TUI 用单元测试驱动了策略装配与状态栏提示，
+    未做真实键盘操作下的限速观察；GUI 沿用默认策略，未做界面观察

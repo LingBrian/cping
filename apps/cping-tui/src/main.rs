@@ -27,6 +27,10 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
+    // M17：首次运行的授权提示。必须打印在进入备用屏幕**之前**——
+    // 进了全屏就看不见了。TUI 里不做确认交互（同 CLI 的理由）。
+    app::print_authorization_notice();
+
     // panic 也要恢复终端，否则用户的 shell 会卡在 raw mode
     let hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
@@ -77,6 +81,9 @@ fn print_help() {
   --alert-uptime <百分比> 可用率阈值（默认 90；严格小于才报）
   --alert-cooldown <秒> 同一主机同一类告警的冷却窗口（默认 300）
   --mute-alerts       启动即静音（规则照常求值，只是不通知）
+  --max-pps <n>       全局速率上限（探测包/秒，默认 500；写 0 = 不限速）
+  --max-targets <n>   目标数上限（只能比结构上限 65536 更严）
+  --allow-reserved    放行组播 / 保留段等特殊网段（默认拒绝）
   --help              显示本帮助
 
 探测后端:
