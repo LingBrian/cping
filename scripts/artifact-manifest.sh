@@ -62,8 +62,19 @@ SIGNED="false"
 SIGN_TOOL=""
 GNUPGHOME_TMP=""
 
-cleanup() { [[ -n "$GNUPGHOME_TMP" ]] && rm -rf "$GNUPGHOME_TMP"; }
-trap cleanup EXIT
+cleanup() {
+  # 必须用 if 而不是 `[[ -n ... ]] && rm ...`：变量为空时后者的返回值是 1，
+  # 而它挂在 EXIT trap 上——trap 里最后一条命令的退出码会成为整个脚本的
+  # 退出码，于是一个**成功的发布会以 exit 1 收场**。v2.0.0 以来每次
+  # tag 触发的 publish 都死在这一步，MANIFEST.json 因此从没上过 Release
+  # （v2.0.0 附件里没有它，就是这条路留下的痕迹）。
+  if [[ -n "$GNUPGHOME_TMP" ]]; then
+    rm -rf "$GNUPGHOME_TMP"
+  fi
+}
+# 双保险：先把脚本的退出码取走，cleanup 之后原样 exit。清理失败不允许
+# 改写发布结果——要报错也该在正文里显式报，而不是让 trap 悄悄改退出码。
+trap 'rc=$?; cleanup; exit $rc' EXIT
 
 if [[ -n "${CPING_SIGNING_KEY:-}" ]]; then
   if ! command -v gpg >/dev/null 2>&1; then

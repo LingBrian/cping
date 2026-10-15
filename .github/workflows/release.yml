@@ -284,10 +284,15 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: dist-linux-gui-x64
+          # 上传**重命名后的扁平目录**，而不是原始 bundle 路径：后者的公共
+          # 祖先是 bundle/，artifact 里会带 deb/、appimage/ 子目录，
+          # merge-multiple 下载后留在子目录里——publish 的顶层 find 与
+          # files: dist/* 都看不见，deb / AppImage 会从 Release 里
+          # **静默缺席**（上一版上传的就是原始路径，重命名步骤白做了）。
           path: |
-            apps/cping-gui/src-tauri/target/release/bundle/deb/*.deb
-            apps/cping-gui/src-tauri/target/release/bundle/appimage/*.AppImage
-          if-no-files-found: warn
+            release/*/cping-gui-*
+            release/*/SHA256SUMS.txt
+          if-no-files-found: error
 
   # ---------------------------------------------------------------------------
   # Android：universal APK（含 arm64-v8a / armeabi-v7a / x86_64 / x86）
@@ -350,6 +355,15 @@ jobs:
           mkdir -p "$out"
           find apps/cping-gui/src-tauri/gen/android/app/build/outputs/apk \
             -name '*.apk' -exec cp -v {} "$out/" \;
+          # 与其它产物统一命名（都带版本号）：app-universal-release-unsigned.apk
+          # → cping-<v>-android-universal-release-unsigned.apk。
+          # v2.0.0 人工发版时就是这个名字，自动链路不该丢掉这个约定。
+          shopt -s nullglob
+          for f in "$out"/app-*.apk; do
+            base="$(basename "$f")"            # app-universal-release-unsigned.apk
+            suffix="${base#app-universal-}"    # release-unsigned.apk
+            mv "$f" "$out/cping-$v-android-universal-$suffix"
+          done
           ls -la "$out"
 
       - name: APK 签名与校验（M17）
@@ -401,6 +415,28 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      - name: 展平产物目录（防静默缺席）
+        # 有的 job 上传的 artifact 自带子目录——merge-multiple 会原样保留，
+        # 而下面的 find -maxdepth 1 与 files: dist/* 都只看顶层，产物会
+        # **静默缺席且不报错**（v2.7.0 第一次发布时 deb / AppImage 就这么
+        # 消失在 deb/、appimage/ 子目录里）。这里把它们移到顶层；
+        # 重名直接失败，绝不悄悄覆盖。
+        run: |
+          set -euo pipefail
+          cd dist
+          while IFS= read -r -d '' f; do
+            base="$(basename "$f")"
+            if [[ -e "$base" ]]; then
+              echo "::error::产物重名：$f 与顶层已有的 $base 冲突" >&2
+              exit 1
+            fi
+            mv "$f" "$base"
+            echo "展平：$f → $base"
+          done < <(find . -mindepth 2 -type f -print0)
+          find . -mindepth 1 -type d -empty -delete
+          echo "==== 展平后 ===="
+          ls -la
 
       - name: 重新计算统一 SHA256SUMS
         # 各 job 产出的 SHA256SUMS 只覆盖自己那一份；这里合并成一份全局清单。

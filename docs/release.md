@@ -292,12 +292,19 @@ CI 绿了再推 tag」——发布 v2.7.0。
 | 2 | `release.yml` 的 `windows` job 只构建 TUI + CLI | 自动链路**从来没有** Windows 桌面版——v2.0.0 那个 `.exe` 是本机人工构建后上传的 | 新增 `windows-gui` job；签名步骤排在**打包之前** |
 | 3 | `publish.needs` 漏掉 `linux-gui`（自 v2.0.0 引入该 job 起就漏） | 这是**竞态**：顺序一反过来，deb / AppImage 会**静默缺席且不报错** | 补全为覆盖**每一个**产出 artifact 的 job |
 | 4 | 本地 `stable` 工具链落后于 CI（1.97.1 vs 1.99.0） | 推 `main` 后首次 CI 被新 lint `clippy::drain_collect` 打红 | 修代码（`drain(..).collect()` → `mem::take`）+ 对齐工具链后**全量重检** |
+| 5 | `artifact-manifest.sh` 的 EXIT trap 把成功改成失败（`[[ ]] &&` 空变量返回 1） | 每次自动 publish 都以 exit 1 收场——**v2.0.0 附件里没有 `MANIFEST.json` 的真因** | cleanup 改显式 `if` + `trap 'rc=$?; cleanup; exit $rc'`；负向验证过 |
+| 6 | `linux-gui` 上传原始 bundle 路径（带 `deb/`、`appimage/` 子目录），重命名步骤的产物没被上传 | publish 的顶层 `find` 与 `files: dist/*` 都看不见 → deb / AppImage **静默缺席** | 上传扁平的重命名目录 + publish 下载后**展平**（重名即报错） |
+| 7 | `sign-android.sh` 在 build-tools 37+ 选中 `lib/apksigner.jar` 并直接执行 | `Exec format error`，签名校验整个失效（且无密钥时说辞与事实不符） | 优先可执行脚本、jar 走 `java -jar`；说辞以 verify 实际输出为准 |
 
 第 4 条最值得记：**「本地全绿」在工具链版本不一致时没有意义**。CI 自 10-14 起
 就没跑过，`stable` 已前进两个小版本；本地 `rustup update stable` 到 1.99 后，
 `cargo clean -p` 掉三个自有 crate **强制重检**了全工作区与 GUI 壳（各一次真实全量
 编译），确认只有这一条。复核用的是**负向验证**：还原旧写法后，本地 clippy 复现出
 与 CI **逐字相同**的报错（同文件同列 `crates/cping-core/src/timeseries.rs:281:45`）。
+
+第 5–7 条同属一个根因：**这条发布链路自 v2.0.0 起从来没有真正走通过一次**——
+publish 一直死在 trap 上，所以「清单缺文件」「签名校验失效」这类只影响产出的
+缺陷全部被掩盖着。修好第 5 条后，链路第一次跑到底，第 6、7 条才现形。
 
 产物清单与 SHA256 见该 Release 附件；产品侧变更见 `docs/release-notes-v2.7.0.md`。
 

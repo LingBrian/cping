@@ -133,6 +133,32 @@
   `stable` 已从 1.97 前进到 1.99——本地把工具链对齐后**清掉自有 crate 缓存重检**
   了全工作区与 GUI 壳，确认这是唯一一条（`windows` job 的 `cargo test --workspace`
   在 1.99 下本来就是绿的，说明只有 lint 与代码无关）。
+- **修完 lint 重推 tag 后，`publish` 仍失败——暴露了自动发布链路自 M17 起就有的
+  一串问题**，全部在第一次真正走完这条链路时现形：
+  - **`scripts/artifact-manifest.sh` 的 EXIT trap 会把成功改成失败**：
+    `cleanup()` 写的是 `[[ -n "$VAR" ]] && rm -rf ...`，变量为空时返回 1，
+    而 trap 里最后一条命令的退出码会覆盖整个脚本的退出码——于是清单生成成功、
+    publish 却以 exit 1 收场。**这就是 v2.0.0 附件里没有 `MANIFEST.json` 的原因**
+    （每次 tag 触发的 publish 都死在这步，v2.0.0 是人工发的）。修法：cleanup 改
+    显式 `if`，trap 改 `rc=$?; cleanup; exit $rc` 双保险。做过负向验证：
+    旧版对一个正常目录返回 1，新版返回 0。
+  - **deb / AppImage 从未真正进入产物清单**：`linux-gui` job 有「重命名并生成
+    校验和」步骤，但上传的却是**原始 bundle 路径**——artifact 里带 `deb/`、
+    `appimage/` 子目录，而 publish 的 `find -maxdepth 1` 与 `files: dist/*`
+    都只看顶层。上传改成扁平的重命名目录，另在 publish 下载后加**展平步骤**
+    （重名即报错，绝不悄悄覆盖），堵住这一类「子目录静默缺席」。
+  - **`sign-android.sh` 在 build-tools 37+ 上签名校验整个失效**：新版 SDK 把
+    apksigner 挪进 `lib/apksigner.jar`，脚本按文件名排序恰好选中 jar 并直接执行，
+    报 `Exec format error`。修法：优先找可执行包装脚本，只有 jar 时走
+    `java -jar`。
+  - **无密钥时的说辞与事实不符**：脚本无条件打印「当前 APK 用的是 Android Debug
+    密钥签名——可侧载试用」，但 verify 从未成功过，包其实是 gradle 的
+    **未签名原始产物**。改为以 apksigner 实际输出为准、验证不过就明说
+    「不可直接安装」；发布说明同步更正（v2.0.0 那个「debug 证书已签名」的包是
+    当时本机人工补签的）。
+  - **Android 产物名补上版本号**：`app-universal-release-unsigned.apk` →
+    `cping-<v>-android-universal-release-unsigned.apk`，与其它产物及 v2.0.0
+    的人工命名一致。
 
 ## [2.6.0] - 2026-10-15
 

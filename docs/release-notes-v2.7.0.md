@@ -179,8 +179,11 @@ Get-FileHash .\cping-cli-2.7.0-windows-x64.zip -Algorithm SHA256     # Windows
 
 > **签名状态：本版未做代码签名。** 仓库未配置 Windows 证书与 Android keystore，
 > 因此 Windows 产物**未做 Authenticode 签名**（首次运行会弹「未知发布者」），
-> Android 包用的是 **Android Debug 证书**——**可侧载试用，不能上架应用商店**。
-> 这两件事在 `MANIFEST.json` 里如实标注，**不用自签证书冒充正式签名**。
+> Android 包是 gradle 构建的**原始产物（`release-unsigned.apk`，未签名）——
+> 不可直接安装**；要侧载需自行用 debug 或正式密钥签名（`scripts/sign-android.sh`）。
+> v2.0.0 附带的「debug 证书已签名」包是当时本机人工补签的，本次自动链路
+> 没有密钥就**不做也不声称**任何签名。这两件事在 `MANIFEST.json` 里如实标注，
+> **不用自签证书冒充正式签名**。
 
 ---
 
