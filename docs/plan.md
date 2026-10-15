@@ -308,7 +308,7 @@ CLI 模式不初始化终端 UI。
 | M13 | v2.1.0 | 资产识别 | 端口指纹、服务横幅、设备类型推断 |
 | M14 | v2.2.0 | 历史与趋势 | 时序落盘、可用率报表、离线率曲线 |
 | M15 | **v2.3.0** ✅ | 告警与通知 | 阈值告警、Webhook / 邮件 / 系统通知 |
-| M16 | v2.4.0 | 配置与模板 | 扫描模板、配置导入导出、CLI 配置文件 |
+| M16 | **v2.4.0** ✅ | 配置与模板 | 扫描模板、配置导入导出、CLI 配置文件 |
 | M17 | v2.5.0 | 安全与合规 | 签名制品、权限最小化、审计日志、限速 |
 | M18 | v2.6.0 | 国际化与无障碍 | i18n（中/英）、键盘全导航、屏幕阅读器 |
 | M19 | v2.7.0 | 规模化性能 | 万级目标、流式结果、内存预算与背压 |
@@ -729,3 +729,106 @@ RTT 本来就是 0 ms ——拿 0 当「没测到」的哨兵，会把一台**�
   `system` 通道只在 Windows 上跑过（Linux 的 `notify-send` 未在真机验证）；
   `smtp` 通道未接真实中继（只覆盖了构造与错误路径）
 
+
+### M16 — v2.4.0 配置与模板（实施记录，2026-10-15）
+
+**实现文件**
+
+- `crates/cping-core/src/profile.rs`（新增，约 1140 行含 20 条测试）
+  - `CONFIG_SCHEMA_VERSION = 2`、`SCHEMA_VERSION_KEY`、`DEFAULT_PROFILE_KEY`、
+    `PROFILES_SECTION`
+  - `ScanProfile`（`name` / `spec` / `range` / `timeout_ms` / `concurrency` /
+    `mode` / `note` / `extra`）带 `validate()` / `probe()` / `overrides()` /
+    `describe()` / `target_count()`
+  - `ProbeOverrides`：模板**只**覆盖探测参数（不含导出路径/通知通道，见下）
+  - `UnknownEntry`（`section` / `key` / `raw` / `path()`）
+  - `ConfigDocument`：`schema_version` / `default_profile` / `profiles` /
+    `app` / `unknown`；`to_toml` / `from_toml` / `load_from_path` /
+    `save_to_path` / `select_profile` / `upsert_profile` / `remove_profile` /
+    `profile_names` / `validate`
+  - `migrate()`：v1 → v2；`schema_version` 高于支持值时**拒绝读取**
+  - `APP_SECTIONS` / `APP_KEYS`：应用配置的已知面，`[probe]` 等小节的读写
+    **委托**给 `AppConfig::to_toml` / `from_toml`（唯一实现）
+- `crates/cping-core/src/target.rs`：新增 `TargetRange::parse_key` / `label_zh`
+- `crates/cping-core/src/lib.rs`：导出 `profile` 模块与相关类型
+- `apps/cping-cli/src/args.rs`：`--config` / `--profile` / `--list-profiles` /
+  `--dump-config`，以及 `apply_config()`（三层合并 + `config_notes`）
+- `apps/cping-cli/src/main.rs`：`print_config_notes()` / `print_profiles()` /
+  `write_effective_config()` 与两个早退分支
+- `cping.example.toml`（新增）：三份模板 + 全部应用配置 + 逐条说明
+
+**实现时定死的几处边界（本节初版计划只写了「配置与模板」，没说清这几处）**
+
+1. **优先级是「命令行 → 模板 → `[probe]`」，不是「模板优先」**。
+   模板盖掉用户在命令行上手敲的值，是最难查的一类问题（「我明明写了
+   `--timeout 5000`」）。因此模板只填空缺，且**每一层提供了哪些字段都打印出来**。
+   被盖掉的配置值也一并说明；**值相同不算冲突**——同一件事说两遍会把真正
+   重要的说明淹掉。
+2. **`--profile` 点名的模板不存在就报错**，并列出所有现有模板名，绝不悄悄
+   退回 `default_profile`。「我明明选了 prod 怎么扫的是开发网段」比报错危险得多。
+3. **模板只管「扫什么、怎么扫」**。导出路径、`--history`、通知通道、告警规则
+   **刻意不进模板**：否则 CI 里换个模板会连通知一起换掉，排查起来是场噩梦。
+   `--dump-config` 的输出末尾会明写「哪些项刻意未写入」。
+4. **目标规格只能落进模板**。`[probe].prefix` 是「单个 C 类前三段」，
+   装不下 CIDR 与多网段；硬塞会丢信息。所以 `ScanProfile` 保留 `spec` 原文，
+   `probe()` 里 `prefix: None`，`--dump-config` 也把目标写进 `[[profiles]]`。
+5. **注释不保留，未知键保留**。受限子集解析器不建 AST，保留注释需要一个
+   完整的格式保持型 TOML 实现；未知键则必须保留——悄悄吃掉用户不认识的项
+   是不可接受的。这条取舍写在生成文件的第一行注释里。
+6. **`schema_version` 只向前兼容一个方向**：低版本读入时自动迁移并把动作
+   打印出来；高版本**拒绝读取**。猜着读会吃掉用户配置里我们不认识的项。
+7. **`TargetRange::parse_key` 写错返回 `None`，不回落成 `Standard`**。
+   配置里写错一个范围却静默按 255 个目标去扫，是「跑完才发现扫错了」的事故。
+8. **`--list-profiles` / `--dump-config` 走早退分支，位置在 `validate()` 之前**。
+   `validate()` 第一条就是「必须有目标」，而列模板/导出配置恰恰不需要目标；
+   放在后面会永远执行不到（与 `--list-backends` / `--notify-list` 同一处理）。
+
+**范围决定：本版只接 CLI，TUI / GUI 暂不消费模板**
+
+- 依据：M16 计划原文第 3 条写的是「**CLI** 配置文件」，验收要点也只涉及
+  「旧配置仍可读」「模板切换不静默丢弃用户改动」两条，均已满足。
+- 核心 API（`ConfigDocument` / `ScanProfile` / `ProbeOverrides`）已就绪，
+  三端接的是**线**而不是规则，后续接入不需要再动 `cping-core`。
+- TUI 的目标模型是「单个 C 类前三段 + 矩阵视图」（`parse_prefix` 决定矩阵能否
+  渲染），与模板支持的 CIDR / 多网段不是同一个模型；硬接会出现「选了模板但
+  矩阵是空的」。GUI 侧则需要先设计模板选择器的界面位置。
+  两者并入 M18（i18n 与无障碍）统一动界面，避免同一块 UI 改两遍。
+
+**验收对照**
+
+| 验收要点 | 落地情况 |
+| --- | --- |
+| 旧版本配置文件仍能读取 | `v1_config_without_schema_version_is_migrated_and_reported`（核心）+ `m16_v1_config_is_migrated_and_still_readable`（CLI）；迁移动作逐条打印 |
+| 配置完整往返（含未知键保留） | `round_trip_is_byte_stable`、`unknown_keys_are_preserved_verbatim`、`m16_dumped_config_keeps_unknown_keys` |
+| schema 版本与迁移 | `a_newer_schema_version_is_refused_not_guessed`、`migration_is_deterministic` |
+| 模板切换不静默丢弃用户改动 | 模板只填空缺；`m16_cli_values_always_win_over_the_profile`、`m16_same_value_is_not_reported_as_a_conflict`；`配置来源：…` 逐行打印 |
+| 模板不存在不静默退回 | `m16_unknown_profile_is_an_error_listing_what_exists` |
+| `[profiles]` 单方括号被拒绝 | `profiles_must_be_written_as_an_array_of_tables`（核心） |
+| 参数漂移守卫 | `app_keys_cover_everything_app_config_writes`（`APP_KEYS` 与 `AppConfig::to_toml` 对表） |
+| `--dump-config` 可复现 | `m16_dumped_config_round_trips_through_the_reader`（导出 → 读回 → 再合并，结果一致） |
+
+**测试与实测**
+
+- 单元/集成测试：+37（`profile.rs` 20 + CLI 参数 13 + CLI 导出侧 4），
+  工作区合计 **430 passed / 0 failed**（CLI 自身 28 → 45）
+- `cargo fmt --check` / `cargo clippy --workspace --all-targets -- -D warnings`
+  工作区干净；GUI（独立工程）另跑一遍同样干净
+- 真实冒烟（Windows 本机）：
+  1. `--config prod.toml --list-profiles` 正确列出 2 份模板，标出
+     `default_profile`，目标数量分别 1 / 2
+  2. 不给 `--profile` → 用 `default_profile`；给 `--profile dmz` →
+     `hosts_only` 2 个目标 / `TCP:445` / 2000 ms / 并发 8 全部生效
+  3. `--profile nope` → 退出码 2 并列出「现有模板：lan, dmz」；
+     `--profile` 缺 `--config`、`--list-profiles` 缺 `--config` 同样退出码 2
+  4. 命令行 `-t` / `--range` / `--timeout` 分别盖掉模板对应字段，
+     `配置来源：` 逐条说明；模板仍提供未被覆盖的 `concurrency` / `mode`
+  5. v1 旧配置（`schema_version = 1`，含陌生的 `[my_plugin]` 小节）读入时
+     自动迁移为 `default` 模板，并报告「另有 2 个本程序不认识的键，已原样保留」
+  6. `--dump-config` 写出的文件读回后，目标/超时/并发与首次完全一致；
+     `[my_plugin]` 小节与模板 `note` 均保留；覆盖原有规格时明确提示
+  7. 无目标的 `--dump-config` 只写 `[probe]` 并提示目标需每次用 `--target`
+  8. `schema_version = 9` → 退出码 2「拒绝读取」；`[profiles]` 单方括号 →
+     退出码 2「模板必须写成数组表 [[profiles]]」
+  9. 配置文件缺失 / 写出路径不可写 → 均退出码 2，**不静默按默认值跑**
+- 未实测：TUI / GUI 侧的模板消费（本版未接，见上「范围决定」）；
+  Linux / Android 上的 `--config`（与平台无关的纯文件读写，但未在真机跑过）

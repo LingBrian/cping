@@ -1,0 +1,94 @@
+# CPing 配置文件示例（M16 起支持）
+#
+# 把它复制成自己的配置，然后：
+#   cping-cli --config my.toml --list-profiles     # 看有哪些模板
+#   cping-cli --config my.toml --profile lan       # 用 lan 这份模板扫
+#   cping-cli --config my.toml                     # 不给 --profile，用 default_profile
+#
+# 几点要先说清楚：
+#   · 模板段必须写成数组表 [[profiles]]（**双方括号**）。写成 [profiles] 会明确报错，
+#     不会被悄悄忽略——「配了没生效」比报错难查得多。
+#   · 合并优先级（高 → 低）：命令行 → 模板 → 下面 [probe] 里的值。
+#     模板**只填空缺**，绝不覆盖你在命令行上手敲的值；每次运行都会把
+#     「哪些字段来自哪一层」逐行打印出来。
+#   · 本解析器是受限 TOML 子集：只支持顶层键值、[section]、[[array-of-tables]]、
+#     # 注释，以及字符串/整数/布尔。注释**不会**被保留（写回时会丢），
+#     不认识的键会原样保留。
+#   · schema_version 决定迁移路径。老文件（v1，只有 [probe]）读入时自动升级到 v2；
+#     比本程序更新的版本会被**拒绝读取**——猜着读会把你配置里我不认识的项吃掉。
+
+schema_version = 2
+
+# 不给 --profile 时用哪一份模板。留空/删掉就必须显式给 --profile。
+default_profile = "lan"
+
+# ---------------------------------------------------------------------------
+# 扫描模板：把「扫什么、怎么扫」固化下来，CI 与巡检脚本复用同一份
+# ---------------------------------------------------------------------------
+
+# 办公网段：CIDR + 只扫主机地址（排除网络地址与广播地址）
+[[profiles]]
+name = "lan"
+spec = "192.168.1.0/24"
+range = "hosts_only"
+timeout_ms = 1000
+concurrency = 32
+mode = "icmp"
+tcp_port = 80
+note = "办公网段"
+
+# 对外 DMZ：换探测方式（TCP:445），超时放宽到 2 秒
+[[profiles]]
+name = "dmz"
+spec = "10.0.0.0/29"
+range = "standard"
+timeout_ms = 2000
+concurrency = 8
+mode = "tcp"
+tcp_port = 445
+note = "DMZ，走 SMB 探测"
+
+# 多网段混写也是允许的，与 --target 同一套语法
+[[profiles]]
+name = "mixed"
+spec = "10.0.0.0/30, 10.0.1.7, 172.16.5.0/29"
+range = "standard"
+timeout_ms = 1500
+concurrency = 24
+mode = "icmp"
+tcp_port = 80
+note = ""
+
+# ---------------------------------------------------------------------------
+# 应用配置（三端共用；CLI 只用得到 [probe] 里的探测参数）
+# ---------------------------------------------------------------------------
+
+[probe]
+# v1 遗留字段：单个 C 类前三段的目标。**不要在新建的配置里用它**——
+# 它装不下 CIDR 与多网段，目标请写进 [[profiles]] 的 spec。
+prefix = ""
+range = "standard"
+timeout_ms = 1000
+concurrency = 32
+mode = "icmp"
+tcp_port = 80
+low_max_ms = 50
+mid_max_ms = 100
+
+[colors]
+low = "#00FF00"
+mid = "#FFFF00"
+high = "#99B4D1"
+offline = "#C0C0C0"
+error = "#FF6B6B"
+
+[ui]
+hide_offline = false
+view = "matrix"
+
+[monitor]
+enabled = false
+interval_ms = 30000
+notify_appeared = true
+notify_disappeared = true
+capacity = 1000

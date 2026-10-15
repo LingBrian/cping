@@ -28,6 +28,7 @@ pub mod neighbor;
 pub mod notify;
 pub mod oui;
 pub mod probe;
+pub mod profile;
 pub mod registry;
 pub mod result;
 pub mod scheduler;
@@ -104,6 +105,10 @@ pub use notify::{
 pub use oui::{entry_counts, mac_to_string, parse_mac, vendor_of, DATA_SOURCE};
 pub use probe::{
     MockBackend, MockPolicy, MockResponse, ProbeBackend, ProbeOutcome, RecordingBackend,
+};
+pub use profile::{
+    ConfigDocument, ProbeOverrides, ScanProfile, UnknownEntry, CONFIG_SCHEMA_VERSION,
+    DEFAULT_PROFILE_KEY, PROFILES_SECTION, SCHEMA_VERSION_KEY,
 };
 pub use registry::{
     backend_for, backend_for_run, resolve_for_run, BackendCaps, BackendId, BackendRegistry,

@@ -6,7 +6,7 @@
 
 Rust 核心 · TUI（ratatui）· 桌面 GUI（Tauri 2 + Vue 3）· Android
 
-[![Release](https://img.shields.io/badge/release-v2.3.0-111827)](../../releases)
+[![Release](https://img.shields.io/badge/release-v2.4.0-111827)](../../releases)
 [![CI](https://github.com/LingBrian/cping/actions/workflows/ci.yml/badge.svg)](https://github.com/LingBrian/cping/actions/workflows/ci.yml)
 [![Tests](https://img.shields.io/badge/tests-336%20passed-brightgreen)](docs/testing.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -77,12 +77,13 @@ cping/
 │   ├── alerts                          M15：告警规则（纯函数匹配）· 冷却去重 · 静音 · 状态落盘
 │   ├── notify                          M15：五通道通知（console/system/webhook/command/smtp）
 │   ├── timefmt                         M15：时间算法（三端共用，同一处实现）
+│   ├── profile                         M16：配置文件 · 命名模板 · schema 版本与迁移 · 未知键保留
 │   ├── oui/neighbor/hostname/enrich    M7：厂商识别 · ARP 取 MAC · 反查主机名 · 信息补全
 │   ├── snapshot                        结果快照落盘与恢复（严格解析，坏数据宁可报错）
 │   ├── data/                           IEEE OUI 三表（54,190 条，编译期嵌入）
 │   └── native.rs                       Windows/Linux/Android 原生 ICMP 与 TCP
 ├── apps/cping-tui/           ratatui + crossterm 交互式终端界面
-├── apps/cping-cli/           M10：无头命令行（可判退出码，适合脚本与计划任务）
+├── apps/cping-cli/           M10/M16：无头命令行（可判退出码）+ 配置文件与模板
 ├── apps/cping-gui/           Tauri 2 + Vue 3 + TypeScript
 │   ├── src/                  桌面布局 + 移动布局（自动切换）
 │   └── src-tauri/            Tauri 容器（唯一前后端通道）
@@ -139,6 +140,11 @@ cping-cli -t 192.168.1 --watch 30 --alert --notify console,system
 cping-cli -t 192.168.1 --watch 30 --alert --notify webhook --notify-webhook http://10.0.0.5:9000/cping
 cping-cli -t 192.168.1 --watch 30 --alert --notify-cmd "curl -s -d {json} https://example.com/h"
 cping-cli --notify-list            # 本平台各通知通道的可用性与原因
+# M16：配置文件与命名模板（CI / 巡检脚本复用同一份）
+cping-cli --config prod.toml --list-profiles      # 看有哪些模板、各扫多少目标
+cping-cli --config prod.toml --profile dmz --out dmz.csv
+cping-cli --config prod.toml                      # 不给 --profile 就用 default_profile
+cping-cli -t 10.0.0.0/24 -c 64 --dump-config nightly.toml   # 把生效参数固化下来
 ```
 
 退出码：`0` 全部在线 / `1` 存在离线 / `2` 参数错误 / `3` 权限不足或后端不可用。
@@ -162,6 +168,17 @@ cping-cli --notify-list            # 本平台各通知通道的可用性与原�
 > （队列满丢弃并计数），绝不阻塞扫描。`webhook` 只支持 `http://`——
 > 本构建不含 TLS，`https://` 会被**明确拒绝**而不是静默明文发送；
 > 需要 https 请用 `--notify-cmd` 调 curl 等自带 TLS 的工具。
+>
+> `--config` 把「扫什么、怎么扫」固化成一份份**命名模板**（`[[profiles]]`，
+> **双方括号**；写成 `[profiles]` 会明确报错），模板段之外的 `[probe]` / `[colors]` /
+> `[ui]` / `[monitor]` 是三端共用的应用配置。合并优先级**高 → 低**：
+> **命令行 → 模板 → `[probe]`**——模板只填空缺，**绝不覆盖你在命令行上手敲的值**，
+> 而且每次都会把「哪些字段来自哪一层、哪条命令行盖掉了配置」逐行打印出来。
+> `--profile` 点名的模板不存在会**报错退出**（不会悄悄退回 `default_profile`）。
+> 配置文件带 `schema_version`：老文件（v1，只有 `[probe]`）自动迁移并打印迁移动作，
+> 比本程序更新的版本**拒绝读取**。**不认识的键原样保留，但注释不保留**
+> （受限子集解析器不建 AST——这条写在生成文件的第一行里）。
+> 可直接从 [`cping.example.toml`](cping.example.toml) 改起。
 
 ### TUI
 
@@ -240,7 +257,8 @@ cping-tui --prefix 192.168.1
 | v2.1.0 ✅ | M13 | 资产识别：开放端口与服务指纹、设备类型推断 |
 | **v2.2.0** ✅ | M14 | 历史与趋势：跨会话时序（版本化格式 + 降采样）、可用率报表、在线率曲线 |
 | **v2.3.0** ✅ | M15 | 告警与通知：四类规则（纯函数匹配）、冷却去重与静音、五通道通知、跨会话状态 |
-| v2.4.0–v2.7.0 | M16–M19 | 配置与模板 · 安全与合规 · 国际化与无障碍 · 规模化性能 |
+| **v2.4.0** ✅ | M16 | 配置与模板：命名扫描模板、schema 版本与迁移、未知键保留、CLI 直接消费模板 |
+| v2.5.0–v2.7.0 | M17–M19 | 安全与合规 · 国际化与无障碍 · 规模化性能 |
 | v3.0.0 | M20 | 生态与开放：插件接口、脚本化任务、对外 API（主版本） |
 
 各阶段详细功能与验收条件见 [`docs/plan.md`](docs/plan.md)「路线图」章节。
@@ -286,6 +304,12 @@ cping-tui --prefix 192.168.1
 - TUI 状态栏的本机地址尚未接入网卡枚举，显示「未知」，**不伪造**；
   MAC 与厂商已通过本机邻居表 + 离线 OUI 库接入。
 - 目标范围默认 `.1`–`.255`（对齐原版），`.0` 不参与探测。
+- **配置文件目前只由 `cping-cli` 消费**（M16）：核心 API（`ConfigDocument` /
+  `ScanProfile`）已就绪，TUI 与 GUI 的模板选择器随 M18 的界面工作一并接入——
+  TUI 的目标模型是「单个 C 类前三段 + 矩阵视图」，与模板支持的 CIDR / 多网段
+  不是同一个模型，硬接会出现「选了模板但矩阵是空的」。
+- **配置文件里的注释不会被保留**：解析器是受限 TOML 子集，不建 AST；
+  不认识的键会原样保留。写回前请自行备份带注释的原文件。
 - **仅用于你拥有或获授权管理的网络**；并发与目标数均有上限。
 
 ## License

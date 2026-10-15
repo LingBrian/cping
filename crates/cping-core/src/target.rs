@@ -76,6 +76,28 @@ impl TargetRange {
             TargetRange::HostsOnly => "hosts_only",
         }
     }
+
+    /// 从机器可读键解析。
+    ///
+    /// **不认识的名字返回 `None` 而不是回落成 `Standard`**：配置里写错一个
+    /// 范围却静默按 255 个目标去扫，是那种「跑完才发现扫错了」的事故。
+    /// 调用方负责把 `None` 变成一条明确的错误。
+    pub fn parse_key(text: &str) -> Option<TargetRange> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "standard" | "std" => Some(TargetRange::Standard),
+            "full" => Some(TargetRange::Full),
+            "hosts_only" | "hosts-only" | "hosts" => Some(TargetRange::HostsOnly),
+            _ => None,
+        }
+    }
+
+    pub const fn label_zh(self) -> &'static str {
+        match self {
+            TargetRange::Standard => "标准（.1–.255，255 个）",
+            TargetRange::Full => "全段（.0–.255，256 个）",
+            TargetRange::HostsOnly => "仅主机（.1–.254，254 个）",
+        }
+    }
 }
 
 /// 解析网段前缀。

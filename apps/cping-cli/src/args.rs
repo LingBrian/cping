@@ -68,6 +68,10 @@ pub const HELP: &str = r#"CPing 无头命令行 —— 批量 PING，结果可�
       --json <路径>       等价于 --out 且强制 JSON
   -q, --quiet             不打印人类可读摘要（只输出文件与退出码）
       --list-backends     列出本平台可用的探测后端与能力（含不可用的），然后退出
+      --config <路径>     读配置文件（模板 + [probe]/[colors]/[ui]/[monitor]）
+      --profile <名>      选用配置里的哪一份模板（名字不区分大小写）
+      --list-profiles     列出配置里的全部模板后退出（需同时给 --config）
+      --dump-config <路径> 把**这次实际生效**的参数写成配置文件后退出
   -h, --help              显示本帮助
   -V, --version           显示版本
 
@@ -88,6 +92,21 @@ pub const HELP: &str = r#"CPing 无头命令行 —— 批量 PING，结果可�
   cping-cli -t 192.168.1 --watch 30 --alert --notify webhook \
             --notify-webhook http://10.0.0.5:9000/cping
   cping-cli -t 192.168.1 --alert --notify-cmd "curl -s -d {json} https://example.com/h"
+  cping-cli --config prod.toml --profile dmz --out dmz.csv
+  cping-cli --config prod.toml --list-profiles
+  cping-cli -t 10.0.0.0/24 -c 64 --dump-config nightly.toml
+
+关于 --config / --profile：
+  配置文件把「扫什么、怎么扫」固化成一份份**命名模板**，CI 与巡检脚本复用同一份：
+  写 [[profiles]] 段（**双方括号**；写成 [profiles] 会明确报错而不是被忽略）。
+  合并优先级**高 → 低**：命令行 → 模板 → 配置的 [probe]。模板只填空缺，
+  绝不覆盖你在命令行上手敲的值；每次都会把「哪些字段来自哪一层」逐条打印出来。
+  --profile 点名的模板不存在会**报错退出**，不会悄悄退回 default_profile。
+  配置文件带 schema_version：低版本的旧文件（v1 的 [probe] 写法）会被自动迁移，
+  高版本会**拒绝读取**（猜着读会吃掉你不认识的项）。不认识的键原样保留，
+  但**注释不保留**（子集解析器不建 AST）。
+  --dump-config 只写「扫什么、怎么扫」：导出路径、--history、通知通道、告警规则
+  刻意不写进去——否则换个模板会把通知一起换掉。
 
 关于 --fingerprint：
   端口指纹是**独立于在线判定的第二趟探测**，只对在线主机做：
@@ -168,10 +187,34 @@ pub struct Args {
     pub quiet: bool,
     /// M12：只列出后端能力后退出。
     pub list_backends: bool,
+    /// M16：配置文件路径（`--config`）。
+    pub config: Option<String>,
+    /// M16：选用的模板名（`--profile`）。
+    pub profile: Option<String>,
+    /// M16：只列出配置文件里的模板后退出。
+    pub list_profiles: bool,
+    /// M16：把生效配置写到该路径后退出。
+    pub dump_config: Option<String>,
+    /// M16：从 `--config` 读到的文档（已迁移/已校验）。
+    pub config_doc: Option<cping_core::ConfigDocument>,
+    /// M16：配置相关的说明（迁移、字段来源、被命令行覆盖的项）。
+    ///
+    /// 主程序**必须把这串说明原样打印**：模板到底改了哪些参数、
+    /// 哪一条命令行参数盖掉了模板的值，都要说清楚。
+    /// 「我的模板明明设了 60 秒超时」这类疑问只能靠它解答。
+    pub config_notes: Vec<String>,
     pub help: bool,
     pub version: bool,
     /// 显式给出的 `--target`；用于判断「什么都没给」与「给了空串」的区别。
     pub target_given: bool,
+    /// M16：以下几项是否被命令行**显式**给过（用于「模板只填空缺」）。
+    ///
+    /// `pub(crate)` 而非 `pub`：这是解析过程中的记账，不是给外部读写的接口。
+    /// 构造 `Args` 时留 `false` 就等于「命令行没给过」，语义是安全的。
+    pub(crate) seen_range: bool,
+    pub(crate) seen_mode: bool,
+    pub(crate) seen_timeout: bool,
+    pub(crate) seen_concurrency: bool,
 }
 
 impl Default for Args {
@@ -209,9 +252,19 @@ impl Default for Args {
             out: None,
             quiet: false,
             list_backends: false,
+            config: None,
+            profile: None,
+            list_profiles: false,
+            dump_config: None,
+            config_doc: None,
+            config_notes: Vec::new(),
             help: false,
             version: false,
             target_given: false,
+            seen_range: false,
+            seen_mode: false,
+            seen_timeout: false,
+            seen_concurrency: false,
         }
     }
 }
@@ -285,6 +338,7 @@ impl Args {
                     args.target_given = true;
                 }
                 "--range" => {
+                    args.seen_range = true;
                     args.range = match take_value("--range")?.to_ascii_lowercase().as_str() {
                         "standard" => TargetRange::Standard,
                         "full" => TargetRange::Full,
@@ -297,6 +351,7 @@ impl Args {
                     };
                 }
                 "--mode" => {
+                    args.seen_mode = true;
                     let value = take_value("--mode")?.to_ascii_lowercase();
                     match value.as_str() {
                         "icmp" => args.mode = ProbeMode::Icmp,
@@ -312,9 +367,11 @@ impl Args {
                     if port == 0 {
                         return Err("--port 不能为 0".into());
                     }
+                    args.seen_mode = true;
                     args.mode = ProbeMode::Tcp { port };
                 }
                 "--timeout" => {
+                    args.seen_timeout = true;
                     let v = parse_u64("--timeout", &take_value("--timeout")?)?;
                     if v == 0 || v > MAX_TIMEOUT_MS {
                         return Err(format!("--timeout 必须在 1..={MAX_TIMEOUT_MS} 之间"));
@@ -322,6 +379,7 @@ impl Args {
                     args.timeout_ms = v;
                 }
                 "-c" | "--concurrency" => {
+                    args.seen_concurrency = true;
                     let v = parse_u64("--concurrency", &take_value("--concurrency")?)?;
                     if v == 0 || v > MAX_CONCURRENCY as u64 {
                         return Err(format!("--concurrency 必须在 1..={MAX_CONCURRENCY} 之间"));
@@ -454,6 +512,10 @@ impl Args {
                     args.alert = true;
                 }
                 "--notify-list" => args.notify_list = true,
+                "--config" => args.config = Some(take_value("--config")?),
+                "--profile" => args.profile = Some(take_value("--profile")?),
+                "--list-profiles" => args.list_profiles = true,
+                "--dump-config" => args.dump_config = Some(take_value("--dump-config")?),
                 "-o" | "--out" => {
                     let path = take_value("--out")?;
                     let format = ExportFormat::from_path(&path).ok_or_else(|| {
@@ -469,7 +531,150 @@ impl Args {
             }
             i += 1;
         }
+        args.apply_config()?;
         Ok(args)
+    }
+
+    /// M16：把 `--config` / `--profile` 合并进来。
+    ///
+    /// 规则只有一条，且**明确打印**：**命令行显式给过的参数永远赢**，
+    /// 模板只填空缺。模板盖掉用户在命令行上手敲的值是最难查的一类问题，
+    /// 所以这里不采用「模板优先」；被盖掉的配置值也会一并说出来。
+    ///
+    /// 优先级（高 → 低）：命令行 → 模板 → 配置文件的 `[probe]`。
+    fn apply_config(&mut self) -> Result<(), String> {
+        if self.list_profiles && self.config.is_none() {
+            return Err("--list-profiles 需要同时给 --config".into());
+        }
+        if self.profile.is_some() && self.config.is_none() {
+            return Err("--profile 需要同时给 --config（模板来自配置文件）".into());
+        }
+        let Some(path) = self.config.clone() else {
+            return Ok(());
+        };
+        // `--help` / `--version` 不该因为配置文件有问题就报错
+        if self.help || self.version {
+            return Ok(());
+        }
+
+        let (doc, notes) =
+            cping_core::ConfigDocument::load_from_path(&path).map_err(|e| e.to_string())?;
+        self.config_notes.extend(notes);
+
+        let selected = doc
+            .select_profile(self.profile.as_deref())
+            .map_err(|e| format!("配置 {path}：{e}"))?
+            .cloned();
+        match &selected {
+            Some(p) => self
+                .config_notes
+                .push(format!("配置 {path}：使用模板 {}（{}）", p.name, p.spec)),
+            None => self.config_notes.push(format!(
+                "配置 {path}：没有选中模板，只取 [probe] 的探测参数"
+            )),
+        }
+
+        // ---- 目标规格：命令行 > 模板 ----
+        if let Some(p) = &selected {
+            if self.target_given && !self.target_spec.trim().is_empty() {
+                // 值一样就不必打扰——同一件事说两遍会把真正重要的说明淹掉
+                // （与 range/timeout 那几个字段同一套判据）。
+                if self.target_spec.trim() != p.spec.trim() {
+                    self.config_notes.push(format!(
+                        "命令行 --target 盖掉了模板 {} 的目标规格（模板里是 {:?}）",
+                        p.name, p.spec
+                    ));
+                }
+            } else {
+                self.target_spec = p.spec.clone();
+                self.target_given = true;
+                self.config_notes
+                    .push(format!("目标规格取自模板 {}：{}", p.name, p.spec));
+            }
+        }
+
+        // ---- 四个探测参数：逐字段决定来源，只报**最终生效**的那一层 ----
+        let app_probe = doc.app.probe.clone();
+        let profile_probe = selected.as_ref().map(|p| p.overrides());
+        let mut from_profile: Vec<&str> = Vec::new();
+        let mut from_app: Vec<&str> = Vec::new();
+        let mut overridden: Vec<&str> = Vec::new();
+
+        // range
+        if self.seen_range {
+            if conflict(range_from(&profile_probe, &app_probe), self.range) {
+                overridden.push("--range");
+            }
+        } else if let Some(v) = profile_probe.map(|p| p.range) {
+            self.range = v;
+            from_profile.push("range");
+        } else {
+            self.range = app_probe.range;
+            from_app.push("range");
+        }
+        // timeout
+        if self.seen_timeout {
+            if conflict(timeout_from(&profile_probe, &app_probe), self.timeout_ms) {
+                overridden.push("--timeout");
+            }
+        } else if let Some(v) = profile_probe.map(|p| p.timeout_ms) {
+            self.timeout_ms = v;
+            from_profile.push("timeout");
+        } else {
+            self.timeout_ms = app_probe.timeout_ms;
+            from_app.push("timeout");
+        }
+        // concurrency
+        if self.seen_concurrency {
+            if conflict(
+                concurrency_from(&profile_probe, &app_probe),
+                self.concurrency,
+            ) {
+                overridden.push("--concurrency");
+            }
+        } else if let Some(v) = profile_probe.map(|p| p.concurrency) {
+            self.concurrency = v;
+            from_profile.push("concurrency");
+        } else {
+            self.concurrency = app_probe.concurrency;
+            from_app.push("concurrency");
+        }
+        // mode
+        if self.seen_mode {
+            if conflict(mode_from(&profile_probe, &app_probe), self.mode) {
+                overridden.push("--mode/--port");
+            }
+        } else if let Some(v) = profile_probe.map(|p| p.mode) {
+            self.mode = v;
+            from_profile.push("mode");
+        } else {
+            self.mode = app_probe.mode;
+            from_app.push("mode");
+        }
+
+        if !from_profile.is_empty() {
+            self.config_notes
+                .push(format!("模板提供：{}", from_profile.join(" / ")));
+        }
+        if !from_app.is_empty() {
+            self.config_notes
+                .push(format!("配置 [probe] 提供：{}", from_app.join(" / ")));
+        }
+        if !overridden.is_empty() {
+            self.config_notes.push(format!(
+                "命令行 {} 盖掉了配置里的对应值",
+                overridden.join(" / ")
+            ));
+        }
+
+        if let Some(n) = &self.profile {
+            if selected.is_none() {
+                // `select_profile` 已经会在找不到时报错，这里只是兜底
+                return Err(format!("配置 {path} 里没有模板 {n:?}"));
+            }
+        }
+        self.config_doc = Some(doc);
+        Ok(())
     }
 
     /// 校验「必需项都在」，返回可执行的配置。
@@ -478,7 +683,9 @@ impl Args {
             return Ok(());
         }
         if !self.target_given || self.target_spec.trim().is_empty() {
-            return Err("缺少目标：请用 --target 指定（例如 --target 192.168.1）".into());
+            return Err("缺少目标：请用 --target 指定（例如 --target 192.168.1），\
+                 或用 --config + --profile 选一份带目标的模板"
+                .into());
         }
         self.mode.validate().map_err(|e| e.to_string())?;
         // M14：`--keep-days` 只在写时序文件时才有意义。静默忽略会让人以为
@@ -550,16 +757,18 @@ impl Args {
         } else {
             String::new()
         };
+        // M16：把「这次用了哪份模板」写进摘要。模板决定了扫哪个网段，
+        // 不写出来的话，同一份命令行换个默认模板就会扫出完全不同的结果。
+        let cfg = match (&self.config, &self.profile) {
+            (Some(path), Some(name)) => format!(" · 配置 {path}［模板 {name}］"),
+            (Some(path), None) => format!(" · 配置 {path}"),
+            (None, _) => String::new(),
+        };
         format!(
-            "{} · {} 并发 · 超时 {} ms{}{}{}{}{}",
+            "{} · {} 并发 · 超时 {} ms{cfg}{watch}{fp}{hist}{rep}{alerts}",
             self.mode.describe(),
             self.concurrency,
             self.timeout_ms,
-            watch,
-            fp,
-            hist,
-            rep,
-            alerts
         )
     }
 
@@ -696,6 +905,41 @@ impl Args {
         }
         Ok(())
     }
+}
+
+/// 「命令行给的显式值」与「配置里同一字段的值」是否真的不同。
+///
+/// 相同就不必打扰用户——同一件事说两遍只会把真正重要的说明淹掉。
+fn conflict<T: PartialEq>(from_config: T, from_cli: T) -> bool {
+    from_config != from_cli
+}
+
+fn range_from(
+    profile: &Option<cping_core::ProbeOverrides>,
+    app: &cping_core::config::ProbeConfig,
+) -> TargetRange {
+    profile.map(|p| p.range).unwrap_or(app.range)
+}
+
+fn timeout_from(
+    profile: &Option<cping_core::ProbeOverrides>,
+    app: &cping_core::config::ProbeConfig,
+) -> u64 {
+    profile.map(|p| p.timeout_ms).unwrap_or(app.timeout_ms)
+}
+
+fn concurrency_from(
+    profile: &Option<cping_core::ProbeOverrides>,
+    app: &cping_core::config::ProbeConfig,
+) -> usize {
+    profile.map(|p| p.concurrency).unwrap_or(app.concurrency)
+}
+
+fn mode_from(
+    profile: &Option<cping_core::ProbeOverrides>,
+    app: &cping_core::config::ProbeConfig,
+) -> ProbeMode {
+    profile.map(|p| p.mode).unwrap_or(app.mode)
 }
 
 fn parse_u64(name: &str, text: &str) -> Result<u64, String> {
@@ -1163,5 +1407,228 @@ mod tests {
                 .unwrap()
                 .notify_list
         );
+    }
+
+    // ------------------------------------------------------------------
+    // M16：配置文件与模板
+    // ------------------------------------------------------------------
+
+    /// 写一份临时配置，返回路径。
+    ///
+    /// 文件名由调用方指定（不用随机数、不引依赖），每个用例一个名字，
+    /// 这样并行跑测试时不会互相踩同一个文件。
+    fn write_config(name: &str, text: &str) -> String {
+        let dir = std::env::temp_dir().join("cping_cli_m16_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, text).unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
+    const CFG: &str = r#"schema_version = 2
+default_profile = "lan"
+
+[probe]
+prefix = ""
+range = "standard"
+timeout_ms = 1000
+concurrency = 32
+mode = "icmp"
+tcp_port = 80
+
+[[profiles]]
+name = "lan"
+spec = "10.1.0.0/30"
+range = "hosts_only"
+timeout_ms = 700
+concurrency = 12
+mode = "icmp"
+tcp_port = 80
+note = "办公网段"
+
+[[profiles]]
+name = "dmz"
+spec = "10.2.0.0/30"
+range = "standard"
+timeout_ms = 2500
+concurrency = 4
+mode = "tcp"
+tcp_port = 445
+note = ""
+"#;
+
+    #[test]
+    fn m16_profile_flags_require_config() {
+        // 模板来自配置文件，单独给 --profile 只能是个误会，必须报错
+        let e = Args::parse(&argv(&["--profile", "lan"])).unwrap_err();
+        assert!(e.contains("--config"), "{e}");
+        let e = Args::parse(&argv(&["--list-profiles"])).unwrap_err();
+        assert!(e.contains("--config"), "{e}");
+    }
+
+    #[test]
+    fn m16_missing_config_file_is_an_error_not_a_fallback() {
+        let e =
+            Args::parse(&argv(&["--config", "no/such/cping.toml", "-t", "10.0.0.1"])).unwrap_err();
+        assert!(e.contains("读取配置"), "{e}");
+        // 路径拼错绝不能退化成「按默认值跑」——那是最难查的一类问题
+        assert!(!e.contains("默认"), "{e}");
+    }
+
+    #[test]
+    fn m16_profile_fills_target_and_probe_params() {
+        let path = write_config("fill.toml", CFG);
+        // 命令行一个探测参数都没给，全部由模板填空
+        let a = Args::parse(&argv(&["--config", path.as_str(), "--profile", "dmz"])).unwrap();
+        assert_eq!(a.target_spec, "10.2.0.0/30");
+        assert_eq!(a.timeout_ms, 2500);
+        assert_eq!(a.concurrency, 4);
+        assert_eq!(a.mode, ProbeMode::Tcp { port: 445 });
+        assert_eq!(a.range, TargetRange::Standard);
+        assert!(a.validate().is_ok(), "模板填完就该能直接跑");
+    }
+
+    #[test]
+    fn m16_default_profile_is_used_when_profile_is_omitted() {
+        let path = write_config("default.toml", CFG);
+        let a = Args::parse(&argv(&["--config", path.as_str()])).unwrap();
+        assert_eq!(
+            a.target_spec, "10.1.0.0/30",
+            "没给 --profile 时用 default_profile"
+        );
+        assert_eq!(a.timeout_ms, 700);
+        assert_eq!(a.concurrency, 12);
+        assert_eq!(a.range, TargetRange::HostsOnly);
+    }
+
+    #[test]
+    fn m16_cli_values_always_win_over_the_profile() {
+        let path = write_config("cli-wins.toml", CFG);
+        let a = Args::parse(&argv(&[
+            "--config",
+            path.as_str(),
+            "--profile",
+            "dmz",
+            "-t",
+            "10.9.9.0/30",
+            "--timeout",
+            "1500",
+            "-c",
+            "9",
+            "--range",
+            "full",
+        ]))
+        .unwrap();
+        assert_eq!(a.target_spec, "10.9.9.0/30");
+        assert_eq!(a.timeout_ms, 1500);
+        assert_eq!(a.concurrency, 9);
+        assert_eq!(a.range, TargetRange::Full);
+        // mode 命令行没给 → 仍由模板提供
+        assert_eq!(a.mode, ProbeMode::Tcp { port: 445 });
+        // 「盖掉了什么」必须说出来，否则用户会以为模板没生效
+        let notes = a.config_notes.join("\n");
+        assert!(notes.contains("盖掉了模板"), "{notes}");
+        assert!(notes.contains("盖掉了配置里的对应值"), "{notes}");
+    }
+
+    #[test]
+    fn m16_same_value_is_not_reported_as_a_conflict() {
+        // 命令行给的值与模板一致时说「盖掉了」纯属噪音，会把真正的说明淹掉
+        let path = write_config("same.toml", CFG);
+        let a = Args::parse(&argv(&[
+            "--config",
+            path.as_str(),
+            "--profile",
+            "lan",
+            "-t",
+            "10.1.0.0/30",
+            "--timeout",
+            "700",
+        ]))
+        .unwrap();
+        let notes = a.config_notes.join("\n");
+        assert!(!notes.contains("盖掉了模板"), "{notes}");
+        assert!(!notes.contains("盖掉了配置里的对应值"), "{notes}");
+    }
+
+    #[test]
+    fn m16_unknown_profile_is_an_error_listing_what_exists() {
+        let path = write_config("unknown.toml", CFG);
+        let e = Args::parse(&argv(&["--config", path.as_str(), "--profile", "prod"])).unwrap_err();
+        assert!(e.contains("没有名为 \"prod\" 的模板"), "{e}");
+        // 报错要顺手列出现有模板，否则用户只能去翻文件
+        assert!(e.contains("lan") && e.contains("dmz"), "{e}");
+    }
+
+    #[test]
+    fn m16_notes_explain_where_each_field_came_from() {
+        let path = write_config("notes.toml", CFG);
+        let a = Args::parse(&argv(&["--config", path.as_str()])).unwrap();
+        let notes = a.config_notes.join("\n");
+        assert!(notes.contains("使用模板 lan"), "{notes}");
+        assert!(notes.contains("目标规格取自模板"), "{notes}");
+        assert!(notes.contains("模板提供："), "{notes}");
+    }
+
+    #[test]
+    fn m16_v1_config_is_migrated_and_still_readable() {
+        // v1 的写法只有 [probe]，`prefix` 就是目标
+        let v1 = "schema_version = 1\n\n[probe]\nprefix = \"10.5.0\"\nrange = \"full\"\n\
+                  timeout_ms = 900\nconcurrency = 48\nmode = \"icmp\"\ntcp_port = 80\n";
+        let path = write_config("v1.toml", v1);
+        let a = Args::parse(&argv(&["--config", path.as_str()])).unwrap();
+        assert_eq!(
+            a.target_spec, "10.5.0",
+            "v1 的 [probe].prefix 要顶上来当目标"
+        );
+        assert_eq!(a.range, TargetRange::Full);
+        assert_eq!(a.timeout_ms, 900);
+        assert_eq!(a.concurrency, 48);
+        let notes = a.config_notes.join("\n");
+        assert!(notes.contains("升级到 v2"), "迁移必须说出来：{notes}");
+    }
+
+    #[test]
+    fn m16_newer_schema_is_refused_not_guessed() {
+        let path = write_config("newer.toml", "schema_version = 99\n");
+        let e = Args::parse(&argv(&["--config", path.as_str(), "-t", "10.0.0.1"])).unwrap_err();
+        assert!(e.contains("拒绝读取"), "{e}");
+    }
+
+    #[test]
+    fn m16_broken_config_does_not_break_help_or_version() {
+        // 配置坏了也得能查用法——否则用户连「怎么改」都看不到
+        let path = write_config("broken-help.toml", "这不是 TOML\n");
+        assert!(
+            Args::parse(&argv(&["--config", path.as_str(), "--help"]))
+                .unwrap()
+                .help
+        );
+        assert!(
+            Args::parse(&argv(&["--config", path.as_str(), "-V"]))
+                .unwrap()
+                .version
+        );
+    }
+
+    #[test]
+    fn m16_help_documents_the_new_flags() {
+        for flag in ["--config", "--profile", "--list-profiles", "--dump-config"] {
+            assert!(HELP.contains(flag), "帮助里没有 {flag}");
+        }
+        assert!(HELP.contains("双方括号"), "要提醒 [[profiles]] 是双方括号");
+    }
+
+    #[test]
+    fn m16_describe_mentions_the_config_and_profile() {
+        let path = write_config("describe.toml", CFG);
+        let a = Args::parse(&argv(&["--config", path.as_str(), "--profile", "dmz"])).unwrap();
+        let text = a.describe();
+        assert!(text.contains("模板 dmz"), "{text}");
+        // 没给配置文件时不能凭空多出一段
+        assert!(!Args::parse(&argv(&["-t", "10.0.0.1"]))
+            .unwrap()
+            .describe()
+            .contains("配置"));
     }
 }

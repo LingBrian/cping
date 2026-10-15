@@ -57,6 +57,32 @@ fn run(argv: &[String]) -> i32 {
         print_notify_channels();
         return EXIT_OK;
     }
+    // M16：配置合并的说明必须先打出来——「模板改了哪几个参数」「哪条命令行盖掉了
+    // 配置里的值」正是用户排查「怎么跟我想的不一样」唯一能拿到的东西。
+    // 放在下面两个早退之前，是因为列模板 / 导出配置同样需要这层上下文。
+    print_config_notes(&parsed);
+
+    // M16：列出配置里的模板后退出。位置很关键：`validate()` 第一条校验就是
+    // 「必须有目标」，而列模板恰恰不需要目标——放到后面就永远列不出来了
+    // （与 --list-backends / --notify-list 同一处理）。
+    if parsed.list_profiles {
+        if let Err(msg) = print_profiles(&parsed) {
+            eprintln!("参数错误：{msg}");
+            return EXIT_USAGE;
+        }
+        return EXIT_OK;
+    }
+    // M16：把**这次实际生效**的参数固化成一份配置文件后退出。
+    // 这是「跑了一次满意的扫描，想让它下次一条 --config 就复现」的出口，
+    // 同样不需要目标（只固化探测参数也是合理用法）。
+    if let Some(path) = parsed.dump_config.clone() {
+        if let Err(msg) = write_effective_config(&parsed, &path) {
+            eprintln!("配置写出失败：{msg}");
+            return EXIT_USAGE;
+        }
+        return EXIT_OK;
+    }
+
     if let Err(msg) = parsed.validate() {
         eprintln!("参数错误：{msg}");
         return EXIT_USAGE;
@@ -215,7 +241,10 @@ impl Session {
     /// 主循环：跑完 `--rounds` 轮（或直到 Ctrl+C），返回退出码。
     fn run_rounds(&mut self) -> i32 {
         let thresholds = Thresholds::default();
-        if self.round == 1 && !self.args.quiet {
+        // 这里必须是 `== 0`：`self.round` 在下面的循环里才自增，写成 `== 1` 时
+        // 判断永远不成立，横幅一次也打不出来（M16 修）。横幅里带着
+        // `describe()`，也就是这次用了哪份模板——它不该静默消失。
+        if self.round == 0 && !self.args.quiet {
             println!(
                 "CPing {} · {} · {}",
                 cping_core::VERSION,
@@ -569,6 +598,161 @@ fn print_notify_channels() {
     println!("      https 的 webhook 请走 --notify-cmd 调 curl 等自带 TLS 的工具。");
 }
 
+// ---------------------------------------------------------------------------
+// M16：配置文件与模板
+// ---------------------------------------------------------------------------
+
+/// M16：把配置合并的说明逐条打出来。
+///
+/// 这几行**是 M16 的核心可用性要求，不是调试信息**：模板到底改了哪些参数、
+/// 哪一条命令行参数盖掉了模板的值，如果不说，用户只能对着「怎么跟我想的不一样」
+/// 反复试参数，而这恰恰是配置文件最容易招人恨的地方。
+///
+/// `--quiet` 下不打（那是给脚本用的模式），但**错误一律走 stderr**、不受 `--quiet`
+/// 影响——「配置读不动」必须让 CI 直接失败，而不是安静地按默认值跑。
+fn print_config_notes(args: &Args) {
+    if args.quiet || args.config_notes.is_empty() {
+        return;
+    }
+    println!("配置来源：");
+    for note in &args.config_notes {
+        println!("  · {note}");
+    }
+}
+
+/// M16：列出 `--config` 里的全部模板。
+///
+/// 与 `--list-backends` 同一套思路：把每份模板的**可核对项**都摊开
+/// （目标规格、解析出的目标数量、range、超时、并发、探测方式），
+/// 用户不必去读 TOML 就知道 `--profile` 该填哪个。目标规格解析不出来时
+/// 写「目标规格无法解析」而**不猜一个数字**——猜出来的数量会让用户以为配置是对的。
+fn print_profiles(args: &Args) -> Result<(), String> {
+    // `apply_config` 已保证 `--list-profiles` 一定伴随 `--config`，
+    // 这里仍然用 `ok_or_else` 而不是 `unwrap`：入口多了一条，就没有 unwrap 的理由。
+    let doc = args
+        .config_doc
+        .as_ref()
+        .ok_or_else(|| "--list-profiles 需要同时给 --config".to_string())?;
+    let path = args.config.as_deref().unwrap_or("");
+
+    println!(
+        "cping-cli {} · {} · 模板（{path}）",
+        cping_core::VERSION,
+        std::env::consts::OS
+    );
+    println!();
+    if doc.profiles.is_empty() {
+        println!("这份配置里没有任何模板。");
+        println!();
+        println!("加一份（注意是**双方括号**，写成 [profiles] 会被明确拒绝）：");
+        println!("  [[profiles]]");
+        println!("  name  = \"lan\"");
+        println!("  spec  = \"192.168.1\"");
+        println!("  note  = \"办公网段\"");
+        return Ok(());
+    }
+
+    // 不给 --profile 时会用 default_profile 那一份，标出来省得用户去猜
+    let auto = doc.default_profile.as_deref().unwrap_or("");
+    println!("{:<14} {:<24} 说明", "模板", "目标规格");
+    for p in &doc.profiles {
+        let tag = if !auto.is_empty() && p.name.eq_ignore_ascii_case(auto) {
+            "  ← default_profile"
+        } else {
+            ""
+        };
+        println!("{}{tag}", p.describe());
+    }
+    println!();
+    println!("用法：--config {path} --profile <模板名>");
+    if auto.is_empty() {
+        println!("     配置里没写 default_profile，必须显式给 --profile");
+    } else {
+        println!("     不给 --profile 时用 default_profile = {auto:?} 那一份");
+    }
+    if !doc.unknown_entries().is_empty() {
+        // 「不认识的键被保留了」是用户需要知道的事实：他不会以为被吃掉了
+        let n = doc.unknown_entries().len();
+        println!("     另有 {n} 个本程序不认识的键，已原样保留（写回时不变）");
+    }
+    Ok(())
+}
+
+/// M16：把**这次实际生效**的参数固化成一份配置文件。
+///
+/// 用途：手工调参跑通之后，一条 `--dump-config nightly.toml` 把它固化下来，
+/// 以后 `--config nightly.toml` 就能复现。
+///
+/// 三条刻意的取舍：
+/// 1. 以读到的文档为底（保住其它模板与不认识的键）；没读过 `--config` 就是新文档。
+/// 2. 目标规格只能落进**模板**：`[probe]` 的 `prefix` 只装得下单个 C 类前三段，
+///    装不下 CIDR 与多网段，硬塞会丢信息。模板名取 `--profile`，没给就用
+///    `default`——与 v1 迁移生成的模板同名，读回来是同一套语义。
+/// 3. 「这次跑要干什么」的参数（导出路径、`--history`、通知通道、告警规则）
+///    **刻意不写入**。它们不属于「扫什么、怎么扫」；写进去会让「换个模板」
+///    连通知一起换掉，排查起来是场噩梦。
+fn write_effective_config(args: &Args, path: &str) -> Result<(), String> {
+    let mut doc = args.config_doc.clone().unwrap_or_default();
+
+    // [probe] 记的是这次**生效**的探测参数（已含命令行覆盖的结果）
+    doc.app.probe.range = args.range;
+    doc.app.probe.timeout_ms = args.timeout_ms;
+    doc.app.probe.concurrency = args.concurrency;
+    doc.app.probe.mode = args.mode;
+
+    // 没有目标：导出成一份只含 [probe] 的配置。这不是错误——
+    // 「把探测参数固化下来、目标每次从命令行给」是合理用法。
+    if args.target_spec.trim().is_empty() {
+        doc.validate().map_err(|e| e.to_string())?;
+        doc.save_to_path(path).map_err(|e| e.to_string())?;
+        if !args.quiet {
+            println!("已写出配置（只含 [probe]，没有目标规格）→ {path}");
+            println!("提示：目标规格不在 [probe] 里（装不下 CIDR/多网段），请每次用 --target 指定");
+        }
+        return Ok(());
+    }
+
+    let name = match &args.profile {
+        Some(n) => n.trim().to_string(),
+        None => "default".to_string(),
+    };
+    // 同名的模板就地更新（保住它的 note 与不认识的键），没有就新建
+    let mut p = doc
+        .profile(&name)
+        .cloned()
+        .unwrap_or_else(|| cping_core::ScanProfile::new(name.clone(), ""));
+    let old_spec = p.spec.clone();
+    p.name = name.clone();
+    p.spec = args.target_spec.clone();
+    p.range = args.range;
+    p.timeout_ms = args.timeout_ms;
+    p.concurrency = args.concurrency;
+    p.mode = args.mode;
+    doc.upsert_profile(p);
+    // 指向刚写的那一份，这样 `--config <path>` 单独一条就能复现
+    doc.default_profile = Some(name.clone());
+
+    doc.validate().map_err(|e| e.to_string())?;
+    doc.save_to_path(path).map_err(|e| e.to_string())?;
+
+    if !args.quiet {
+        let count = parse_spec(&args.target_spec, args.range)
+            .ok()
+            .map(|s| format!("{} 个目标", s.len()))
+            .unwrap_or_else(|| "目标规格无法解析".to_string());
+        println!("已写出配置 → {path}");
+        println!("  模板 {name}：{}（{count}）", args.target_spec);
+        println!("  已设为 default_profile：下次直接 cping-cli --config {path}");
+        // 覆盖了原值就必须说出来——这是唯一会让人丢东西的地方
+        if !old_spec.is_empty() && old_spec != args.target_spec {
+            println!("  注意：模板 {name} 原有的目标规格 {old_spec:?} 已被当前生效值覆盖");
+        }
+        println!("  未写入（刻意不属模板）：--out / --json / --history / --report /");
+        println!("                          --alert-* / --notify-*");
+    }
+    Ok(())
+}
+
 fn print_round(
     round: u64,
     spec: &TargetSpec,
@@ -761,5 +945,120 @@ mod tests {
         };
         // 只要不 panic 即可；内容由手工冒烟确认（见 docs/testing.md §M10）
         print_round(1, &spec, &args, &outcome, &[]);
+    }
+
+    // ------------------------------------------------------------------
+    // M16：配置与模板（导出侧）
+    // ------------------------------------------------------------------
+
+    fn argv(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn m16_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("cping_cli_m16_dump_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn m16_dumped_config_round_trips_through_the_reader() {
+        let dir = m16_dir();
+        let path = dir.join("nightly.toml");
+        let p = path.to_str().unwrap();
+
+        let args = Args::parse(&argv(&[
+            "-t",
+            "10.7.0.0/30",
+            "-c",
+            "9",
+            "--timeout",
+            "1500",
+        ]))
+        .unwrap();
+        write_effective_config(&args, p).unwrap();
+
+        // 读回来必须拿到同一份生效参数——否则「固化下来」就是骗人的
+        let (doc, _) = cping_core::ConfigDocument::load_from_path(p).unwrap();
+        let prof = doc
+            .select_profile(None)
+            .unwrap()
+            .expect("应写出模板并设为默认，否则 --config 单独一条复现不了");
+        assert_eq!(prof.spec, "10.7.0.0/30");
+        assert_eq!(prof.timeout_ms, 1500);
+        assert_eq!(prof.concurrency, 9);
+
+        // 再走一遍命令行合并，结果应与首次一致
+        let again = Args::parse(&argv(&["--config", p])).unwrap();
+        assert_eq!(again.target_spec, "10.7.0.0/30");
+        assert_eq!(again.timeout_ms, 1500);
+        assert_eq!(again.concurrency, 9);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn m16_dumped_config_keeps_unknown_keys() {
+        let dir = m16_dir();
+        let src = dir.join("with-unknown.toml");
+        std::fs::write(
+            &src,
+            "schema_version = 2\n\n[probe]\nprefix = \"\"\nrange = \"standard\"\n\
+             timeout_ms = 1000\nconcurrency = 32\nmode = \"icmp\"\ntcp_port = 80\n\n\
+             [my_plugin]\nhook = \"on_scan_start\"\n",
+        )
+        .unwrap();
+        let dst = dir.join("kept.toml");
+        let d = dst.to_str().unwrap();
+
+        let args = Args::parse(&argv(&[
+            "--config",
+            src.to_str().unwrap(),
+            "-t",
+            "127.0.0.1",
+        ]))
+        .unwrap();
+        write_effective_config(&args, d).unwrap();
+
+        // 不认识的键必须原样留在文件里，而且是「还认得出来」的形态
+        let (doc, _) = cping_core::ConfigDocument::load_from_path(d).unwrap();
+        assert!(
+            doc.unknown_entries()
+                .iter()
+                .any(|e| e.path() == "my_plugin.hook"),
+            "{:?}",
+            doc.unknown_entries()
+        );
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&dst);
+    }
+
+    #[test]
+    fn m16_dump_without_target_writes_probe_only() {
+        let dir = m16_dir();
+        let path = dir.join("probe-only.toml");
+        let p = path.to_str().unwrap();
+        let args = Args::parse(&argv(&["-c", "64", "--timeout", "2500"])).unwrap();
+        write_effective_config(&args, p).unwrap();
+
+        let (doc, _) = cping_core::ConfigDocument::load_from_path(p).unwrap();
+        assert!(doc.profiles.is_empty(), "没给目标就不该凭空造一份模板");
+        assert_eq!(doc.app.probe.concurrency, 64);
+        assert_eq!(doc.app.probe.timeout_ms, 2500);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn m16_dump_write_failure_is_reported_not_swallowed() {
+        let dir = m16_dir();
+        // 父路径是个**文件**，写文件必然失败
+        let blocker = dir.join("blocker-file");
+        std::fs::write(&blocker, "").unwrap();
+        let bad = blocker.join("x.toml");
+        let args = Args::parse(&argv(&["-t", "127.0.0.1"])).unwrap();
+        assert!(
+            write_effective_config(&args, bad.to_str().unwrap()).is_err(),
+            "写不出去必须报错——安静地什么都不写是最坏的结果"
+        );
+        let _ = std::fs::remove_file(&blocker);
     }
 }
