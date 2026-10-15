@@ -278,7 +278,10 @@ impl TimeSeries {
         let mut merges = 0usize;
         while self.points.len() > self.max_points && self.points.len() >= 2 {
             let half = (self.points.len() / 2).max(1);
-            let drained: Vec<SeriesPoint> = self.points.drain(..).collect();
+            // 用 `mem::take` 而不是 `drain(..).collect()`：后者会把整条数列搬进一个
+            // 新建的 Vec（多一次分配），而这里本来就只是「取走全部、稍后整体换回去」。
+            // 新版 clippy 的 `drain_collect` lint 会指出这一点（rustc 1.99 起）。
+            let drained: Vec<SeriesPoint> = std::mem::take(&mut self.points);
             let mut merged: Vec<SeriesPoint> = Vec::with_capacity(half + 1);
             let mut iter = drained.into_iter().peekable();
             while let Some(mut cur) = iter.next() {

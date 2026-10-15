@@ -100,6 +100,9 @@ Rust 目标：`aarch64-linux-android`、`armv7-linux-androideabi`、
 - [ ] 生成 Android keystore 并配置 release 签名（当前 release APK 未签名）
 - [ ] 复核 `docs/platform-compatibility.md` 的平台结论
 - [ ] 确认默认并发（32）与超时（1000ms）在真实网络下的表现
+- [ ] **把本地 Rust 工具链对齐 CI 再跑门禁**（`rustup update stable` 后核对
+      `rustc --version` 与 CI 的 `stable` 一致）。本地版本落后时「全绿」不成立，
+      新 lint 只会在 CI 上炸（v2.7.0 发布时踩过，见 §9 第 4 条）
 
 ## 6. v1.1.0 产物（M7，2026-10-14）
 
@@ -274,4 +277,27 @@ gh run list --workflow=ci.yml --limit 1    # 期望 completed / success
 > 上面 10 个产物是在**修复前**的提交上构建的。两处修复都不改变编译进二进制的
 > 内容（一处是构建配置、一处是数据文件的换行符，而本机构建时该文件本来就是 LF），
 > 因此产物有效、无需重建；`SHA256SUMS.txt` 仍与线上附件逐字节对应。
+
+## 9. v2.7.0 发布（M19，2026-10-15）
+
+远端此前只发布到 **v2.0.0**，`main` 停在 `6a96a16`；此后 M13–M19 七个里程碑的
+提交与 v2.1.0–v2.7.0 七个 tag 都只在本地。本次按 §8.4 的纪律——「先推 `main`、
+CI 绿了再推 tag」——发布 v2.7.0。
+
+发布前预检抓到**四个**问题，全部属于「本机看着正常、到 CI/别人机器上才发作」这一类：
+
+| # | 问题 | 后果 | 修法 |
+| --- | --- | --- | --- |
+| 1 | `apps/cping-gui/src-tauri/Cargo.lock` 漏更新（仍写 2.6.0，`Cargo.toml` 已是 2.7.0） | `--locked` 直接报 `cannot update the lock file`；CI 的 `gui-shell` 与发布链路的 `linux-gui` 全红 | `cargo build --release` 就地补齐（差异只有两行版本号） |
+| 2 | `release.yml` 的 `windows` job 只构建 TUI + CLI | 自动链路**从来没有** Windows 桌面版——v2.0.0 那个 `.exe` 是本机人工构建后上传的 | 新增 `windows-gui` job；签名步骤排在**打包之前** |
+| 3 | `publish.needs` 漏掉 `linux-gui`（自 v2.0.0 引入该 job 起就漏） | 这是**竞态**：顺序一反过来，deb / AppImage 会**静默缺席且不报错** | 补全为覆盖**每一个**产出 artifact 的 job |
+| 4 | 本地 `stable` 工具链落后于 CI（1.97.1 vs 1.99.0） | 推 `main` 后首次 CI 被新 lint `clippy::drain_collect` 打红 | 修代码（`drain(..).collect()` → `mem::take`）+ 对齐工具链后**全量重检** |
+
+第 4 条最值得记：**「本地全绿」在工具链版本不一致时没有意义**。CI 自 10-14 起
+就没跑过，`stable` 已前进两个小版本；本地 `rustup update stable` 到 1.99 后，
+`cargo clean -p` 掉三个自有 crate **强制重检**了全工作区与 GUI 壳（各一次真实全量
+编译），确认只有这一条。复核用的是**负向验证**：还原旧写法后，本地 clippy 复现出
+与 CI **逐字相同**的报错（同文件同列 `crates/cping-core/src/timeseries.rs:281:45`）。
+
+产物清单与 SHA256 见该 Release 附件；产品侧变更见 `docs/release-notes-v2.7.0.md`。
 

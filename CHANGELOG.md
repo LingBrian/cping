@@ -123,6 +123,16 @@
   直接报 `cannot update the lock file ... because --locked was passed`——
   CI 的 `gui-shell` job 与发布链路的 `linux-gui` job 都会红。此前每个版本都会
   同步更新它，这一步是 M19 第三步升版本号时的疏漏，**发布前预检才抓到**。
+- **推送后首次 CI 被一条新 clippy lint 打红，根因是工具链漂移**：
+  `core` job 在 `stable` 前进到 **1.99.0** 后报 `clippy::drain_collect`——
+  `crates/cping-core/src/timeseries.rs` 的降采样写的是
+  `self.points.drain(..).collect()`，语义本就是「取走全部、稍后整体换回去」，
+  却多建了一个 `Vec`。改用 `std::mem::take`（行为等价、少一次分配）。
+  这条**做过负向验证**：还原旧写法后，本地 1.99 的 clippy 复现出与 CI **逐字相同**
+  的报错（同文件同列 `timeseries.rs:281:45`），改回即转绿。CI 自 10-14 起就没跑过，
+  `stable` 已从 1.97 前进到 1.99——本地把工具链对齐后**清掉自有 crate 缓存重检**
+  了全工作区与 GUI 壳，确认这是唯一一条（`windows` job 的 `cargo test --workspace`
+  在 1.99 下本来就是绿的，说明只有 lint 与代码无关）。
 
 ## [2.6.0] - 2026-10-15
 
