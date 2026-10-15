@@ -541,7 +541,75 @@ Windows 上同一个用例（连确定关闭的端口）表现为超时，用 Py
 这也是为什么要加第 9 条那个静态守卫，靠人记不住。修复后在 CRLF 条件下重跑了完整
 `cping-core` 套件（236 passed / 0 failed）复现验证，再还原为 LF 并逐字节比对备份。
 
+## M17–M18：安全合规 · 国际化（460 → 507 个测试）
+
+### 测试结果（2026-10-15）
+
+| 阶段 | 版本 | 测试数 | 变化 |
+| --- | --- | --- | --- |
+| M15 收尾 | v2.3.0 | 393 | 基线 |
+| M16 配置与模板 | v2.4.0 | 430 | CLI 28 → 45，核心 +20（`profile`） |
+| M17 安全与合规 | v2.5.0 | 460 | CLI 45 → 51，TUI 43 → 47，核心 +20（`policy`） |
+| M18 第一步（i18n） | v2.6.0 途中 | **507** | 核心 266 → 291，CLI 51 → 62，TUI 47 → 58 |
+
+`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`
+均干净。GUI 的 `src-tauri` **不在 workspace members 里**，要单独跑 clippy；
+GUI 前端跑 `npm run typecheck`（含 `node scripts/check-i18n.mjs`）与 `npm run build`。
+
+### M17 真实冒烟（Windows 本机，debug 真实二进制）
+
+1. 首次运行打印授权告知并落 `~/.cping/consent`；第二次不再打印
+2. **限速实测**：`127.0.0.0/24`（254 目标）`--max-pps 0` = **644 ms**，
+   `--max-pps 50` = **4708 ms**（理论 ≈ 启动 0.6 s + 突发 50 + 其余 204÷50 ≈ 4.08 s）
+3. `-t 224.0.0.0/29` → 退出码 2「组播地址：一个探测会打扰整组主机」+ 放行提示
+4. `-t 192.0.2.5` → 退出码 2「文档示例网段 TEST-NET-1（RFC 5737）」
+5. `--max-targets 70000` → 「只能收紧，不能放宽」；`--max-pps 100001` → 「要关闭限速请写 0」
+6. `--audit x.jsonl` + `--watch 1 --rounds 3` → 首行 `CPING-AUDIT 1`，
+   事件序列 `session_start / round ×3 / session_end`，`exitCode` 只在 `session_end`
+7. 审计路径指向别人的文件 → 退出码 2「不是 CPing 审计文件，拒绝追加」
+8. `artifact-manifest.sh` 无密钥 → `signed: false` + 补签方法；坏密钥 → 显式报错
+
+### M18 真实冒烟（Windows 本机，debug 真实二进制）
+
+1. `cping-cli --lang en --help` → 全文**零中日韩字符**
+2. `cping-cli --lang zh --help` → 中文原文
+3. `cping-cli --lang en -t 224.0.0.0/29` → 退出码 2，
+   stderr 为英文的 `argument error: target 224.0.0.1 is in a reserved range: ...`
+   + `hint: add --allow-reserved if you really mean to scan this; ...`
+4. `cping-cli --lang zh -t 224.0.0.0/29` → 同一判定、中文提示、退出码 2
+5. `cping-cli --lang fr` → 退出码 2，报 `--lang value "fr" is invalid;
+   expected zh or en` 并打印帮助（**没有静默回退**）
+6. `cping-tui --lang en --help` → 零中日韩字符；`--lang zh --help` → 中文
+7. GUI：`node scripts/check-i18n.mjs` →「zh/en 各 241 条词条，键一致、
+   无中文残留、占位符个数一致」
+
+### 这两轮踩到的坑（值得记住的）
+
+- **限速的「对不对」只能靠时间量**：`--max-pps 0` 与 `--max-pps 50` 的耗时差
+  必须与「目标数 ÷ pps」吻合，否则限速可能根本没生效却看不出来。
+  这类**数值型行为**要在真实二进制上量一次，不能只靠单元测试。
+- **`cargo fmt --all` 会在并发改文件时格式化到别人的中间态**：
+  多个任务同时改不同 crate 时，收尾要统一再 fmt 一次，
+  但**别在中间态下 commit**。
+- **跨层重构要先把下层 API 做完再委派上层**：否则子代理只能用临时代码兜住，
+  事后还要收敛一遍（M18 第一步的 CLI/TUI 桥接就是这么留下的）。
+- **子代理的「我不能改 X」会造成重复实现**：委派时要么先补好下层，
+  要么明确要求它把「上层临时桥接」列成清单交回来。
+- **GUI 的 `src-tauri` 不在 workspace 里**：`cargo clippy --workspace` 覆盖不到它，
+  必须单独跑，否则容易漏掉 lint。
+- **README 的测试徽章是手工数字**：改完测试要顺手改它（这轮从 336 校正到 507）。
+
 ## 尚未完成的验证
+
+- **M17**：gpg **成功**签名路径（Git Bash 下 `GNUPGHOME` 解释不一致，
+  只跑通「导入失败 → 显式报错」分支）、Windows Authenticode 与 Android **正式**
+  签名（本机无证书 / keystore）、`sign-windows.ps1` 未在真实 PowerShell 跑过、
+  Linux deb 签名（本仓库不产 deb）、TUI/GUI 限速的人工键盘与点击冒烟
+- **M18**：三端在非中文 Windows / 纯英文 Linux 上的**默认语言推断**
+  （本机测的是显式 `--lang` 与 Git Bash 环境变量）；GUI 的语言切换与
+  `localStorage` 持久化**未在真机点过**；TUI 英文模式下的终端观感（列宽对齐）
+  未人工确认；GUI 里**由 Rust 侧生成**的文本（状态列、资产摘要、趋势与告警面板）
+  切到英文仍是中文——这是 M18 第二步要解决的
 
 - **Android 真机**：模拟器已覆盖大部分；真机差异项见上
 - **Linux 平台**：原生 ICMP 与 TCP 已在 WSL Debian 内实测（见上）；
